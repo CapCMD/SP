@@ -1,0 +1,56 @@
+# ===================================================================
+#  FENETRE — MISSION M00 "LA MANOEUVRE QUI FERME LE BILAN"
+#  Tutoriel. Orbite de parking LEO 200 km / 28.5 deg  ->  GEO.
+#
+#  CE FICHIER EST LA SOLUTION DE REFERENCE.
+#  Le joueur, lui, part d'un fichier vide et d'un cahier des charges.
+#  Chaque nombre ci-dessous, il doit le CALCULER.
+#
+#  RAPPEL DE FORMAT : tout nombre porte son unite. Un nombre nu est
+#  une erreur de parsing. Un nombre sans dimension porte le token '-'.
+# ===================================================================
+
+MISSION      m00_geo
+
+# --- modele de verite ------------------------------------------------
+CENTER       EARTH
+PERTURBERS   SUN MOON
+EPOCH        2027-03-14T00:00:00
+
+# --- vehicule --------------------------------------------------------
+# RL10C-1 : LOX/LH2, le meilleur Isp disponible au catalogue.
+# Contrepartie (V1) : delai d'approvisionnement long, ebullition du LH2,
+# fraction de reservoir mediocre (12 %) a cause de la densite de l'hydrogene.
+ENGINE       id=RL10C1 thrust=101.8kN isp=449.7s mass=190kg mr=5.88-
+
+STAGE        id=US1 engine=RL10C1 propellant=3650kg tank_dry_frac=0.12- \
+             structure=150kg residual=0.02-
+PAYLOAD      1200kg
+
+# --- orbite de parking (livree par le lanceur) -----------------------
+# ta=0deg : le vaisseau est AU NOEUD ASCENDANT. Ce n'est pas un detail :
+# c'est la condition pour que l'apogee du GTO tombe sur un noeud, seul
+# endroit ou le changement de plan est realisable.
+ELEMENTS     sma=6578.137km ecc=0.0- inc=28.5deg raan=0.0deg argp=0.0deg ta=0.0deg
+
+# --- erreurs d'execution (Gates 1963) --------------------------------
+GATES        mag_fixed=0.02m/s mag_prop=0.002- point_fixed=0.02m/s point_prop=0.0015-
+
+# --- plan de vol -----------------------------------------------------
+# GTO : injection prograde pure au perigee.
+#   v_c(6578.137 km) = 7784.3 m/s ; v_p(GTO) = 10238.9 m/s -> dv = 2454.6 m/s
+BURN         id=GTO t=0s frame=RSW hold=INERTIAL dv=[0,2454.6,0]m/s stage=0
+
+# GOI : insertion GEO + changement de plan COMBINES a l'apogee.
+#   v_a(GTO) = 1597.3 m/s ; v_GEO = 3074.6 m/s ; di = 28.5 deg
+#   composante S : v_GEO*cos(di) - v_a =  1104.7 m/s
+#   composante W : v_GEO*sin(di)       =  1467.1 m/s
+#   |dv| = 1836.5 m/s   (contre 2990.9 m/s si on separe les deux manoeuvres)
+BURN         id=GOI t=18931.9s frame=RSW hold=INERTIAL dv=[0,1104.7,1467.1]m/s stage=0
+
+STOP         t=30000s
+
+# --- objectifs contractuels ------------------------------------------
+GOAL         sma=42164.17km tol=50km
+GOAL         ecc=0.0- tol=0.002-
+GOAL         inc=0.0deg tol=0.25deg

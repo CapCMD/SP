@@ -1,0 +1,16 @@
+# Visual Studio
+.vs/
+*.VC.db
+*.suo
+
+# Unreal Engine
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+Space Program/assets/3D models/
+
+# Build files
+*.pch
+*.obj
+*.pdb
