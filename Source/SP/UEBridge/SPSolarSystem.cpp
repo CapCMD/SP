@@ -1,17 +1,34 @@
-// SPSolarSystem.cpp — portage UE de solar_system_map (scène + orbites + caméra).
+﻿// SPSolarSystem.cpp — LA CARTE DU SYSTÈME SOLAIRE (écran principal du jeu).
+// Portage UE5 natif de render/app/solar_system_map.cpp (référence Vulkan `spr`).
 //
-// ÉCHELLE CARTE (déclarée, comme toute approximation [GDD 6.8]) :
-//   1 UA = 50 000 unités UE (500 m). Neptune à 30 UA = 15 km de scène : trivial
-//   pour les coordonnées double d'UE5 (LWC). Les positions restent en double de
-//   l'éphéméride jusqu'au composant.
-//   Rayons visuels EXAGÉRÉS (une carte, pas une maquette) : x200 planètes,
-//   x8 Soleil, bornés [120..2600] u. Distances des lunes x20 pour sortir de la
-//   sphère visuelle exagérée de leur planète (masquées par défaut).
-//   Repère : écliptique J2000 (droitier, z-up) -> UE (gaucher, z-up) via y -> -y.
+// ═══ ÉCHELLE VRAIE ═══ (plus aucune exagération à déclarer)
+//   1 unité UE = 1 km. Les rayons sont les rayons RÉELS, les distances les
+//   distances RÉELLES : la Terre fait 6 371 u de rayon, l'orbite GEO 42 164 u,
+//   Neptune est à 4,5e9 u. Une planète devient donc sous-pixellique dès qu'on
+//   s'éloigne — c'est le comportement voulu (`body_min_size = 0` de la
+//   référence) : le HUD prend alors le relais avec un MARQUEUR et un libellé.
+//
+// ═══ RENDU RELATIF À LA CAMÉRA (floating origin) ═══
+//   Les positions viennent de l'éphéméride en double (m), sont converties en km
+//   double, et l'ORIGINE DE RENDU EST L'ŒIL : on place chaque objet à
+//   (monde − œil). La caméra reste à l'origine du monde UE. Conséquence : la
+//   précision est maximale là où on regarde, et l'erreur relative d'un corps
+//   lointain (float, ~1e-7) reste très inférieure au pixel.
+//   Repère : écliptique J2000 (droitier, z-up) -> UE (gaucher, z-up) via y -> −y.
+//
+// ═══ L'ENTRÉE EST NATIVE, LE PONT RESTE LA FRONTIÈRE ═══
+//   Depuis le passage en rendu total UE5, la souris et le clavier arrivent
+//   normalement dans le pipeline UE (ASPPlayerController) : c'est lui qui
+//   COMMANDE la caméra via le pont (RenderBridge::cam), et ce fichier
+//   l'APPLIQUE. En retour il PUBLIE la projection écran des corps
+//   (RenderBridge::screen), dont se servent le HUD pour ses marqueurs et
+//   libellés, et le contrôleur pour le picking. Sens unique des deux côtés.
 
 // Les entêtes du jeu AVANT tout entête UE (macros PI/check, cf. SP.Build.cs).
 #include "app/bridge_flags.hpp"
+#include "app/scaled_space.hpp"
 #include "fen/core/Constants.hpp"
+#include "fen/ephem/BodyOrientation.hpp"
 #include "fen/ephem/Ephemeris.hpp"
 
 #include "SPSolarSystem.h"
@@ -19,30 +36,33 @@
 #include "AssetRegistry/AssetData.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Camera/CameraActor.h"
+#include "Camera/CameraComponent.h"
 #include "Components/LineBatchComponent.h"
 #include "Components/PointLightComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "Engine/Engine.h"
+#include "Engine/GameViewportClient.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
-#include "Kismet/KismetMathLibrary.h"
+#include "HAL/IConsoleManager.h"
 #include "Materials/MaterialInstanceDynamic.h"
 
 namespace {
 
 using fen::ephem::Body;
 
-struct FBodyDef {
+struct FBodyDef
+{
 	Body B;
 	Body Parent;             // Sun pour les planètes ; la planète pour les lunes
 	const TCHAR* Asset;      // nom d'asset sous /Game/SolarSystem (import GLB)
-	FLinearColor Color;      // repli si le GLB n'est pas importé
+	FLinearColor Color;      // repli si le GLB n'est pas importé ; couleur du marqueur
 	bool bMoon;
-	// Rotation propre : période SIDÉRALE vraie en heures, négatif = rétrograde
-	// (Vénus, Uranus, Pluton). L'angle est une fonction DÉTERMINISTE de
-	// l'époque (θ = 2π·t/T), pas une accumulation par frame : la carte montre
-	// l'état au temps de jeu. Axe = normale à l'écliptique — l'obliquité est
-	// ignorée : approximation DÉCLARÉE (HUD), pas une vérité.
+	// Période SIDÉRALE vraie en heures (négatif = rétrograde). N'est utilisée QUE
+	// comme repli pour un corps sans éléments IAU : l'orientation réelle (axe +
+	// obliquité + méridien origine) vient désormais de `ephem/BodyOrientation`
+	// (WGCCRE), fonction déterministe de l'époque. Jalon B2 (IAU) : LEVÉ.
 	double SpinH;
 };
 
@@ -62,44 +82,41 @@ const FBodyDef GBodies[] = {
 };
 constexpr int32 NUM_BODIES = UE_ARRAY_COUNT(GBodies);
 
-constexpr double UU_PER_AU = 50000.0;
-constexpr double UU_PER_M = UU_PER_AU / fen::cst::AU;
-constexpr double PLANET_EXAG = 200.0;
-constexpr double SUN_EXAG = 8.0;
-constexpr double MOON_DIST_EXAG = 20.0;
-constexpr double ORBIT_REDRAW_DAYS = 5.0;   // dérive des éléments : invisible en deçà
-constexpr int32 ORBIT_SAMPLES = 128;
-constexpr int32 FLEET_PER_CAT = 6;          // marqueurs affichés max par catégorie
-constexpr int32 FLEET_GEO0 = 0, FLEET_MARS0 = 6, FLEET_PROBE0 = 12, FLEET_GEOFLIGHT = 18;
-constexpr int32 FLEET_TOTAL = 19;
+// ═══ ÉCHELLE : 1 u = 1 km. Aucune exagération, aucun plancher. ═══
+constexpr double KM_PER_M = 1.0e-3;
+constexpr int32  ORBIT_SAMPLES = 192;
+constexpr double ORBIT_REDRAW_DAYS = 2.0;      // dérive d'éphéméride sous le pixel
+constexpr int32  FLEET_PER_CAT = 6;
+constexpr int32  FLEET_GEO0 = 0, FLEET_MARS0 = 6, FLEET_PROBE0 = 12, FLEET_GEOFLIGHT = 18;
+constexpr int32  FLEET_TOTAL = 19;
+// Taille ANGULAIRE des marqueurs de scène (fraction de la distance à l'œil) :
+// ils gardent une taille écran constante quel que soit le zoom.
+constexpr double MARKER_ANG = 0.0022;
 
-// Vue rapprochée Terre (vol GEO) : scène géocentrique 1:1 déportée LOIN de la
-// carte (jamais superposée). 1 u = 100 m -> GEO (42 164 km) = 4,2 km de scène.
-constexpr double KM_UU = 10.0;
-const FVector CLOSE_ORIGIN(6.0e6, 0.0, 0.0);
+// ═══ COMPRESSION DE PROFONDEUR (« scaled space ») ═══
+// Le contrat, ses garanties et ses oracles vivent dans app/scaled_space.hpp
+// (C++ pur, testable hors moteur) : ici on ne fait que l'appliquer. En résumé :
+// au-delà de D0 on rapproche radialement l'objet ET on réduit son rayon de la
+// même homothétie, donc la projection écran reste EXACTE ; seule la profondeur
+// est comprimée, de façon monotone.
+FVector CompressKm(const FVector& RelKm, double* OutFactor = nullptr)
+{
+	const double F = fen::app::scaled_space_factor(RelKm.Size());
+	if (OutFactor) *OutFactor = F;
+	return (F == 1.0) ? RelKm : RelKm * F;
+}
 
 // L'éphéméride Standish est sans état : une instance partagée suffit.
 const fen::ephem::StandishEphemeris GEph;
 
-// écliptique (droitier) -> UE (gaucher) : miroir en y. DÉCLARÉ, jamais caché.
-FVector ToUE(const fen::Vec3& Meters)
+// écliptique (droitier, m) -> UE (gaucher, km) : miroir en y. DÉCLARÉ.
+FVector EclToUeKm(const fen::Vec3& Meters)
 {
-	return FVector(Meters.x * UU_PER_M, -Meters.y * UU_PER_M, Meters.z * UU_PER_M);
+	return FVector(Meters.x * KM_PER_M, -Meters.y * KM_PER_M, Meters.z * KM_PER_M);
 }
-FVector ToUEd(double Xm, double Ym, double Zm)
+FVector EclToUeKmd(double Xm, double Ym, double Zm)
 {
-	return FVector(Xm * UU_PER_M, -Ym * UU_PER_M, Zm * UU_PER_M);
-}
-// km géocentriques -> scène rapprochée (même miroir y que la carte).
-FVector ToClose(double Xkm, double Ykm, double Zkm)
-{
-	return CLOSE_ORIGIN + FVector(Xkm * KM_UU, -Ykm * KM_UU, Zkm * KM_UU);
-}
-
-double VisualRadiusUU(const FBodyDef& Def)
-{
-	const double Exag = (Def.B == Body::Sun) ? SUN_EXAG : PLANET_EXAG;
-	return FMath::Clamp(fen::ephem::body_radius(Def.B) * UU_PER_M * Exag, 120.0, 2600.0);
+	return FVector(Xm * KM_PER_M, -Ym * KM_PER_M, Zm * KM_PER_M);
 }
 
 const FBodyDef* FindDef(Body B)
@@ -108,29 +125,76 @@ const FBodyDef* FindDef(Body B)
 	return nullptr;
 }
 
-// Position monde UE d'un corps à l'époque donnée (lunes : distance exagérée
-// autour de la position COURANTE de leur planète).
-FVector BodyWorldPos(const FBodyDef& Def, double EpochTdb)
+// Rayon VRAI du corps, en km (aucune exagération).
+double BodyRadiusKm(Body B)
 {
-	const fen::Epoch E{EpochTdb};
-	if (Def.B == Body::Sun) return FVector::ZeroVector;
-	if (!Def.bMoon) return ToUE(GEph.state(Def.B, Body::Sun, E).r);
-	const FBodyDef* Parent = FindDef(Def.Parent);
-	const FVector ParentPos = Parent ? BodyWorldPos(*Parent, EpochTdb) : FVector::ZeroVector;
-	return ParentPos + ToUE(GEph.state(Def.B, Def.Parent, E).r) * MOON_DIST_EXAG;
+	return fen::ephem::body_radius(B) * KM_PER_M;
 }
 
-// Période orbitale par vis-viva : a = 1/(2/r - v^2/mu), T = 2*pi*sqrt(a^3/mu).
+// Position MONDE d'un corps (km, axes UE, héliocentrique). Les lunes sont à leur
+// distance RÉELLE de leur planète : à l'échelle vraie, rien n'a besoin d'être
+// écarté artificiellement.
+FVector BodyWorldKm(const FBodyDef& Def, double EpochTdb)
+{
+	if (Def.B == Body::Sun) return FVector::ZeroVector;
+	const fen::Epoch E{EpochTdb};
+	if (Def.bMoon)
+	{
+		const FVector ParentPos = (Def.Parent == Body::Sun)
+			? FVector::ZeroVector
+			: EclToUeKm(GEph.state(Def.Parent, Body::Sun, E).r);
+		return ParentPos + EclToUeKm(GEph.state(Def.B, Def.Parent, E).r);
+	}
+	return EclToUeKm(GEph.state(Def.B, Body::Sun, E).r);
+}
+
+// Période orbitale (s) autour du parent, tirée de l'état réel (vis-viva) — pas
+// d'une table : c'est l'éphéméride qui décide.
 double OrbitalPeriodS(const FBodyDef& Def, double EpochTdb)
 {
-	const auto PV = GEph.state(Def.B, Def.Parent, fen::Epoch{EpochTdb});
-	const double R = fen::norm(PV.r), V2 = fen::norm2(PV.v);
-	const double Mu = fen::ephem::body_mu(Def.Parent);
-	const double A = 1.0 / (2.0 / R - V2 / Mu);
-	if (A <= 0.0) return 0.0;               // non elliptique : pas de trace fermée
-	// UE_DOUBLE_TWO_PI et pas fen::cst::TWO_PI : UnrealMathUtility definit TWO_PI
-	// en MACRO — toute constante fen homonyme est inutilisable apres les includes UE.
+	if (Def.B == Body::Sun) return 0.0;
+	const Body Centre = Def.bMoon ? Def.Parent : Body::Sun;
+	const fen::ephem::PosVel PV = GEph.state(Def.B, Centre, fen::Epoch{EpochTdb});
+	const double Mu = fen::ephem::body_mu(Centre);
+	const double R = FMath::Sqrt(PV.r.x * PV.r.x + PV.r.y * PV.r.y + PV.r.z * PV.r.z);
+	const double V2 = PV.v.x * PV.v.x + PV.v.y * PV.v.y + PV.v.z * PV.v.z;
+	if (R <= 0.0 || Mu <= 0.0) return 0.0;
+	const double Denom = 2.0 / R - V2 / Mu;         // 1/a (vis-viva)
+	if (Denom <= 0.0) return 0.0;                    // trajectoire non fermée
+	const double A = 1.0 / Denom;
+	// UE_DOUBLE_TWO_PI et pas fen::cst::TWO_PI : UnrealMathUtility définit TWO_PI
+	// en MACRO — toute constante fen homonyme est inutilisable après les includes UE.
 	return UE_DOUBLE_TWO_PI * FMath::Sqrt(A * A * A / Mu);
+}
+
+// Orientation propre à l'époque = INCLINAISON (obliquité IAU) + ROTATION propre
+// (angle du méridien origine W(t)). Le pôle vient de `ephem::spin_axis_ecliptic`
+// (repère écliptique J2000), converti en UE par le MÊME miroir y que les
+// positions. Le miroir change la chiralité : une rotation directe en écliptique
+// devient −W en UE — d'où le signe négatif, cohérent avec l'ancien yaw −θ.
+// Fonction PURE de l'époque : déterministe, rejouable. [IAU WGCCRE]
+FQuat OrientationAt(const FBodyDef& Def, double EpochTdb)
+{
+	using namespace fen::ephem;
+	if (!has_orientation(Def.B))
+	{
+		// Repli : aucun élément IAU pour ce corps -> axe = normale écliptique et
+		// rotation par la période sidérale (comportement historique, sans obliquité).
+		if (Def.SpinH == 0.0) return FQuat::Identity;
+		const double Tsid = Def.SpinH * 3600.0;
+		const double Theta = UE_DOUBLE_TWO_PI * FMath::Frac(EpochTdb / Tsid);
+		return FQuat(FVector::UpVector, -Theta);
+	}
+	// Pôle nord IAU en écliptique -> UE (miroir y), unitaire.
+	const fen::Vec3 Ax = spin_axis_ecliptic(Def.B);
+	const FVector AxisUe = FVector(Ax.x, -Ax.y, Ax.z).GetSafeNormal();
+	// Inclinaison : amener +Z local (pôle du mesh) sur l'axe réel du corps.
+	const FQuat Tilt = FQuat::FindBetweenNormals(FVector::UpVector, AxisUe);
+	// Rotation propre autour de ce pôle par l'angle du méridien origine W(t). Un
+	// taux W négatif (Vénus, Uranus) donne naturellement une rotation rétrograde.
+	const double Wdeg = prime_meridian_deg(Def.B, fen::Epoch{EpochTdb});
+	const FQuat Spin = FQuat(AxisUe, -FMath::DegreesToRadians(Wdeg));
+	return Spin * Tilt;
 }
 
 UStaticMesh* FindImportedMesh(const TCHAR* AssetName)
@@ -215,20 +279,19 @@ void USPSolarSystemSubsystem::BuildScene()
 		LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Sphere.Sphere"));
 	UMaterialInterface* BaseMat = LoadObject<UMaterialInterface>(
 		nullptr, TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
-	// Soleil et marqueur vaisseau : émissifs (param vectoriel "Color" vérifié).
+	// Soleil et marqueurs : émissifs (param vectoriel "Color" vérifié dans l'uasset).
 	UMaterialInterface* EmissiveMat = LoadObject<UMaterialInterface>(
 		nullptr, TEXT("/Engine/EngineMaterials/EmissiveMeshMaterial.EmissiveMeshMaterial"));
 
 	for (const FBodyDef& Def : GBodies)
 	{
 		UStaticMeshComponent* C = NewObject<UStaticMeshComponent>(MapActor);
-		C->AttachToComponent(MapActor->GetRootComponent(),
-		                     FAttachmentTransformRules::KeepRelativeTransform);
+		C->SetupAttachment(MapActor->GetRootComponent());
 		C->SetMobility(EComponentMobility::Movable);
 		C->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		C->SetCastShadow(false);
 
-		const double RadiusUU = VisualRadiusUU(Def);
+		const double RadiusUU = BodyRadiusKm(Def.B);   // ÉCHELLE VRAIE
 		double MeshRadius = 50.0;               // sphère moteur : 50 u de rayon
 		if (UStaticMesh* Imported = FindImportedMesh(Def.Asset))
 		{
@@ -251,14 +314,15 @@ void USPSolarSystemSubsystem::BuildScene()
 		C->SetWorldScale3D(FVector(RadiusUU / MeshRadius));
 		C->RegisterComponent();
 		MapActor->BodyMeshes.Add(C);
+		BodyMeshRadius.Add(MeshRadius);   // l'échelle est refaite à chaque frame
 
-		// Les anneaux de Saturne : nœud GLB séparé ("Circle"), attaché en
-		// enfant du corps — ils suivent position, échelle et rotation propre.
+		// Les anneaux de Saturne : nœud GLB séparé ("Circle"), attaché en enfant
+		// du corps — ils suivent position, échelle et rotation propre.
 		if (Def.B == Body::Saturn)
 			if (UStaticMesh* Rings = FindImportedMeshNamed(Def.Asset, TEXT("Circle")))
 			{
 				UStaticMeshComponent* R = NewObject<UStaticMeshComponent>(MapActor);
-				R->AttachToComponent(C, FAttachmentTransformRules::KeepRelativeTransform);
+				R->SetupAttachment(C);
 				R->SetMobility(EComponentMobility::Movable);
 				R->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 				R->SetCastShadow(false);
@@ -270,21 +334,18 @@ void USPSolarSystemSubsystem::BuildScene()
 	// Le Soleil éclaire tout le système : pas d'inverse carré à cette échelle
 	// (l'éclairement physique ferait la nuit à Neptune — c'est une CARTE).
 	MapActor->SunLight = NewObject<UPointLightComponent>(MapActor);
-	MapActor->SunLight->AttachToComponent(MapActor->GetRootComponent(),
-	                                      FAttachmentTransformRules::KeepRelativeTransform);
+	MapActor->SunLight->SetupAttachment(MapActor->GetRootComponent());
 	MapActor->SunLight->SetMobility(EComponentMobility::Movable);
 	MapActor->SunLight->bUseInverseSquaredFalloff = false;
-	MapActor->SunLight->SetAttenuationRadius(3.0e6f);
+	MapActor->SunLight->SetAttenuationRadius(6.0e9f);   // km : au-delà de Neptune
 	MapActor->SunLight->SetIntensity(12.0f);
 	MapActor->SunLight->SetLightFalloffExponent(0.02f);
 	MapActor->SunLight->SetCastShadows(false);
 	MapActor->SunLight->RegisterComponent();
 
-	// Le vaisseau en vol : marqueur émissif, visible seulement quand l'écran
-	// publie une position (VehicleSnap.valid).
+	// Marqueur du vaisseau en vol (position ESTIMÉE [GDD 7.5]).
 	MapActor->VehicleMarker = NewObject<UStaticMeshComponent>(MapActor);
-	MapActor->VehicleMarker->AttachToComponent(
-		MapActor->GetRootComponent(), FAttachmentTransformRules::KeepRelativeTransform);
+	MapActor->VehicleMarker->SetupAttachment(MapActor->GetRootComponent());
 	MapActor->VehicleMarker->SetMobility(EComponentMobility::Movable);
 	MapActor->VehicleMarker->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	MapActor->VehicleMarker->SetCastShadow(false);
@@ -293,14 +354,13 @@ void USPSolarSystemSubsystem::BuildScene()
 	{
 		UMaterialInstanceDynamic* M =
 			UMaterialInstanceDynamic::Create(EmissiveMat, MapActor->VehicleMarker);
-		M->SetVectorParameterValue(TEXT("Color"), FLinearColor(1.0f, 0.85f, 0.2f) * 6.0f);
+		M->SetVectorParameterValue(TEXT("Color"), FLinearColor(0.2f, 1.0f, 0.9f) * 5.0f);
 		MapActor->VehicleMarker->SetMaterial(0, M);
 	}
-	MapActor->VehicleMarker->SetWorldScale3D(FVector(170.0 / 50.0));
 	MapActor->VehicleMarker->SetVisibility(false);
 	MapActor->VehicleMarker->RegisterComponent();
 
-	// Marqueurs de flotte [GDD 8.3] : petits points émissifs, anneaux symboliques.
+	// Marqueurs de flotte [GDD 8.3] : petits points émissifs à leur position VRAIE.
 	const FLinearColor FleetCols[4] = {
 		FLinearColor(0.45f, 0.75f, 1.0f) * 3.0f,   // relais GEO : bleu clair
 		FLinearColor(1.0f, 0.55f, 0.25f) * 3.0f,   // orbiteurs Mars : orange
@@ -310,8 +370,7 @@ void USPSolarSystemSubsystem::BuildScene()
 	for (int32 i = 0; i < FLEET_TOTAL; ++i)
 	{
 		UStaticMeshComponent* M = NewObject<UStaticMeshComponent>(MapActor);
-		M->AttachToComponent(MapActor->GetRootComponent(),
-		                     FAttachmentTransformRules::KeepRelativeTransform);
+		M->SetupAttachment(MapActor->GetRootComponent());
 		M->SetMobility(EComponentMobility::Movable);
 		M->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		M->SetCastShadow(false);
@@ -323,242 +382,53 @@ void USPSolarSystemSubsystem::BuildScene()
 			Mat->SetVectorParameterValue(TEXT("Color"), FleetCols[Cat]);
 			M->SetMaterial(0, Mat);
 		}
-		M->SetWorldScale3D(FVector((i == FLEET_GEOFLIGHT ? 200.0 : 130.0) / 50.0));
 		M->SetVisibility(false);
 		M->RegisterComponent();
 		MapActor->FleetMarkers.Add(M);
 	}
 
-	// --- vue rapprochée Terre (vol GEO) : Terre 1:1 + marqueur + éclairage ----
+	// Caméra carte : posée à l'origine (le monde est rebasé sur l'œil à chaque
+	// frame) ; seule sa ROTATION change.
+	MapCamera = W->SpawnActor<ACameraActor>(FVector::ZeroVector, FRotator::ZeroRotator);
+	if (MapCamera && MapCamera->GetCameraComponent())
 	{
-		MapActor->CloseEarth = NewObject<UStaticMeshComponent>(MapActor);
-		MapActor->CloseEarth->AttachToComponent(
-			MapActor->GetRootComponent(), FAttachmentTransformRules::KeepRelativeTransform);
-		MapActor->CloseEarth->SetMobility(EComponentMobility::Movable);
-		MapActor->CloseEarth->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-		MapActor->CloseEarth->SetCastShadow(false);
-		double MeshRadius = 50.0;
-		if (UStaticMesh* Terre = FindImportedMesh(TEXT("Earth")))
-		{
-			MapActor->CloseEarth->SetStaticMesh(Terre);
-			MeshRadius = FMath::Max(1.0f, Terre->GetBounds().SphereRadius);
-		}
-		else if (Sphere)
-		{
-			MapActor->CloseEarth->SetStaticMesh(Sphere);
-			if (BaseMat)
-			{
-				UMaterialInstanceDynamic* M = UMaterialInstanceDynamic::Create(BaseMat, MapActor->CloseEarth);
-				M->SetVectorParameterValue(TEXT("Color"), FLinearColor(0.25f, 0.45f, 0.90f));
-				MapActor->CloseEarth->SetMaterial(0, M);
-			}
-		}
-		// rayon VRAI : 6371 km -> 63 710 u (pas d'exagération en vue 1:1)
-		MapActor->CloseEarth->SetWorldScale3D(FVector(6371.0 * KM_UU / MeshRadius));
-		MapActor->CloseEarth->SetWorldLocation(CLOSE_ORIGIN);
-		MapActor->CloseEarth->SetVisibility(false);
-		MapActor->CloseEarth->RegisterComponent();
+		UCameraComponent* Cam = MapCamera->GetCameraComponent();
+		Cam->SetConstraintAspectRatio(false);
+		Cam->SetFieldOfView(45.0f);
 
-		MapActor->CloseMarker = NewObject<UStaticMeshComponent>(MapActor);
-		MapActor->CloseMarker->AttachToComponent(
-			MapActor->GetRootComponent(), FAttachmentTransformRules::KeepRelativeTransform);
-		MapActor->CloseMarker->SetMobility(EComponentMobility::Movable);
-		MapActor->CloseMarker->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-		MapActor->CloseMarker->SetCastShadow(false);
-		if (Sphere) MapActor->CloseMarker->SetStaticMesh(Sphere);
-		if (EmissiveMat)
-		{
-			UMaterialInstanceDynamic* M =
-				UMaterialInstanceDynamic::Create(EmissiveMat, MapActor->CloseMarker);
-			M->SetVectorParameterValue(TEXT("Color"), FLinearColor(0.2f, 1.0f, 0.9f) * 6.0f);
-			MapActor->CloseMarker->SetMaterial(0, M);
-		}
-		// marqueur SYMBOLIQUE (~400 km) : un satellite réel serait invisible
-		MapActor->CloseMarker->SetWorldScale3D(FVector(4000.0 / 50.0));
-		MapActor->CloseMarker->SetVisibility(false);
-		MapActor->CloseMarker->RegisterComponent();
-
-		MapActor->CloseLight = NewObject<UPointLightComponent>(MapActor);
-		MapActor->CloseLight->AttachToComponent(
-			MapActor->GetRootComponent(), FAttachmentTransformRules::KeepRelativeTransform);
-		MapActor->CloseLight->SetMobility(EComponentMobility::Movable);
-		MapActor->CloseLight->bUseInverseSquaredFalloff = false;
-		MapActor->CloseLight->SetAttenuationRadius(4.0e6f);
-		MapActor->CloseLight->SetIntensity(10.0f);
-		MapActor->CloseLight->SetLightFalloffExponent(0.02f);
-		MapActor->CloseLight->SetCastShadows(false);
-		MapActor->CloseLight->SetWorldLocation(CLOSE_ORIGIN + FVector(-8.0e5, -8.0e5, 5.0e5));
-		MapActor->CloseLight->RegisterComponent();
+		// ═══ L'IMAGE DE LA CARTE ═══
+		// EXPOSITION FIGÉE À 1. L'auto-exposition cherche une luminance moyenne :
+		// sur un ciel presque noir semé d'étoiles elle ouvrirait à fond et
+		// laverait tout (le fond de la référence est un noir profond). Le mode
+		// « Manual » ne conviendrait pas non plus : il dérive des réglages
+		// d'appareil photo (f/4, 1/60 s, ISO 100 -> facteur ~0,09) et éteindrait
+		// les étoiles. On borne donc la luminance de référence à 1 des deux
+		// côtés : le rendu passe tel quel, sans correction.
+		FPostProcessSettings& PP = Cam->PostProcessSettings;
+		// Note : le projet active r.DefaultFeature.AutoExposure.
+		// ExtendDefaultLuminanceRange, donc ces deux bornes sont des EV100 et
+		// non des luminances — 0 EV100 = aucune correction.
+		PP.bOverride_AutoExposureMinBrightness = true;
+		PP.AutoExposureMinBrightness = 0.0f;
+		PP.bOverride_AutoExposureMaxBrightness = true;
+		PP.AutoExposureMaxBrightness = 0.0f;
+		PP.bOverride_AutoExposureBias = true;
+		PP.AutoExposureBias = 0.0f;
+		// BLOOM : le halo du Soleil et l'éclat des marqueurs émissifs. Seuil haut
+		// pour que seules les sources vraiment lumineuses débordent — les étoiles
+		// du fond doivent rester des points nets.
+		PP.bOverride_BloomIntensity = true;
+		PP.BloomIntensity = 0.85f;
+		PP.bOverride_BloomThreshold = true;
+		PP.BloomThreshold = 1.0f;
+		// Aucun flou de profondeur ni grain : la lisibilité prime [GDD 6.8].
+		PP.bOverride_DepthOfFieldFocalDistance = true;
+		PP.DepthOfFieldFocalDistance = 0.0f;
+		PP.bOverride_VignetteIntensity = true;
+		PP.VignetteIntensity = 0.15f;
 	}
-
-	// Caméra carte : au-dessus de l'écliptique, cadrée sur le système interne
-	// (~3.5 UA). Le suivi de focus est lissé dans Tick().
-	const FVector CamLoc(0.0, -170000.0, 130000.0);
-	MapCamera = W->SpawnActor<ACameraActor>(CamLoc,
-		UKismetMathLibrary::FindLookAtRotation(CamLoc, FVector::ZeroVector));
 
 	bBuilt = true;
-}
-
-// Rotation propre à l'époque donnée : θ = 2π·t/T_sid (période sidérale vraie,
-// négatif = rétrograde). Miroir y de la carte (écliptique droitier -> UE
-// gaucher) : yaw UE = −θ physique. Fonction pure de l'époque : déterministe.
-FRotator SpinAt(const FBodyDef& Def, double EpochTdb)
-{
-	if (Def.SpinH == 0.0) return FRotator::ZeroRotator;
-	const double Tsid = Def.SpinH * 3600.0;
-	const double Theta = UE_DOUBLE_TWO_PI * FMath::Frac(EpochTdb / Tsid);
-	return FRotator(0.0, -FMath::RadiansToDegrees(Theta), 0.0);
-}
-
-void USPSolarSystemSubsystem::UpdatePositions(double EpochTdb)
-{
-	const bool bMoons = fen::app::g_render_bridge.show_moons.load();
-	for (int32 i = 0; i < NUM_BODIES && i < MapActor->BodyMeshes.Num(); ++i)
-	{
-		const FBodyDef& Def = GBodies[i];
-		UStaticMeshComponent* C = MapActor->BodyMeshes[i];
-		if (Def.bMoon && !bMoons) { C->SetVisibility(false); continue; }
-		C->SetVisibility(true);
-		// rotation propre AVANT la position : SetWorldRotation ne touche pas
-		// la translation, et les enfants (anneaux de Saturne) suivent.
-		C->SetWorldRotation(SpinAt(Def, EpochTdb));
-		C->SetWorldLocation(BodyWorldPos(Def, EpochTdb));
-	}
-	// vue rapprochée : la Terre 1:1 tourne au même taux sidéral — un satellite
-	// GEO reste au-dessus de la même longitude, c'est le point de la GEO.
-	if (MapActor->CloseEarth)
-		MapActor->CloseEarth->SetWorldRotation(
-			SpinAt(*FindDef(Body::EarthBary), EpochTdb));
-}
-
-void USPSolarSystemSubsystem::RedrawOrbits(double EpochTdb)
-{
-	UWorld* W = GetWorld();
-	ULineBatchComponent* LB =
-		W ? W->GetLineBatcher(UWorld::ELineBatcherType::WorldPersistent) : nullptr;
-	if (!LB) return;
-	LB->Flush();
-
-	const bool bMoons = fen::app::g_render_bridge.show_moons.load();
-	for (const FBodyDef& Def : GBodies)
-	{
-		if (Def.B == Body::Sun) continue;
-		if (Def.bMoon && !bMoons) continue;
-		const double T = OrbitalPeriodS(Def, EpochTdb);
-		if (T <= 0.0) continue;
-
-		// Trace = la trajectoire RÉELLE échantillonnée sur une période via
-		// l'éphéméride (pas une ellipse idéalisée). Lunes : autour de la
-		// position courante de la planète, distance exagérée (déclaré).
-		const FBodyDef* Parent = FindDef(Def.Parent);
-		const FVector ParentNow =
-			(Def.bMoon && Parent) ? BodyWorldPos(*Parent, EpochTdb) : FVector::ZeroVector;
-		const FLinearColor Col(Def.Color.R, Def.Color.G, Def.Color.B, 0.35f);
-
-		FVector Prev = FVector::ZeroVector;
-		for (int32 k = 0; k <= ORBIT_SAMPLES; ++k)
-		{
-			const double Tk = EpochTdb + (T * k) / ORBIT_SAMPLES;
-			const fen::Vec3 Rel = GEph.state(Def.B, Def.bMoon ? Def.Parent : Body::Sun,
-			                                 fen::Epoch{Tk}).r;
-			const FVector P = Def.bMoon ? ParentNow + ToUE(Rel) * MOON_DIST_EXAG : ToUE(Rel);
-			if (k > 0) LB->DrawLine(Prev, P, Col, SDPG_World, 18.0f, 0.0f);
-			Prev = P;
-		}
-	}
-	// Vol interplanétaire [GDD 8.3] : le rendu TRACE ce que l'écran publie —
-	// trajectoire NOMINALE, corridor d'incertitude 3σ autour de la position
-	// ESTIMÉE (échelle VRAIE : le HUD donne la valeur en km — aucune précision
-	// artificielle, aucune inflation), nœuds de manœuvre TCM.
-	const auto& V = fen::app::g_render_bridge.vehicle;
-	if (V.valid.load() && V.n >= 2)
-	{
-		const FLinearColor Jaune(1.0f, 0.85f, 0.2f, 0.9f);
-		for (int32 k = 1; k < V.n; ++k)
-		{
-			LB->DrawLine(ToUEd(V.traj_m[k - 1][0], V.traj_m[k - 1][1], V.traj_m[k - 1][2]),
-			             ToUEd(V.traj_m[k][0], V.traj_m[k][1], V.traj_m[k][2]),
-			             Jaune, SDPG_World, 26.0f, 0.0f);
-		}
-
-		// corridor 3σ : cercle dans le plan écliptique autour de l'estimé
-		const FVector Centre = ToUEd(V.pos_m[0], V.pos_m[1], V.pos_m[2]);
-		const double RayonUU = V.corridor_3s_m * UU_PER_M;
-		if (RayonUU > 1.0)
-		{
-			const FLinearColor Orange(1.0f, 0.6f, 0.2f, 0.55f);
-			constexpr int32 SEG = 48;
-			FVector Prev = Centre + FVector(RayonUU, 0, 0);
-			for (int32 k = 1; k <= SEG; ++k)
-			{
-				const double A = UE_DOUBLE_TWO_PI * k / SEG;
-				const FVector P = Centre +
-					FVector(RayonUU * FMath::Cos(A), RayonUU * FMath::Sin(A), 0.0);
-				LB->DrawLine(Prev, P, Orange, SDPG_World, 10.0f, 0.0f);
-				Prev = P;
-			}
-		}
-		LastCorridorCenter = Centre;
-
-		// nœuds de manœuvre : croix orange (à faire) / grise (exécutée)
-		for (int32 i = 0; i < V.n_nodes && i < 2; ++i)
-		{
-			const FVector N = ToUEd(V.nodes_m[i][0], V.nodes_m[i][1], V.nodes_m[i][2]);
-			const FLinearColor C = V.node_done[i]
-				? FLinearColor(0.5f, 0.5f, 0.5f, 0.5f)
-				: FLinearColor(1.0f, 0.55f, 0.15f, 0.95f);
-			constexpr double L = 320.0;
-			LB->DrawLine(N - FVector(L, 0, 0), N + FVector(L, 0, 0), C, SDPG_World, 22.0f, 0.0f);
-			LB->DrawLine(N - FVector(0, L, 0), N + FVector(0, L, 0), C, SDPG_World, 22.0f, 0.0f);
-			LB->DrawLine(N - FVector(0, 0, L), N + FVector(0, 0, L), C, SDPG_World, 22.0f, 0.0f);
-		}
-	}
-	// Vue rapprochée Terre [GDD 8.3, 7.5] : anneau CIBLE (la nominale du
-	// contrat), trace ESTIMÉE (solution de navigation), cercles 1σ/3σ à
-	// l'échelle VRAIE. Scène déportée : invisible depuis la carte système.
-	const auto& G = fen::app::g_render_bridge.geo;
-	if (G.valid.load())
-	{
-		const double RCible = G.target_sma_km * KM_UU;
-		const FLinearColor Vert(0.35f, 0.95f, 0.45f, 0.7f);
-		constexpr int32 SEGC = 96;
-		FVector PrevC = CLOSE_ORIGIN + FVector(RCible, 0, 0);
-		for (int32 k = 1; k <= SEGC; ++k)
-		{
-			const double A = UE_DOUBLE_TWO_PI * k / SEGC;
-			const FVector P = CLOSE_ORIGIN +
-				FVector(RCible * FMath::Cos(A), RCible * FMath::Sin(A), 0.0);
-			LB->DrawLine(PrevC, P, Vert, SDPG_World, 30.0f, 0.0f);
-			PrevC = P;
-		}
-		const FLinearColor Cyan(0.2f, 1.0f, 0.9f, 0.85f);
-		for (int32 k = 1; k < G.n; ++k)
-			LB->DrawLine(ToClose(G.traj_km[k - 1][0], G.traj_km[k - 1][1], G.traj_km[k - 1][2]),
-			             ToClose(G.traj_km[k][0], G.traj_km[k][1], G.traj_km[k][2]),
-			             Cyan, SDPG_World, 30.0f, 0.0f);
-		const FVector C = ToClose(G.pos_km[0], G.pos_km[1], G.pos_km[2]);
-		for (int32 s = 1; s <= 3; s += 2)
-		{
-			const double R = G.sigma_km * s * KM_UU;
-			if (R < 1.0) continue;
-			const FLinearColor Col(1.0f, 0.6f, 0.2f, s == 1 ? 0.8f : 0.35f);
-			constexpr int32 SEG = 48;
-			FVector Pv = C + FVector(R, 0, 0);
-			for (int32 k = 1; k <= SEG; ++k)
-			{
-				const double A = UE_DOUBLE_TWO_PI * k / SEG;
-				const FVector P = C + FVector(R * FMath::Cos(A), R * FMath::Sin(A), 0.0);
-				LB->DrawLine(Pv, P, Col, SDPG_World, 14.0f, 0.0f);
-				Pv = P;
-			}
-		}
-		LastGeoCenter = C;
-	}
-	LastGeoGen = G.gen.load();
-	LastVehicleGen = V.gen.load();
-	LastOrbitEpoch = EpochTdb;
-	bLastShowMoons = bMoons;
 }
 
 void USPSolarSystemSubsystem::SetMapActive(bool bActive)
@@ -570,78 +440,86 @@ void USPSolarSystemSubsystem::SetMapActive(bool bActive)
 	if (bActive)
 	{
 		PreviousViewTarget = PC->GetViewTarget();
-		if (MapCamera) PC->SetViewTargetWithBlend(MapCamera, 0.5f);
+		if (MapCamera) PC->SetViewTargetWithBlend(MapCamera, 0.0f);
 		LastOrbitEpoch = -1.0e300;         // force le retracé des orbites
+		bFocusPrimed = false;              // recadre sans animation parasite
+		SmoothDistKm = -1.0;               // ... et sans vol parasite à l'entrée
 	}
 	else
 	{
 		if (ULineBatchComponent* LB =
 		        W ? W->GetLineBatcher(UWorld::ELineBatcherType::WorldPersistent) : nullptr)
 			LB->Flush();
-		if (PreviousViewTarget) PC->SetViewTargetWithBlend(PreviousViewTarget, 0.3f);
+		// Ne rendre la caméra QUE si personne ne l'a déjà reprise : la station
+		// s'active dans la même frame que la désactivation du décor du menu, et
+		// l'ordre des Tick entre subsystems n'est pas garanti.
+		if (PreviousViewTarget && PC->GetViewTarget() == MapCamera)
+			PC->SetViewTargetWithBlend(PreviousViewTarget, 0.0f);
 	}
 }
 
-void USPSolarSystemSubsystem::Tick(float DeltaTime)
+// Le point VISÉ : le corps focalisé, ou le Soleil (vue système).
+FVector USPSolarSystemSubsystem::FocusWorldKm(double EpochTdb) const
 {
-	Super::Tick(DeltaTime);
+	const int Focus = fen::app::g_render_bridge.focus_body.load();
+	if (Focus < 0 || Focus >= static_cast<int>(Body::COUNT)) return FVector::ZeroVector;
+	const FBodyDef* Def = FindDef(static_cast<Body>(Focus));
+	return Def ? BodyWorldKm(*Def, EpochTdb) : FVector::ZeroVector;
+}
+
+// Place TOUT ce qui est monde, rebasé sur l'œil.
+void USPSolarSystemSubsystem::UpdateScene(double EpochTdb, const FVector& CamWorldKm)
+{
 	auto& Bridge = fen::app::g_render_bridge;
-	const bool bActive = Bridge.carte3d_active.load();
+	const bool bMoons = Bridge.show_moons.load();
+	// R(P) : monde (km) -> rendu (l'œil est l'origine, profondeur comprimée).
+	auto R = [&CamWorldKm](const FVector& WorldKm) {
+		return CompressKm(WorldKm - CamWorldKm);
+	};
+	// Taille d'un marqueur pour qu'il garde une taille écran constante.
+	auto MarkerScale = [](const FVector& Rendered) {
+		return FMath::Max(1.0e-6, Rendered.Size() * MARKER_ANG) / 50.0;   // sphère = 50 u
+	};
 
-	if (bActive && !bBuilt) BuildScene();
-	if (bActive != bWasActive) { SetMapActive(bActive); bWasActive = bActive; }
-	if (!bActive || !bBuilt) return;
+	// --- les corps -----------------------------------------------------------
+	for (int32 i = 0; i < NUM_BODIES && i < MapActor->BodyMeshes.Num(); ++i)
+	{
+		const FBodyDef& Def = GBodies[i];
+		UStaticMeshComponent* C = MapActor->BodyMeshes[i];
+		if (Def.bMoon && !bMoons) { C->SetVisibility(false); continue; }
+		C->SetVisibility(true);
+		// rotation AVANT la position : SetWorldRotation ne touche pas la
+		// translation, et les enfants (anneaux de Saturne) suivent.
+		C->SetWorldRotation(OrientationAt(Def, EpochTdb));
+		// Le rayon suit la MÊME homothétie que la position : la taille angulaire
+		// vue de l'œil reste donc exactement la vraie.
+		double Fac = 1.0;
+		const FVector P = CompressKm(BodyWorldKm(Def, EpochTdb) - CamWorldKm, &Fac);
+		C->SetWorldLocation(P);
+		const double MeshR = BodyMeshRadius.IsValidIndex(i) ? BodyMeshRadius[i] : 50.0;
+		C->SetWorldScale3D(FVector(BodyRadiusKm(Def.B) * Fac / MeshR));
+	}
 
-	const double Epoch = Bridge.epoch_tdb.load();
-	UpdatePositions(Epoch);
+	// --- le Soleil éclaire depuis sa position (rebasée) ----------------------
+	if (MapActor->SunLight) MapActor->SunLight->SetWorldLocation(R(FVector::ZeroVector));
 
-	// --- marqueur vaisseau (position ESTIMÉE) : à chaque frame ---------------
+	// --- vaisseau en vol interplanétaire : position ESTIMÉE [GDD 7.5] --------
 	const bool bVehicle = Bridge.vehicle.valid.load();
-	FVector VehiclePos = FVector::ZeroVector;
 	if (MapActor->VehicleMarker)
 	{
 		MapActor->VehicleMarker->SetVisibility(bVehicle);
 		if (bVehicle)
 		{
-			VehiclePos = ToUEd(Bridge.vehicle.pos_m[0], Bridge.vehicle.pos_m[1],
-			                   Bridge.vehicle.pos_m[2]);
-			MapActor->VehicleMarker->SetWorldLocation(VehiclePos);
+			const FVector P = R(EclToUeKmd(Bridge.vehicle.pos_m[0], Bridge.vehicle.pos_m[1],
+			                               Bridge.vehicle.pos_m[2]));
+			MapActor->VehicleMarker->SetWorldLocation(P);
+			MapActor->VehicleMarker->SetWorldScale3D(FVector(MarkerScale(P)));
 		}
 	}
 
-	// --- vue rapprochée Terre : Terre 1:1 + marqueur estimé ------------------
-	const bool bGeoValid = Bridge.geo.valid.load();
-	FVector GeoPos = FVector::ZeroVector;
-	if (MapActor->CloseEarth) MapActor->CloseEarth->SetVisibility(bGeoValid);
-	if (MapActor->CloseMarker)
-	{
-		MapActor->CloseMarker->SetVisibility(bGeoValid);
-		if (bGeoValid)
-		{
-			GeoPos = ToClose(Bridge.geo.pos_km[0], Bridge.geo.pos_km[1],
-			                 Bridge.geo.pos_km[2]);
-			MapActor->CloseMarker->SetWorldLocation(GeoPos);
-		}
-	}
-
-	// retracé : dérive d'éphéméride, options, nouvel arc, corridor ou sigma qui
-	// ont bougé avec l'estimé (tous les traits vivent dans le batcher persistant)
-	if (FMath::Abs(Epoch - LastOrbitEpoch) > ORBIT_REDRAW_DAYS * fen::cst::DAY ||
-	    Bridge.show_moons.load() != bLastShowMoons ||
-	    Bridge.vehicle.gen.load() != LastVehicleGen ||
-	    Bridge.geo.gen.load() != LastGeoGen ||
-	    (bVehicle && FVector::Dist(VehiclePos, LastCorridorCenter) > 3.0) ||
-	    (bGeoValid && FVector::Dist(GeoPos, LastGeoCenter) > 40.0))
-	{
-		RedrawOrbits(Epoch);
-	}
-
-	// --- flotte en service : éphéméride PAR ENGIN [GDD 8.3] ------------------
-	// Le jeu publie la position ESTIMÉE de chaque engin relative à son corps de
-	// référence (modèle képlérien déclaré). Ici : conversion m -> u (miroir y)
-	// et rayon d'affichage PLANCHER autour des planètes — une orbite GEO fait
-	// 14 u quand la Terre affichée en fait ~425 : direction et phase restent
-	// VRAIES, l'amplification est déclarée dans le HUD [GDD 7.5].
+	// --- la flotte en service [GDD 8.3] : position VRAIE de chaque engin ------
+	// À l'échelle vraie, plus besoin d'anneaux symboliques ni de rayon plancher :
+	// un relais GEO est à 42 164 km de la Terre, et il y EST.
 	{
 		const auto& F = Bridge.fleet;
 		const int32 NCraft =
@@ -650,65 +528,336 @@ void USPSolarSystemSubsystem::Tick(float DeltaTime)
 		int32 Used[3] = {0, 0, 0};
 		for (int32 i = 0; i < NCraft; ++i)
 		{
-			const auto& C = F.craft[i];
-			const int32 Cat = FMath::Clamp(C.type, 0, 2);
+			const auto& Craft = F.craft[i];
+			const int32 Cat = FMath::Clamp(Craft.type, 0, 2);
 			if (Used[Cat] >= FLEET_PER_CAT) continue;
 			UStaticMeshComponent* M = MapActor->FleetMarkers[Base[Cat] + Used[Cat]++];
 			const FBodyDef* Parent =
-				(C.parent >= 0 && C.parent < static_cast<int>(Body::COUNT))
-					? FindDef(static_cast<Body>(C.parent)) : nullptr;
+				(Craft.parent >= 0 && Craft.parent < static_cast<int>(Body::COUNT))
+					? FindDef(static_cast<Body>(Craft.parent)) : nullptr;
 			const FVector ParentPos =
-				Parent ? BodyWorldPos(*Parent, Epoch) : FVector::ZeroVector;
-			FVector Rel = ToUEd(C.rel_m[0], C.rel_m[1], C.rel_m[2]);
-			if (Parent && Parent->B != Body::Sun)
-			{
-				const double RMin = VisualRadiusUU(*Parent) * 1.45;
-				const double D = Rel.Size();
-				if (D < RMin) Rel *= (D > 1e-6 ? RMin / D : 0.0);
-			}
+				Parent ? BodyWorldKm(*Parent, EpochTdb) : FVector::ZeroVector;
+			const FVector P = R(ParentPos + EclToUeKmd(Craft.rel_m[0], Craft.rel_m[1],
+			                                           Craft.rel_m[2]));
 			M->SetVisibility(true);
-			M->SetWorldLocation(ParentPos + Rel);
+			M->SetWorldLocation(P);
+			M->SetWorldScale3D(FVector(MarkerScale(P)));
 		}
 		for (int32 Cat = 0; Cat < 3; ++Cat)
 			for (int32 k = Used[Cat]; k < FLEET_PER_CAT; ++k)
 				MapActor->FleetMarkers[Base[Cat] + k]->SetVisibility(false);
-		// vol GEO en cours : marqueur cyan près de la Terre (symbolique, déclaré)
+
+		// vol GEO en cours : la trace publiée est géocentrique (km) — l'estimé
+		// est placé à sa VRAIE position autour de la Terre.
 		UStaticMeshComponent* GeoM = MapActor->FleetMarkers[FLEET_GEOFLIGHT];
-		const bool bGeo = F.vol_geo_actif.load();
+		const bool bGeo = Bridge.geo.valid.load();
 		GeoM->SetVisibility(bGeo);
 		if (bGeo)
 		{
 			const FBodyDef* Terre = FindDef(Body::EarthBary);
-			const FVector TerrePos = BodyWorldPos(*Terre, Epoch);
-			const double RTerre = VisualRadiusUU(*Terre) * 1.5;
-			GeoM->SetWorldLocation(TerrePos +
-				FVector(RTerre * 1.25, -RTerre * 0.4, 0.0));
+			const FVector TerrePos = Terre ? BodyWorldKm(*Terre, EpochTdb) : FVector::ZeroVector;
+			const FVector P = R(TerrePos + FVector(Bridge.geo.pos_km[0], -Bridge.geo.pos_km[1],
+			                                       Bridge.geo.pos_km[2]));
+			GeoM->SetWorldLocation(P);
+			GeoM->SetWorldScale3D(FVector(MarkerScale(P)));
+		}
+	}
+}
+
+// Échantillonne les orbites via l'ÉPHÉMÉRIDE (la vérité), en km monde absolus.
+// Coûteux -> appelé seulement quand l'époque dérive ou que les options changent.
+void USPSolarSystemSubsystem::RebuildOrbitCache(double EpochTdb)
+{
+	OrbitCache.Reset();
+	const bool bMoons = fen::app::g_render_bridge.show_moons.load();
+	for (const FBodyDef& Def : GBodies)
+	{
+		if (Def.B == Body::Sun) continue;
+		if (Def.bMoon && !bMoons) continue;
+		const double T = OrbitalPeriodS(Def, EpochTdb);
+		if (T <= 0.0) continue;
+
+		// Trace = la trajectoire RÉELLE échantillonnée sur une période via
+		// l'éphéméride (pas une ellipse idéalisée). Lunes : autour de la position
+		// COURANTE de leur planète, à leur distance RÉELLE.
+		const FBodyDef* Parent = FindDef(Def.Parent);
+		const FVector ParentNow =
+			(Def.bMoon && Parent) ? BodyWorldKm(*Parent, EpochTdb) : FVector::ZeroVector;
+
+		FOrbitCache Entry;
+		Entry.Color = FLinearColor(Def.Color.R, Def.Color.G, Def.Color.B, 0.35f);
+		Entry.PointsKm.Reserve(ORBIT_SAMPLES + 1);
+		for (int32 k = 0; k <= ORBIT_SAMPLES; ++k)
+		{
+			const double Tk = EpochTdb + (T * k) / ORBIT_SAMPLES;
+			const fen::Vec3 Rel = GEph.state(Def.B, Def.bMoon ? Def.Parent : Body::Sun,
+			                                 fen::Epoch{Tk}).r;
+			Entry.PointsKm.Add(Def.bMoon ? ParentNow + EclToUeKm(Rel) : EclToUeKm(Rel));
+		}
+		OrbitCache.Add(MoveTemp(Entry));
+	}
+}
+
+// Ré-émet toutes les polylignes dans le repère rebasé sur l'œil (chaque frame).
+void USPSolarSystemSubsystem::EmitOrbits(const FVector& CamWorldKm, double CamDistKm,
+                                         double EpochTdb)
+{
+	UWorld* W = GetWorld();
+	ULineBatchComponent* LB =
+		W ? W->GetLineBatcher(UWorld::ELineBatcherType::WorldPersistent) : nullptr;
+	if (!LB) return;
+	LB->Flush();
+
+	// Même compression que les corps : les traits passent donc exactement par eux
+	// à l'écran (la compression est radiale, elle ne change aucune direction).
+	auto R = [&CamWorldKm](const FVector& WorldKm) {
+		return CompressKm(WorldKm - CamWorldKm);
+	};
+	// Épaisseur ANGULAIRE : à l'échelle vraie, une épaisseur fixe en km serait
+	// soit invisible (vue système) soit énorme (vue rapprochée). On la lie à la
+	// distance de l'œil pour garder ~2 px — dans l'espace COMPRIMÉ, où vivent
+	// les traits.
+	const double CamDistRender = fen::app::scaled_space_distance(CamDistKm);
+	const float Thick = static_cast<float>(FMath::Max(1.0e-4, CamDistRender * 0.0012));
+
+	// DÉCOR DU MENU : les mêmes orbites, mais en retrait — dans la référence
+	// (ref_menu.png) ce sont de simples cercles à la limite du visible.
+	const bool bDecor = fen::app::g_render_bridge.menu_backdrop.load() &&
+	                    !fen::app::g_render_bridge.carte3d_active.load();
+	const float Att = bDecor ? 0.40f : 1.0f;
+
+	for (const FOrbitCache& O : OrbitCache)
+	{
+		const FLinearColor Col(O.Color.R, O.Color.G, O.Color.B, O.Color.A * Att);
+		for (int32 k = 1; k < O.PointsKm.Num(); ++k)
+			LB->DrawLine(R(O.PointsKm[k - 1]), R(O.PointsKm[k]), Col, SDPG_World, Thick, 0.0f);
+	}
+	if (bDecor) return;   // pas de trajectoire ni de flotte derrière le menu
+
+	// Vol interplanétaire [GDD 8.3] : le rendu TRACE ce que l'écran publie —
+	// trajectoire NOMINALE, corridor d'incertitude 3σ autour de la position
+	// ESTIMÉE (échelle VRAIE : aucune inflation), nœuds de manœuvre TCM.
+	const auto& V = fen::app::g_render_bridge.vehicle;
+	if (V.valid.load() && V.n >= 2)
+	{
+		const FLinearColor Jaune(1.0f, 0.85f, 0.2f, 0.9f);
+		for (int32 k = 1; k < V.n; ++k)
+			LB->DrawLine(R(EclToUeKmd(V.traj_m[k - 1][0], V.traj_m[k - 1][1], V.traj_m[k - 1][2])),
+			             R(EclToUeKmd(V.traj_m[k][0], V.traj_m[k][1], V.traj_m[k][2])),
+			             Jaune, SDPG_World, Thick * 1.4f, 0.0f);
+
+		// corridor 3σ : cercle dans le plan écliptique autour de l'estimé
+		const FVector Centre = R(EclToUeKmd(V.pos_m[0], V.pos_m[1], V.pos_m[2]));
+		const double RayonKm = V.corridor_3s_m * KM_PER_M;
+		if (RayonKm > 1.0)
+		{
+			const FLinearColor Orange(1.0f, 0.6f, 0.2f, 0.55f);
+			constexpr int32 SEG = 48;
+			FVector Prev = Centre + FVector(RayonKm, 0, 0);
+			for (int32 k = 1; k <= SEG; ++k)
+			{
+				const double A = UE_DOUBLE_TWO_PI * k / SEG;
+				const FVector P = Centre +
+					FVector(RayonKm * FMath::Cos(A), RayonKm * FMath::Sin(A), 0.0);
+				LB->DrawLine(Prev, P, Orange, SDPG_World, Thick, 0.0f);
+				Prev = P;
+			}
+		}
+
+		// nœuds de manœuvre : croix (orange = à faire, grise = faite)
+		for (int32 k = 0; k < V.n_nodes && k < 2; ++k)
+		{
+			const FVector N = R(EclToUeKmd(V.nodes_m[k][0], V.nodes_m[k][1], V.nodes_m[k][2]));
+			const double S = FMath::Max(1.0, N.Size() * MARKER_ANG * 2.0);
+			const FLinearColor Col = V.node_done[k] ? FLinearColor(0.6f, 0.6f, 0.6f, 0.8f)
+			                                        : FLinearColor(1.0f, 0.55f, 0.15f, 1.0f);
+			LB->DrawLine(N - FVector(S, 0, 0), N + FVector(S, 0, 0), Col, SDPG_World, Thick * 1.6f, 0.0f);
+			LB->DrawLine(N - FVector(0, S, 0), N + FVector(0, S, 0), Col, SDPG_World, Thick * 1.6f, 0.0f);
+			LB->DrawLine(N - FVector(0, 0, S), N + FVector(0, 0, S), Col, SDPG_World, Thick * 1.6f, 0.0f);
 		}
 	}
 
-	// --- navigation : vue rapprochée prioritaire, sinon suivi du focus -------
-	const int FocusInt = Bridge.focus_body.load();
-	const FBodyDef* Focus =
-		(FocusInt >= 0 && FocusInt < static_cast<int>(Body::COUNT))
-			? FindDef(static_cast<Body>(FocusInt)) : nullptr;
-	FVector LookAt = FVector::ZeroVector;
-	FVector Desired(0.0, -170000.0, 130000.0);   // vue système par défaut
-	if (Bridge.close_view.load() == 1 && bGeoValid)
+	// Vol GEO [GDD 8.3] : orbite CIBLE (nominale) + trace ESTIMÉE, à l'échelle
+	// vraie autour de la Terre — plus besoin d'une scène rapprochée séparée.
+	const auto& G = fen::app::g_render_bridge.geo;
+	if (G.valid.load())
 	{
-		LookAt = CLOSE_ORIGIN;
-		Desired = CLOSE_ORIGIN + FVector(0.0, -7.0e5, 5.0e5);
+		const FBodyDef* Terre = FindDef(Body::EarthBary);
+		const FVector TerrePos = Terre ? BodyWorldKm(*Terre, EpochTdb) : FVector::ZeroVector;
+		auto GeoToWorld = [&TerrePos](double Xkm, double Ykm, double Zkm) {
+			return TerrePos + FVector(Xkm, -Ykm, Zkm);
+		};
+		// anneau VERT = orbite cible du contrat (la référence nominale)
+		const double Sma = G.target_sma_km;
+		if (Sma > 1.0)
+		{
+			const FLinearColor Vert(0.35f, 0.95f, 0.45f, 0.8f);
+			constexpr int32 SEG = 96;
+			FVector Prev = R(GeoToWorld(Sma, 0.0, 0.0));
+			for (int32 k = 1; k <= SEG; ++k)
+			{
+				const double A = UE_DOUBLE_TWO_PI * k / SEG;
+				const FVector P = R(GeoToWorld(Sma * FMath::Cos(A), Sma * FMath::Sin(A), 0.0));
+				LB->DrawLine(Prev, P, Vert, SDPG_World, Thick, 0.0f);
+				Prev = P;
+			}
+		}
+		// trace CYAN = solution de navigation (ESTIMÉE, jamais la vérité)
+		if (G.n >= 2)
+		{
+			const FLinearColor Cyan(0.3f, 0.9f, 1.0f, 0.9f);
+			FVector Prev = R(GeoToWorld(G.traj_km[0][0], G.traj_km[0][1], G.traj_km[0][2]));
+			for (int32 k = 1; k < G.n; ++k)
+			{
+				const FVector P = R(GeoToWorld(G.traj_km[k][0], G.traj_km[k][1], G.traj_km[k][2]));
+				LB->DrawLine(Prev, P, Cyan, SDPG_World, Thick, 0.0f);
+				Prev = P;
+			}
+		}
 	}
-	else if (Focus)
+}
+
+// Projette les corps à l'écran pour le HUD (marqueurs, libellés, picking).
+// Coordonnées NORMALISÉES : le HUD ne dépend pas de la taille du viewport.
+void USPSolarSystemSubsystem::PublishScreen(const FVector& CamWorldKm, const FRotator& CamRot,
+                                            double FovDeg)
+{
+	auto& S = fen::app::g_render_bridge.screen;
+	double Aspect = 16.0 / 9.0;
+	if (GEngine && GEngine->GameViewport)
 	{
-		LookAt = BodyWorldPos(*Focus, Epoch);
-		const double D = FMath::Max(VisualRadiusUU(*Focus) * 9.0, 4200.0);
-		Desired = LookAt + FVector(0.0, -0.62 * D, 0.72 * D);
+		FVector2D VP;
+		GEngine->GameViewport->GetViewportSize(VP);
+		if (VP.X > 1.0 && VP.Y > 1.0) Aspect = VP.X / VP.Y;
 	}
+	const double TanH = FMath::Tan(FMath::DegreesToRadians(FovDeg) * 0.5);   // FOV horizontal
+	const double TanV = TanH / Aspect;
+	const double Epoch = fen::app::g_render_bridge.epoch_tdb.load();
+	const bool bMoons = fen::app::g_render_bridge.show_moons.load();
+
+	int32 N = 0;
+	for (const FBodyDef& Def : GBodies)
+	{
+		if (N >= fen::app::RenderBridge::ScreenBodies::MAX) break;
+		if (Def.bMoon && !bMoons) continue;
+		const FVector Rel = BodyWorldKm(Def, Epoch) - CamWorldKm;
+		const FVector Local = CamRot.UnrotateVector(Rel);   // X avant, Y droite, Z haut
+		auto& It = S.items[N];
+		It.body = static_cast<int>(Def.B);
+		It.dist_km = Rel.Size();
+		if (Local.X <= 1.0)
+		{
+			It.on_screen = 0; It.nx = It.ny = -1.0f; It.r_norm = 0.0f;
+			++N; continue;
+		}
+		const double Nx = 0.5 + 0.5 * (Local.Y / Local.X) / TanH;
+		const double Ny = 0.5 - 0.5 * (Local.Z / Local.X) / TanV;
+		It.nx = static_cast<float>(Nx);
+		It.ny = static_cast<float>(Ny);
+		// rayon apparent en fraction de la LARGEUR d'écran
+		It.r_norm = static_cast<float>(0.5 * (BodyRadiusKm(Def.B) / Local.X) / TanH);
+		It.on_screen = (Nx > -0.1 && Nx < 1.1 && Ny > -0.1 && Ny < 1.1) ? 1 : 0;
+		++N;
+	}
+	S.n = N;
+}
+
+void USPSolarSystemSubsystem::Tick(float DeltaTime)
+{
+	Super::Tick(DeltaTime);
+	auto& Bridge = fen::app::g_render_bridge;
+	// La carte sert AUSSI de décor au menu (ciel étoilé + orbites ténues,
+	// cf. ref_menu.png) : elle s'active donc dans les deux cas, la scène Titre
+	// n'étant qu'une version en retrait de la même vue.
+	const bool bActive = Bridge.carte3d_active.load() || Bridge.menu_backdrop.load();
+
+	if (bActive && !bBuilt) BuildScene();
+	if (bActive != bWasActive) { SetMapActive(bActive); bWasActive = bActive; }
+	if (!bActive || !bBuilt) return;
+
+	const double Epoch = Bridge.epoch_tdb.load();
+
+	// ═══ LE VOL VERS UN CORPS [plan §6.4] ═══
+	// Cliquer un corps le focalise ET demande un nouveau cadrage. Si l'œil s'y
+	// téléportait, on ne comprendrait pas où l'on va : on approche donc la
+	// distance de vue en douceur. L'interpolation est LOGARITHMIQUE — du rayon
+	// d'une planète à la ceinture de Kuiper il y a neuf ordres de grandeur, et
+	// un lissage linéaire passerait presque tout le trajet sans rien changer de
+	// visible. Constante de temps unique : un pas de molette paraît immédiat,
+	// un changement de focus devient un vol.
+	{
+		const double Cible = FMath::Max(1.0, Bridge.cam.dist_km.load());
+		if (SmoothDistKm <= 0.0) SmoothDistKm = Cible;
+		else
+		{
+			constexpr double TAU = 0.35;                       // s
+			const double K = 1.0 - FMath::Exp(-DeltaTime / TAU);
+			const double L = FMath::Loge(SmoothDistKm);
+			SmoothDistKm = FMath::Exp(L + (FMath::Loge(Cible) - L) * K);
+		}
+	}
+
+	// --- la caméra : commandée par le HUD, appliquée ici ---------------------
+	// Le focus « vole » vers sa cible (façon NASA Eyes) : on lisse le point visé,
+	// puis on colle dès que l'écart est négligeable devant la distance de vue —
+	// sinon le suivi d'un corps en mouvement traînerait indéfiniment.
+	const FVector TargetFocus = FocusWorldKm(Epoch);
+	if (!bFocusPrimed) { SmoothFocusKm = TargetFocus; bFocusPrimed = true; }
+	else
+	{
+		const double Gap = FVector::Dist(SmoothFocusKm, TargetFocus);
+		if (Gap < SmoothDistKm * 1.0e-4) SmoothFocusKm = TargetFocus;
+		else SmoothFocusKm = FMath::VInterpTo(SmoothFocusKm, TargetFocus, DeltaTime, 3.5f);
+	}
+
+	const double DistKm = FMath::Max(1.0, SmoothDistKm);
+	const double Yaw = Bridge.cam.yaw.load();
+	const double Pitch = FMath::Clamp(Bridge.cam.pitch.load(), -1.55, 1.55);
+	const double FovDeg = FMath::Clamp(Bridge.cam.fov_deg.load(), 10.0, 100.0);
+	const FVector Offset(DistKm * FMath::Cos(Pitch) * FMath::Cos(Yaw),
+	                     DistKm * FMath::Cos(Pitch) * FMath::Sin(Yaw),
+	                     DistKm * FMath::Sin(Pitch));
+	const FVector CamWorldKm = SmoothFocusKm + Offset;
+	// la caméra regarde le point visé : depuis l'origine de rendu, c'est −Offset
+	const FRotator CamRot = (-Offset).Rotation();
+
+	// PLAN DE CLIPPING PROCHE, ADAPTATIF. À 1 u = 1 km, le défaut (10 u = 10 km)
+	// couperait tout ce qui est proche ; mais une valeur fixe très petite
+	// ruinerait la précision du z-buffer sur une scène qui porte loin. On
+	// l'accroche donc à la distance de vue (rapport ~2000 : précision relative
+	// ~1e-4 sur l'objet regardé), borné pour rester utilisable de bout en bout.
+	{
+		const double Near = FMath::Clamp(DistKm / 2000.0, 0.02, 1.0e5);
+		if (LastNearClip <= 0.0 || FMath::Abs(Near - LastNearClip) > LastNearClip * 0.15)
+		{
+			if (IConsoleVariable* CVar =
+			        IConsoleManager::Get().FindConsoleVariable(TEXT("r.SetNearClipPlane")))
+				CVar->Set(static_cast<float>(Near));
+			LastNearClip = Near;
+		}
+	}
+
+	UpdateScene(Epoch, CamWorldKm);
+
 	if (MapCamera)
 	{
-		const FVector NewLoc =
-			FMath::VInterpTo(MapCamera->GetActorLocation(), Desired, DeltaTime, 3.0f);
-		MapCamera->SetActorLocationAndRotation(
-			NewLoc, UKismetMathLibrary::FindLookAtRotation(NewLoc, LookAt));
+		MapCamera->SetActorLocationAndRotation(FVector::ZeroVector, CamRot);
+		if (UCameraComponent* Cam = MapCamera->GetCameraComponent())
+			Cam->SetFieldOfView(static_cast<float>(FovDeg));
 	}
+
+	// Orbites : l'échantillonnage (éphéméride) est mis en cache et ne se refait
+	// qu'en cas de dérive d'époque ou de changement d'option ; l'ÉMISSION, elle,
+	// a lieu chaque frame — les traits vivent dans le repère rebasé sur l'œil.
+	const bool bMoonsNow = Bridge.show_moons.load();
+	if (FMath::Abs(Epoch - LastOrbitEpoch) > ORBIT_REDRAW_DAYS * 86400.0 ||
+	    bMoonsNow != bLastShowMoons || OrbitCache.Num() == 0)
+	{
+		RebuildOrbitCache(Epoch);
+		LastOrbitEpoch = Epoch;
+		bLastShowMoons = bMoonsNow;
+	}
+	EmitOrbits(CamWorldKm, DistKm, Epoch);
+
+	PublishScreen(CamWorldKm, CamRot, FovDeg);
 }

@@ -106,10 +106,16 @@ double body_mu(Body b) {
 }
 
 double body_radius(Body b) {
+  // TOUS les corps de l'enum ont un rayon : un 0 ici se propage silencieusement
+  // au rendu (corps de taille nulle) et au cadrage caméra (œil dans la planète).
   switch (b) {
     case Body::Sun: return R_SUN;
+    case Body::Mercury: return R_MERCURY;
+    case Body::Venus: return R_VENUS;
     case Body::EarthBary: return R_EARTH;
+    case Body::Moon: return R_MOON;
     case Body::Mars: return R_MARS;
+    case Body::Jupiter: return R_JUPITER;
     case Body::Saturn: return R_SATURN;
     case Body::Titan: return R_TITAN;
     case Body::Uranus: return R_URANUS;

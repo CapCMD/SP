@@ -36,12 +36,20 @@ inline constexpr double MU_NEPTUNE = 6.83652710000e15;   // système
 inline constexpr double MU_PLUTO   = 8.69610000000e11;   // Pluton (hors Charon)
 
 // --- rayons équatoriaux moyens [m] ------------------------------------------
-inline constexpr double R_SUN    = 6.957e8;
-inline constexpr double R_EARTH  = 6378136.6;
-inline constexpr double R_MOON   = 1737400.0;            // rayon moyen IAU
-inline constexpr double R_MARS   = 3396200.0;
-inline constexpr double R_SATURN = 60268000.0;
-inline constexpr double R_TITAN  = 2574730.0;
+// Valeurs IAU 2015 (rapport du groupe de travail sur les constantes
+// cartographiques). Il en MANQUAIT quatre — Mercure, Vénus, Jupiter et un
+// alias Lune — ce qui faisait renvoyer 0 à `body_radius` : les corps
+// concernés étaient rendus à taille NULLE et le cadrage caméra les plaçait à
+// 3 000 km de leur CENTRE, donc à l'intérieur pour Jupiter. Sous oracle.
+inline constexpr double R_SUN     = 6.957e8;
+inline constexpr double R_MERCURY = 2439700.0;
+inline constexpr double R_VENUS   = 6051800.0;
+inline constexpr double R_EARTH   = 6378136.6;
+inline constexpr double R_MOON    = 1737400.0;           // rayon moyen IAU
+inline constexpr double R_MARS    = 3396200.0;
+inline constexpr double R_JUPITER = 71492000.0;          // equatorial (1 bar)
+inline constexpr double R_SATURN  = 60268000.0;
+inline constexpr double R_TITAN   = 2574730.0;
 inline constexpr double R_URANUS  = 25559000.0;   // equatorial
 inline constexpr double R_NEPTUNE = 24764000.0;
 inline constexpr double R_PLUTO   = 1188300.0;
@@ -52,6 +60,11 @@ inline constexpr double J2_MARS  = 1.95545e-3;
 
 // --- vitesses angulaires de rotation [rad/s] --------------------------------
 inline constexpr double OMEGA_EARTH = 7.292115e-5;
+
+// Obliquité moyenne de l'écliptique à J2000 (IAU 2006 : 84381.406″). Sert à
+// passer du repère ÉQUATORIAL ICRF (où l'IAU publie les pôles α0/δ0) au repère
+// ÉCLIPTIQUE J2000 de l'éphéméride.
+inline constexpr double OBLIQUITY_J2000 = 84381.406 / 3600.0 * PI / 180.0; // rad (~23.4393°)
 
 // --- Titan (V2) — atmosphère & orbite ---------------------------------------
 inline constexpr double TITAN_SMA_AROUND_SATURN = 1.221870e9;  // m

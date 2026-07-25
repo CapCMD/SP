@@ -18,6 +18,13 @@ namespace fen::rel {
 // γ−1 < 0.5 % — imperceptible à l'échelle d'une vie de personnage.
 inline constexpr double BETA_THRESHOLD = 0.10;
 
+// SEUIL NARRATIF [GDD 6.7.2, v1.2] : distinct de l'effet MESURABLE. Un écart de
+// 4,8 % (β=0,3) est mesurable par un instrument mais représente ~5 mois sur dix
+// ans — invisible à l'échelle d'une vie. L'écart ne devient perceptible dans la
+// narration et la carrière que vers β ≳ 0,7. Le design ne VISE jamais ce seuil ;
+// il le CONSTATE si le joueur l'atteint.
+inline constexpr double BETA_NARRATIVE = 0.70;
+
 inline double beta(double v_mps) { return v_mps / cst::C_LIGHT; }
 
 inline double lorentz_gamma(double b) {
@@ -78,6 +85,74 @@ inline double beta_from_mass_ratio(double m0_over_mf, double ve) {
   if (m0_over_mf <= 1.0) return 0.0;
   return std::tanh((ve / cst::C_LIGHT) * std::log(m0_over_mf));
 }
+
+// ═══ LE VERROU DE L'ALLER-RETOUR [GDD 6.7.4, v1.2] ═══
+// Un aller-retour HABITÉ exige QUATRE poussées (accélération, décélération à
+// l'arrivée, accélération au retour, décélération finale). Le ratio de masse
+// total est donc le ratio unitaire ÉLEVÉ À LA PUISSANCE QUATRE. À β=0,5 :
+// unitaire ~5,2, aller-retour ~730 ; à β=0,9 : ~83 → ~4,7×10⁷. « Un aller-retour
+// à haute vitesse sans ravitaillement est physiquement hors de portée. »
+inline double round_trip_mass_ratio(double beta_cruise, double ve) {
+  const double single = mass_ratio(beta_cruise, ve);
+  return single * single * single * single;   // quatre poussées
+}
+// Nombre de poussées d'une architecture : 1 (sonde en aller simple sans
+// insertion), 2 (aller simple avec insertion/freinage), 4 (aller-retour habité).
+inline double mass_ratio_for_burns(double beta_per_burn, double ve, int n_burns) {
+  double r = 1.0;
+  const double single = mass_ratio(beta_per_burn, ve);
+  for (int i = 0; i < n_burns; ++i) r *= single;
+  return r;
+}
+
+// ═══ CHAÎNE ANTIMATIÈRE : masse ↔ β [GDD 5.12.12, 19.3] ═══
+// Le VERROU n'est pas le ratio de masse (modeste) mais la QUANTITÉ d'antimatière
+// à produire et confiner. Pour un cœur annihilant (ve ≈ c/3), le propergol est
+// pour moitié de l'antimatière, pour moitié de la matière. La masse
+// d'antimatière requise pour qu'un véhicule de masse sèche `m_dry_kg` atteigne
+// `beta` (une poussée) : m_a = ½ · m_dry · (ratio − 1).
+inline double antimatter_needed_g(double m_dry_kg, double beta_final,
+                                  int n_burns = 1) {
+  if (m_dry_kg <= 0.0 || beta_final <= 0.0) return 0.0;
+  const double ratio = mass_ratio_for_burns(beta_final, VE_ANTIMATTER_EFF, n_burns);
+  const double propellant_g = m_dry_kg * 1000.0 * (ratio - 1.0);
+  return 0.5 * propellant_g;                  // moitié antimatière
+}
+// L'inverse : quel β un véhicule atteint avec `antimatter_g` disponibles (une
+// poussée). C'est ce qui montre pourquoi β reste minuscule — quelques grammes
+// n'énergisent qu'un propergol dérisoire.
+inline double beta_from_antimatter(double m_dry_kg, double antimatter_g) {
+  if (m_dry_kg <= 0.0 || antimatter_g <= 0.0) return 0.0;
+  const double ratio = 1.0 + 2.0 * antimatter_g / (m_dry_kg * 1000.0);
+  return beta_from_mass_ratio(ratio, VE_ANTIMATTER_EFF);
+}
+
+// LE MODÈLE DE PRODUCTION — le vrai paramètre d'équilibrage de la fin de jeu
+// [GDD 5.12.12, v1.2]. Ce sont ces quatre paramètres, et non un β cible, qui
+// décident de la vitesse maximale réellement atteignable. Ordres de grandeur
+// à calibrer [GDD Annexe E] ; l'invariant est que produire est PLURIANNUEL.
+struct AntimatterProduction {
+  double production_g_per_yr{1.0e-3};      // débit (g/an) — infime
+  double energy_j_per_g{1.0e17};           // énergie consommée par g produit
+                                           // (≫ l'énergie d'annihilation : rendement infime)
+  double cost_me_per_g{1.0e6};             // coût (M€/g) — hors échelle
+  double confinement_capacity_g{1.0};      // masse stockable en sécurité (plafond)
+  double loss_rate_per_day{1.0e-3};        // perte de confinement (risque permanent)
+
+  // Temps (années) pour accumuler `grams` — plafonné par le confinement.
+  double years_to_accumulate(double grams) const {
+    if (production_g_per_yr <= 0.0) return 1e300;
+    return grams / production_g_per_yr;
+  }
+  double energy_to_produce(double grams) const { return grams * energy_j_per_g; }
+  double cost_to_produce_me(double grams) const { return grams * cost_me_per_g; }
+  // Le stock UTILE ne peut pas dépasser la capacité de confinement.
+  double max_usable_stock_g() const { return confinement_capacity_g; }
+  // Survie du stock sur `days` (processus de perte poissonien).
+  double stock_survival(double days) const {
+    return std::exp(-std::max(0.0, loss_rate_per_day) * std::max(0.0, days));
+  }
+};
 
 // Énergie d'annihilation disponible pour `grams` d'antimatière (avec autant de
 // matière) : E = 2·m·c². ~1.8e14 J/g de PAIRE ; le GDD retient ~9e13 J par

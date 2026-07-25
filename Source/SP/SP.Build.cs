@@ -1,6 +1,8 @@
 // SP.Build.cs - SPACE PROGRAM sur UE5.
-// Le module compile VERBATIM le coeur du jeu d'origine (astro_core + jeu.cpp + ecrans ImGui)
-// et y ajoute un pont Slate (UEBridge/) qui remplace GLFW/OpenGL.
+// Le module compile VERBATIM le coeur du jeu d'origine (astro_core + modules
+// fen/ + jeu.cpp) et y ajoute UEBridge/ : le rendu, les entrees et le HUD sont
+// 100 % natifs UE5. ImGui et ImPlot ont ete retires du module au passage en
+// rendu total (sources conservees dans Space Program/_archive/imgui_20260724).
 using UnrealBuildTool;
 using System.IO;
 
@@ -24,14 +26,14 @@ public class SP : ModuleRules
 
 		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput" });
 
-		PrivateDependencyModuleNames.AddRange(new string[] { "Slate", "SlateCore", "ApplicationCore", "AssetRegistry" });
+		// ImageWrapper/ImageCore : capture headless (SPCapture), comme le
+		// --capture du binaire de reference.
+		PrivateDependencyModuleNames.AddRange(new string[] { "Slate", "SlateCore", "ApplicationCore", "AssetRegistry", "ImageCore", "ImageWrapper" });
 
 		PublicIncludePaths.AddRange(new string[] {
-			Path.Combine(ModuleDirectory, "SpaceProgram"),                       // "app/...", "ui/..."
+			Path.Combine(ModuleDirectory, "SpaceProgram"),                       // "app/..."
 			Path.Combine(ModuleDirectory, "SpaceProgram", "astro_core", "include"),
 			Path.Combine(ModuleDirectory, "SpaceProgram", "mission", "include"),
-			Path.Combine(ModuleDirectory, "ThirdParty", "imgui"),
-			Path.Combine(ModuleDirectory, "ThirdParty", "implot"),
 		});
 	}
 }

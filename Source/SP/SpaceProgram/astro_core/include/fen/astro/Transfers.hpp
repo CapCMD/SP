@@ -19,6 +19,33 @@ inline double vis_viva(double r, double a, double mu) {
 inline double v_circular(double r, double mu) { return std::sqrt(mu / r); }
 inline double v_escape(double r, double mu)   { return std::sqrt(2.0 * mu / r); }
 
+// --- injection hyperbolique (effet Oberth) ----------------------------------
+// La carte porkchop donne un EXCÈS hyperbolique v_inf héliocentrique ; le Δv que
+// le véhicule doit VRAIMENT fournir depuis une orbite de parking n'est pas v_inf,
+// il est BIEN MOINDRE — c'est l'effet Oberth. À la périapse d'une hyperbole
+// d'énergie C3 = v_inf², la vitesse vaut sqrt(v_inf² + 2μ/r) (vis-viva avec
+// a < 0). L'injection depuis une orbite circulaire de rayon r :
+//   Δv = sqrt(v_inf² + 2μ/r) − sqrt(μ/r).
+// v_inf = 0 redonne exactement le Δv d'échappement (√2 − 1)·v_circ.
+inline double injection_dv_from_circular(double vinf, double r_park, double mu) {
+  return std::sqrt(vinf * vinf + 2.0 * mu / r_park) - v_circular(r_park, mu);
+}
+
+// Capture depuis l'arrivée hyperbolique (v_inf d'arrivée) vers une orbite
+// CIRCULAIRE de rayon r : même géométrie que l'injection (freinage à périapse).
+// C'est une BORNE HAUTE — une capture elliptique coûte moins (voir ci-dessous).
+inline double capture_dv_to_circular(double vinf, double r, double mu) {
+  return injection_dv_from_circular(vinf, r, mu);
+}
+
+// Capture vers une orbite ELLIPTIQUE de périapse rp et apoapse ra : on ne freine
+// qu'à la périapse jusqu'à la vitesse d'une ellipse rp×ra. Bien moins cher qu'un
+// cercle — c'est le choix réel d'une insertion martienne.
+inline double capture_dv_to_ellipse(double vinf, double rp, double ra, double mu) {
+  const double a_capture = 0.5 * (rp + ra);
+  return std::sqrt(vinf * vinf + 2.0 * mu / rp) - vis_viva(rp, a_capture, mu);
+}
+
 // --- Hohmann ----------------------------------------------------------------
 struct Hohmann {
   double dv1{}, dv2{}, dv_total{}, tof{}, a_transfer{};

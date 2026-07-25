@@ -1,0 +1,98 @@
+================================================================
+ FENETRE — v0.3 : les deux boucles du jeu (conception + vol)
+================================================================
+
+Ce qui a change depuis la v0.2 : le jeu ne se resume plus a choisir
+un niveau de poursuite. Il suit maintenant LES DEUX BOUCLES du
+document de conception :
+
+  PHASE 1 — CONCEPTION : tu DERIVES tes Delta-v. Le cahier des
+    charges n'en donne aucun. Le jeu verifie tes calculs et
+    t'enseigne la manoeuvre combinee (1154,5 m/s d'economie),
+    celle qui decide si ta mission est seulement PAYABLE.
+
+  PHASE 2 — VOL : tu achetes de la navigation, tu voles, et tu
+    recois un POST-MORTEM qui DECOMPOSE le resultat (d'ou vient
+    l'erreur, es-tu dans la queue de la distribution ou est-ce
+    typique) — jamais un simple "rate".
+
+
+NOUVEAU (v0.6) — SPACE PROGRAM
+------------------------------------------------------------
+Double-clique fenetre_jeu.exe (plus aucun terminal ne s'ouvre). Une
+directrice de vol, IRIS, te guide pour ta premiere mission. Tu as :
+ - une CARTE DU SYSTEME SOLAIRE cliquable (planetes a leur vraie
+   position, tes sondes/relais, revenus) ; clique la Terre pour ta base ;
+ - des contrats GEO, MARS (corridor), COMETE (Rosetta) et TITAN
+   (exobiologie, avec assistances gravitationnelles) ;
+ - un ASSISTANT pas-a-pas et des MEMOS ouvrables pour chaque calcul ;
+ - un DECOLLAGE anime (compte a rebours) puis une salle de vol TEMPS
+   REEL (vue 3D, jauges, telemetrie, warp) ;
+ - un POST-MORTEM qui te dit CLAIREMENT, critere par critere, pourquoi
+   tu reussis ou rates ;
+ - un menu REGLAGES (resolution, plein ecran).
+Sauvegarde integree (agence.sauvegarde.txt). Details : docs/JEU_V06.md.
+
+COMMENT JOUER (la coquille v0.3, toujours la)
+------------------------------------------------------------
+Double-clique fenetre.exe. JOUER -> M00 -> COMMENCER LA CONCEPTION.
+
+PHASE 1 : deux champs a remplir.
+  - Delta-v injection : combien pour passer du parking au GTO ?
+    (indice : vis-viva au perigee moins vitesse circulaire)
+  - insertion combinee : combien a l'apogee pour circulariser ET
+    tourner le plan de 28,5 deg EN UNE SEULE manoeuvre ?
+    (indice : loi des cosinus, PAS une addition)
+  Clique VERIFIER. Si tu seches, demande le corrige complet : le
+  "PROFESSEUR" te montre les 11 etapes.
+  Quand tes deux valeurs sont justes -> PASSER AU VOL.
+
+PHASE 2 : choisis un niveau de poursuite (0 a 6), une graine,
+  clique VOLER. Lis le verdict + le post-mortem. Rejoue avec
+  d'autres graines : la reussite est une PROBABILITE.
+  Le jeu : trouve le niveau le moins cher qui passe de facon fiable.
+
+
+IMPORTANT — garde tout ensemble
+------------------------------------------------------------
+fenetre.exe appelle m00_design.exe et m00_play.exe. Les trois
+DOIVENT rester dans le meme dossier, avec missions/ a cote.
+
+
+LES OUTILS EN LIGNE DE COMMANDE (dossier outils/)
+------------------------------------------------------------
+Chaque systeme du jeu a son outil (ouvre cmd dans le dossier) :
+  m00_design.exe                    le corrige de conception complet
+  m00_design.exe --check 2454.6 1836.5   note tes deux valeurs
+  m00_play.exe 4071 5               un vol complet (graine, niveau)
+  outils\m00_program.exe            la matrice moteur x poursuite x lanceur
+  outils\m01_corridor.exe           le corridor du plan-B (Mars)
+  outils\m01_economy.exe            coniques raccordees vs N-corps
+  outils\m00_postmortem.exe 200     le budget d'erreur par ablation
+  outils\fenetre_lua.exe missions\m00.lua 4071 3    la mission depuis la
+                                    console Lua (graine, niveau 0..6)
+  outils\fenetre_lua.exe missions\m00_console.lua 903   M00 resolue en pur
+                                    Lua, zero C++ (demo de la console)
+
+
+CE QUI EST TESTE
+------------------------------------------------------------
+ m00_design.exe, m00_play.exe et les outils : VERIFIES sous
+   emulation Windows (les chiffres collent au document : economie
+   1154,5 m/s ; reussite ~5% a l'aveugle, ~100% au max niveau).
+ fenetre.exe (graphique) : compile et demarre, mais son RENDU n'a
+   pas pu etre verifie ici (machine de build Linux sans carte
+   graphique). Si l'ecran reste noir : dis-le. Tu as toujours tout
+   le jeu jouable en ligne de commande via m00_design / m00_play.
+
+
+L'ETAT REEL (franchise)
+------------------------------------------------------------
+ - M00 : JOUABLE de bout en bout (conception -> vol -> post-mortem).
+ - M01 (Mars) : VISUALISATION du corridor seulement, pas encore
+   jouable (le pilotage des corrections reste a brancher).
+ - Le document de conception decrit 10 systemes. La plupart
+   existent comme OUTILS (dossier outils/) ; ce qui manquait, et
+   qui est desormais la, c'est la boucle de CONCEPTION jouable et
+   le POST-MORTEM qui decompose. M01 jouable et la matrice de
+   programme integree a l'UI sont les prochains chantiers.

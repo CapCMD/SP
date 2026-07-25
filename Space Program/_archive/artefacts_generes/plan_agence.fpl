@@ -1,0 +1,15 @@
+# genere par l'agence AGENCE D'ESSAI
+MISSION      M00
+CENTER EARTH
+PERTURBERS SUN MOON
+EPOCH        2028-11-13T01:12:00.000
+ENGINE       id=MOTEUR thrust=101.8kN isp=449.7s mass=190kg mr=5.88-
+STAGE        id=ETAGE engine=MOTEUR propellant=3938kg tank_dry_frac=0.12- \
+             structure=150kg residual=0.02-
+PAYLOAD      1350kg
+ELEMENTS     sma=6578.137km ecc=0- inc=28.5deg raan=0deg argp=0deg ta=0deg
+BURN         id=GTO t=0s frame=RSW hold=INERTIAL dv=[0,2460.0,0]m/s stage=0
+GOAL sma=42164.17km tol=50km
+GOAL ecc<2e-03-
+GOAL inc<0.25deg
+STOP t=500000s

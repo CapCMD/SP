@@ -1,12 +1,15 @@
-// SPSolarSystem.h — la carte 3D du système solaire, côté monde UE.
-// Portage de render/app/solar_system_map.cpp (RenderCore Vulkan) vers UE 5.8.
+// SPSolarSystem.h — LA CARTE DU SYSTÈME SOLAIRE : l'écran principal du jeu.
+// Portage UE 5.8 de render/app/solar_system_map.cpp (référence Vulkan `spr`),
+// en technos natives UE — la carte N'EST PAS un onglet, elle EST le jeu.
 //
 // Doctrine héritée de spr/bridge/RenderSnapshot.hpp :
 //   - le rendu ne RECALCULE rien : les positions sortent de l'éphéméride
 //     Standish (astro_core, la vérité), à l'époque publiée par le jeu via
 //     fen::app::g_render_bridge (sens unique jeu -> rendu) ;
-//   - grande échelle : positions en DOUBLE de bout en bout (UE5 LWC : FVector
-//     est double) ; l'échelle CARTE est déclarée dans le .cpp, jamais cachée.
+//   - ÉCHELLE VRAIE (1 u = 1 km) : rayons et distances réels, aucune
+//     exagération. Le rendu est RELATIF À LA CAMÉRA (floating origin) : les
+//     positions restent en double jusqu'à la soustraction, et seul l'écart
+//     œil->corps devient un float. Détail et justification dans le .cpp.
 #pragma once
 
 #include "CoreMinimal.h"
@@ -31,14 +34,11 @@ public:
 	UPROPERTY() TArray<TObjectPtr<UStaticMeshComponent>> BodyMeshes;
 	UPROPERTY() TObjectPtr<UPointLightComponent> SunLight;
 	UPROPERTY() TObjectPtr<UStaticMeshComponent> VehicleMarker;
-	// Flotte en service [GDD 8.3] : anneaux SYMBOLIQUES (déclaré dans le HUD).
+	// Flotte en service [GDD 8.3] : un marqueur par engin, à sa position VRAIE
+	// (l'échelle vraie rend inutiles les anneaux symboliques d'avant).
 	// Layout figé : [0..5] relais GEO, [6..11] orbiteurs Mars, [12..17] sondes
 	// lointaines, [18] vol GEO en cours.
 	UPROPERTY() TArray<TObjectPtr<UStaticMeshComponent>> FleetMarkers;
-	// Vue rapprochée Terre (vol GEO, 1 u = 100 m) — scène géocentrique déportée.
-	UPROPERTY() TObjectPtr<UStaticMeshComponent> CloseEarth;
-	UPROPERTY() TObjectPtr<UStaticMeshComponent> CloseMarker;
-	UPROPERTY() TObjectPtr<UPointLightComponent> CloseLight;
 };
 
 UCLASS()
@@ -56,19 +56,41 @@ public:
 
 private:
 	void BuildScene();                    // meshes GLB (ou sphères) + lumière + caméra
-	void UpdatePositions(double EpochTdb);
-	void RedrawOrbits(double EpochTdb);   // polylignes échantillonnées via l'éphéméride
 	void SetMapActive(bool bActive);      // bascule caméra + visibilité
+	// Le point visé par la caméra (corps focalisé, ou le Soleil), en km.
+	FVector FocusWorldKm(double EpochTdb) const;
+	// Rebase + place tout ce qui est monde ; publie la projection écran.
+	void UpdateScene(double EpochTdb, const FVector& CamWorldKm);
+	// Les orbites vivent dans le repère rebasé sur l'œil : elles doivent être
+	// ré-émises à chaque frame. On sépare donc le COÛTEUX (échantillonner
+	// l'éphéméride : mis en cache, en km monde absolus) du BON MARCHÉ (soustraire
+	// l'œil et tracer).
+	void RebuildOrbitCache(double EpochTdb);
+	void EmitOrbits(const FVector& CamWorldKm, double CamDistKm, double EpochTdb);
+	void PublishScreen(const FVector& CamWorldKm, const FRotator& CamRot, double FovDeg);
 
 	UPROPERTY() TObjectPtr<ASPSolarSystemMapActor> MapActor;
 	UPROPERTY() TObjectPtr<ACameraActor> MapCamera;
 	UPROPERTY() TObjectPtr<AActor> PreviousViewTarget;
 
+	// Suivi lissé du point visé (le focus « vole » vers sa cible, façon NASA Eyes).
+	FVector SmoothFocusKm = FVector::ZeroVector;
+	bool    bFocusPrimed = false;
+	// Distance de vue LISSÉE. Le contrôleur publie une distance CIBLE ; l'œil
+	// s'en approche en douceur, ce qui donne le « vol » vers un corps quand on
+	// clique dessus — et rend la molette fluide sans la rendre molle.
+	double  SmoothDistKm = -1.0;
+
+	// Une polyligne MONDE (km absolus) par corps, échantillonnée sur une période.
+	struct FOrbitCache { FLinearColor Color; TArray<FVector> PointsKm; };
+	TArray<FOrbitCache> OrbitCache;
+
+	// Rayon de la sphère englobante du mesh de chaque corps : l'échelle est
+	// recalculée à chaque frame (elle suit la compression de profondeur).
+	TArray<double> BodyMeshRadius;
+	double LastNearClip = -1.0;
+
 	double LastOrbitEpoch = -1.0e300;
-	int32 LastVehicleGen = -1;
-	int32 LastGeoGen = -1;
-	FVector LastCorridorCenter = FVector(1.0e18, 0.0, 0.0);
-	FVector LastGeoCenter = FVector(1.0e18, 0.0, 0.0);
 	bool bBuilt = false;
 	bool bWasActive = false;
 	bool bLastShowMoons = false;

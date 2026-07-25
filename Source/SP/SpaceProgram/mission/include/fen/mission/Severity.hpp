@@ -50,6 +50,14 @@ struct AnomalyEvent {
   SeverityModifiers modifiers;
   std::vector<std::string> tech_involved;  // nœuds candidats à requalification
   double date_days{};
+
+  // CONTEXTE ORBITAL DE LA RUPTURE [GDD 7.8, 10.5]. Renseigné uniquement quand
+  // l'anomalie a fragmenté quelque chose EN ORBITE : le nuage de débris qui en
+  // résulte est alors calculé (env::Debris), pas décrété. `breakup_mass_kg = 0`
+  // signifie « aucune fragmentation » — un échec au sol ne pollue rien.
+  double breakup_mass_kg{0.0};
+  double breakup_alt_km{0.0};
+  bool   breakup_is_collision{false};   // sinon : explosion (rupture interne)
 };
 
 // --- Triple lecture [GDD 10.4] -----------------------------------------------

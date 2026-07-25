@@ -46,7 +46,17 @@ struct TechNode {
   double research_cost_musd{};
   double research_days{};            // durée nominale [GDD 4.3]
   career::Rank min_rank{career::Rank::Stagiaire};  // filtre institutionnel
-  bool transverse{false};            // techno transverse [GDD 5.13]
+  bool transverse{false};            // transverse [GDD 5.13] : bloque plusieurs branches
+
+  // COÛTS ET DURÉES : PROVISOIRES PAR DÉFAUT. Le GDD renvoie explicitement à
+  // « une version ultérieure » les « sous-arbres nominatifs et CHIFFRÉS de
+  // chaque branche, avec coûts et durées de recherche unitaires » [GDD 20].
+  // Les valeurs portées ici sont donc des ordres de grandeur d'attente, calés
+  // sur les fourchettes de maturité de 4.3 (« quelques jours à quelques
+  // semaines » pour l'état de l'art, « plusieurs années » pour une percée).
+  // Elles sont MARQUÉES comme telles pour qu'on ne les prenne jamais pour du
+  // design validé — c'est la même exigence de traçabilité que 6.8 et 12.3.
+  bool costs_provisional{true};
 
   bool operational() const { return trl >= TRL_OPERATIONAL; }
 };

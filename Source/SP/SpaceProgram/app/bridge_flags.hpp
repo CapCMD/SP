@@ -17,9 +17,49 @@
 
 namespace fen::app {
 
+// LES TROIS SCÈNES DU JEU (cf. docs/reference_solar_system_map) :
+//   Titre   — menu SPACE PROGRAM (fond étoilé) ;
+//   Station — L'ACCUEIL : à bord de l'ISS, module Novellus, première personne ;
+//   Carte   — la carte du système solaire, atteinte depuis l'ISS par [M].
+// L'ISS est le QG : c'est là qu'on arrive, pas sur la carte.
+enum class SceneJeu { Titre = 0, Station = 1, Carte = 2 };
+
 struct RenderBridge {
+  // Scène active, pilotée par l'UI (Interface::dessiner) et appliquée par les
+  // subsystems UE (chacun s'active pour la sienne).
+  std::atomic<int> scene{static_cast<int>(SceneJeu::Titre)};
   // La carte 3D est-elle l'écran actif ? (piloté par Interface::dessiner)
   std::atomic<bool> carte3d_active{false};
+
+  // --- L'INTÉRIEUR DE L'ISS : commandes de déplacement -----------------------
+  // L'overlay Slate capte tout le clavier/souris (cf. plus bas) : l'ambulation
+  // première personne est donc COMMANDÉE ici par le HUD et appliquée par le
+  // pawn UE. Repère caméra : avant/droite/haut, normalisés [-1,1].
+  struct StationInput {
+    std::atomic<float> fwd{0.0f};      // ZQSD / WASD
+    std::atomic<float> right{0.0f};
+    std::atomic<float> up{0.0f};       // espace / ctrl (l'ISS est en apesanteur)
+    std::atomic<float> look_dx{0.0f};  // delta souris consommé par le pawn
+    std::atomic<float> look_dy{0.0f};
+    std::atomic<bool>  boost{false};   // maj : déplacement rapide
+  } station_in;
+
+  // --- L'INTÉRIEUR DE L'ISS : état publié par UE -----------------------------
+  struct StationOut {
+    std::atomic<bool>  ready{false};      // la scène est construite
+    std::atomic<int>   near_post{-1};     // index du poste à portée, -1 sinon
+    std::atomic<float> eye_m[3];          // position de l'œil (m, repère station)
+    std::atomic<float> yaw{0.0f}, pitch{0.0f};
+  } station_out;
+
+  // Postes de travail publiés par l'UI vers UE (position en mètres, repère
+  // station) — UE n'a qu'à tester la proximité et publier `near_post`.
+  struct PostSnap {
+    static constexpr int MAX = 12;
+    std::atomic<int> n{0};
+    struct Item { float x, y, z, radius_m; };
+    Item items[MAX];
+  } posts;
 
   // Époque de jeu COURANTE (s TDB depuis J2000). Vol en cours -> l'horloge du
   // vol EST le temps de jeu ; sinon calendrier agence. Jamais autre chose.
@@ -28,6 +68,46 @@ struct RenderBridge {
   // Options d'affichage (présentation pure).
   std::atomic<bool> show_moons{false};
   std::atomic<int>  focus_body{-1};   // fen::ephem::Body ; -1 = vue système
+  // Corps sous le curseur, publié par la couche d'entrée native
+  // (SPPlayerController) à partir de la projection écran ci-dessous ; le HUD ne
+  // fait que le mettre en évidence. -1 = aucun.
+  std::atomic<int>  hover_body{-1};
+  // Le MENU utilise la carte comme décor : fond étoilé et orbites ténues,
+  // exactement comme docs/reference_solar_system_map/ref_menu.png. Le monde de
+  // la carte s'active donc aussi hors scène Carte, mais en retrait.
+  std::atomic<bool> menu_backdrop{false};
+
+  // --- LA CAMÉRA DE LA CARTE (façon NASA Eyes) -------------------------------
+  // L'overlay Slate capte TOUTE la souris : l'entrée caméra vit donc côté UI
+  // (ImGui) et le monde UE l'APPLIQUE. Même doctrine que le reste du pont :
+  // sens unique, aucun recalcul côté rendu.
+  //   dist_km  : distance de l'œil au point visé (échelle VRAIE, en km)
+  //   yaw/pitch: orientation de l'orbite caméra (rad ; pitch borné ±1,55)
+  //   focus_body pilote le point visé ; -1 = le Soleil (vue système).
+  struct MapCam {
+    std::atomic<double> dist_km{9.0e8};   // ~6 UA : le système interne cadré
+    std::atomic<double> yaw{0.60};
+    std::atomic<double> pitch{1.05};      // vu de dessus de l'écliptique
+    std::atomic<double> fov_deg{45.0};
+  } cam;
+
+  // --- PROJECTION ÉCRAN publiée par UE --------------------------------------
+  // À l'échelle vraie, une planète est sous-pixellique dès qu'on s'éloigne : le
+  // HUD dessine alors un MARQUEUR et son libellé, et c'est lui qui fait le
+  // picking (le clic ne peut pas descendre jusqu'au monde UE, cf. ci-dessus).
+  // Coordonnées NORMALISÉES [0,1] : le HUD les multiplie par sa taille d'écran.
+  struct ScreenBodies {
+    static constexpr int MAX = 32;
+    std::atomic<int> n{0};
+    struct Item {
+      int    body{-1};      // fen::ephem::Body
+      float  nx{0}, ny{0};  // position écran normalisée
+      float  r_norm{0};     // rayon apparent (fraction de la largeur d'écran)
+      double dist_km{0};    // distance à l'œil
+      int    on_screen{0};  // devant la caméra ET dans le cadre
+    };
+    Item items[MAX];
+  } screen;
 
   // --- LA FLOTTE EN SERVICE [GDD 8.3, 10.1] ----------------------------------
   // v0.7 : chaque engin publie SA position ESTIMÉE relative à son corps de

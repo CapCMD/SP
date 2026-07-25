@@ -28,6 +28,8 @@
 #include "fen/nav/OrbitDetermination.hpp"
 #include "fen/core/Matrix.hpp"
 #include "fen/astro/Porkchop.hpp"
+#include "fen/astro/LaunchWindow.hpp"
+#include "fen/ephem/BodyOrientation.hpp"
 #include "fen/astro/Flyby.hpp"
 #include "fen/astro/Mga.hpp"
 #include "fen/astro/Mga1Dsm.hpp"
@@ -207,6 +209,39 @@ static void test_transfers() {
   const double S = astro::synodic_period(T_E, T_M) / DAY;
   std::printf("     Periode synodique Terre-Mars : %.2f jours (%.2f mois)\n", S, S / 30.44);
   CHECK_NEAR(S, 779.9, 1.0, "synodique Terre-Mars = 779.9 j");
+
+  // --- Injection hyperbolique (Oberth) : v_inf porkchop -> Δv reel du vehicule.
+  // IDENTITE : v_inf = 0 doit redonner exactement le Δv d'echappement.
+  const double v_esc_leo = astro::v_escape(r1, MU_EARTH) - astro::v_circular(r1, MU_EARTH);
+  CHECK_NEAR(astro::injection_dv_from_circular(0.0, r1, MU_EARTH), v_esc_leo, 1e-9,
+             "Oberth : v_inf=0 redonne le Δv d'echappement (racine2-1)*v_circ");
+  CHECK_NEAR(v_esc_leo / 1000.0, 3.224, 0.01, "echappement LEO 200km ~ 3.22 km/s");
+
+  // Depart Terre->Mars : C3 ~ 8.7 km2/s2 (v_inf ~ 2.95 km/s) depuis 200 km LEO.
+  // L'effet Oberth ramene 2.95 km/s helio a ~3.6 km/s REELS (et non 2.95 ajoutes).
+  const double vinf_dep = std::sqrt(8.7e6);
+  const double dv_inj = astro::injection_dv_from_circular(vinf_dep, r1, MU_EARTH);
+  std::printf("     Injection Terre->Mars (C3=8.7) depuis LEO : %.0f m/s\n", dv_inj);
+  CHECK(dv_inj > 3400.0 && dv_inj < 3800.0, "injection Mars depuis LEO ~ 3.6 km/s (manuel)");
+  CHECK(dv_inj > vinf_dep, "l'injection depasse v_inf (mais reste bien sous v_circ+v_inf) : Oberth");
+  CHECK(dv_inj < astro::v_circular(r1, MU_EARTH) + vinf_dep,
+        "et reste strictement sous l'ajout naif v_circ + v_inf");
+
+  // Monotonie : plus de v_inf coute plus cher a injecter.
+  CHECK(astro::injection_dv_from_circular(4000.0, r1, MU_EARTH) >
+        astro::injection_dv_from_circular(2000.0, r1, MU_EARTH),
+        "injection monotone croissante en v_inf");
+
+  // Insertion martienne : v_inf_arr ~ 2.5 km/s. Une capture ELLIPTIQUE coute
+  // strictement moins qu'une circularisation basse — c'est le choix reel.
+  const double rp_mars = R_MARS + 400e3;
+  const double ra_mars = R_MARS + 30000e3;   // orbite tres elliptique de capture
+  const double dv_circ = astro::capture_dv_to_circular(2500.0, rp_mars, MU_MARS);
+  const double dv_ell  = astro::capture_dv_to_ellipse(2500.0, rp_mars, ra_mars, MU_MARS);
+  std::printf("     Capture Mars (v_inf=2.5) : circulaire=%.0f m/s  elliptique=%.0f m/s\n",
+              dv_circ, dv_ell);
+  CHECK(dv_circ > 1500.0 && dv_circ < 2500.0, "capture circulaire Mars ~ 2 km/s");
+  CHECK(dv_ell < dv_circ, "capture elliptique STRICTEMENT moins chere que circulaire");
 }
 
 // ---------------------------------------------------------------------------
@@ -581,6 +616,162 @@ static void test_porkchop() {
 }
 
 // ---------------------------------------------------------------------------
+// LA FENETRE DE LANCEMENT — le gate du GDD 7.3, auto-calibre sur la porkchop.
+// On ne teste pas contre une date devinee : on LAISSE le modele trouver son
+// optimum synodique, puis on verifie qu'il OUVRE a l'optimum et FERME a la
+// conjonction (optimum + demi-periode synodique), et que la fenetre revient a
+// la periode synodique. Un test qui passerait par accident aurait fabrique la
+// meme geometrie deux fois — improbable.
+static void test_launch_window() {
+  section("Fenetre de lancement Terre -> Mars");
+  ephem::StandishEphemeris eph;
+  const double S = astro::synodic_period(365.256 * DAY, 686.980 * DAY);
+
+  // 1) Trouver l'optimum de la fenetre 2026 (le modele le rend lui-meme).
+  const Epoch scan{epoch_from_iso("2026-08-01T00:00:00").tdb};
+  const astro::WindowResult probe =
+      astro::launch_window(eph, ephem::Body::EarthBary, ephem::Body::Mars, scan);
+  CHECK(probe.ok, "le modele trouve au moins une solution sur l'horizon synodique");
+  const double t_opt = probe.best_dep_tdb;
+  std::printf("     optimum 2026 : depart %s  (vinf_sum = %.0f m/s)\n",
+              epoch_to_iso(Epoch{t_opt}).substr(0, 10).c_str(), probe.global_best);
+
+  // Ordre de grandeur physique de l'optimum : vinf_dep ~3.5 + vinf_arr ~2.5 km/s.
+  CHECK(probe.global_best > 4000.0 && probe.global_best < 9000.0,
+        "l'optimum (vinf_dep + vinf_arr) est dans la plage reelle 4-9 km/s");
+
+  // Les v_inf exposes se recomposent en global_best et sont physiques.
+  CHECK_NEAR(probe.vinf_dep + probe.vinf_arr, probe.global_best, 1e-6,
+             "vinf_dep + vinf_arr == global_best (metadonnee coherente)");
+  CHECK(probe.vinf_dep > 2000.0 && probe.vinf_dep < 5000.0, "vinf_dep depart ~ 3-4 km/s");
+  CHECK(probe.vinf_arr > 1500.0 && probe.vinf_arr < 4000.0, "vinf_arr arrivee ~ 2-3 km/s");
+
+  // CHAINON no-arcade : le v_inf de la fenetre -> Δv REEL d'injection depuis LEO
+  // par Oberth. Une bonne fenetre 2026 doit tomber vers ~3.6 km/s (pas le v_inf
+  // nu, pas non plus v_circ + v_inf).
+  const double dv_inj_fenetre =
+      astro::injection_dv_from_circular(probe.vinf_dep, R_EARTH + 200e3, MU_EARTH);
+  std::printf("     Δv injection reel depuis LEO a cette fenetre : %.0f m/s\n", dv_inj_fenetre);
+  CHECK(dv_inj_fenetre > 3200.0 && dv_inj_fenetre < 4200.0,
+        "injection reelle de la fenetre 2026 depuis LEO dans 3.2-4.2 km/s");
+
+  // 2) OUVERTE a l'approche de l'optimum : on se place 20 j AVANT, l'optimum
+  // tombe donc dans la fenetre operationnelle (slop 60 j).
+  const Epoch bon{t_opt - 20.0 * DAY};
+  const astro::WindowResult ouvert =
+      astro::launch_window(eph, ephem::Body::EarthBary, ephem::Body::Mars, bon);
+  CHECK(ouvert.open, "OUVERTE quand l'optimum tombe dans la fenetre operationnelle");
+  CHECK(ouvert.local_best <= 1.30 * ouvert.global_best,
+        "a l'optimum, le meilleur transfert local est proche de l'optimum global");
+  CHECK(ouvert.next_open_days >= 0.0 && ouvert.next_open_days < 60.0,
+        "prochaine ouverture imminente (dans la fenetre courante)");
+
+  // 3) FERMEE a la conjonction : optimum + demi-periode synodique. La geometrie
+  // est defavorable, le meilleur transfert local explose au-dessus du seuil.
+  const Epoch mauvais{t_opt + 0.5 * S};
+  const astro::WindowResult ferme =
+      astro::launch_window(eph, ephem::Body::EarthBary, ephem::Body::Mars, mauvais);
+  CHECK(ferme.ok, "des solutions existent meme a la conjonction (voler = cher)");
+  CHECK(!ferme.open, "FERMEE a la conjonction (optimum + S/2)");
+  CHECK(ferme.local_best > ferme.global_best,
+        "a la conjonction, le local est strictement pire que le prochain optimum");
+  std::printf("     conjonction : local %.0f m/s vs optimum a venir %.0f m/s ; "
+              "prochaine ouverture dans %.0f j\n",
+              ferme.local_best, ferme.global_best, ferme.next_open_days);
+  CHECK(ferme.next_open_days > 60.0 && ferme.next_open_days < S,
+        "la prochaine fenetre est a venir, sous une periode synodique");
+
+  // 4) RECURRENCE : la fenetre suivante est ~S jours apres l'optimum courant.
+  const Epoch suivant{t_opt + S - 60.0 * DAY};
+  const astro::WindowResult w2 =
+      astro::launch_window(eph, ephem::Body::EarthBary, ephem::Body::Mars, suivant);
+  const double dt = w2.best_dep_tdb - t_opt;
+  std::printf("     fenetre suivante : %s  (ecart %.1f j ; synodique %.1f j)\n",
+              epoch_to_iso(Epoch{w2.best_dep_tdb}).substr(0, 10).c_str(),
+              dt / DAY, S / DAY);
+  CHECK(std::fabs(dt - S) < 70.0 * DAY,
+        "la fenetre se reproduit a la periode synodique (779.9 j)");
+}
+
+// ---------------------------------------------------------------------------
+// ORIENTATION DES CORPS (IAU) — l'oracle couronne trace les SAISONS : la
+// latitude sub-solaire de la Terre doit valoir +23.4 deg au solstice de juin
+// (tropique du Cancer), -23.4 en decembre, ~0 aux equinoxes. Cet oracle unique
+// valide la CHAINE ENTIERE : ephemeride (position) + transformation de repere
+// (equatorial->ecliptique) + modele de pole. Une erreur de signe s'y voit.
+static void test_body_orientation() {
+  section("Orientation des corps (IAU)");
+  using namespace fen::ephem;
+  const double eps = cst::OBLIQUITY_J2000;
+
+  // --- Transformation de repere : ancres exactes.
+  const Vec3 pole_eq{0, 0, 1};
+  const Vec3 pe = equatorial_to_ecliptic(pole_eq);
+  CHECK_NEAR(pe.x, 0.0, 1e-12, "repere : x du pole equatorial reste nul");
+  CHECK_NEAR(pe.y, std::sin(eps), 1e-12, "repere : pole equatorial -> (0,sin e,cos e)");
+  CHECK_NEAR(pe.z, std::cos(eps), 1e-12, "repere : ...composante z = cos e");
+  const Vec3 ecl_pole_eq{0, -std::sin(eps), std::cos(eps)};   // pole ecliptique en equatorial
+  const Vec3 back = equatorial_to_ecliptic(ecl_pole_eq);
+  CHECK_NEAR(back.z, 1.0, 1e-12, "repere : le pole ecliptique revient sur (0,0,1)");
+  CHECK_NEAR(std::sqrt(back.x*back.x + back.y*back.y), 0.0, 1e-9, "repere : ...exactement l'axe z");
+
+  // --- Obliquites (ancres physiques).
+  const double obl_terre = obliquity_to_ecliptic_rad(Body::EarthBary) / DEG;
+  const double obl_mars  = obliquity_to_ecliptic_rad(Body::Mars) / DEG;
+  const double obl_venus = obliquity_to_ecliptic_rad(Body::Venus) / DEG;
+  const double obl_jup   = obliquity_to_ecliptic_rad(Body::Jupiter) / DEG;
+  std::printf("     obliquites : Terre=%.2f  Mars=%.2f  Venus=%.2f  Jupiter=%.2f deg\n",
+              obl_terre, obl_mars, obl_venus, obl_jup);
+  CHECK_NEAR(obl_terre, 23.4393, 0.01, "Terre : obliquite = obliquite de l'ecliptique (23.44 deg)");
+  // ATTENTION : obliquite a l'ECLIPTIQUE, PAS a l'orbite. Mars incline son orbite
+  // de 1.85 deg / ecliptique ; ses 25.19 deg a l'orbite deviennent ~26.7 deg a
+  // l'ecliptique. Le calcul a la main du pole (317.68, 52.89) le confirme.
+  CHECK(obl_mars > 26.0 && obl_mars < 27.5, "Mars : obliquite a l'ecliptique ~ 26.7 deg");
+  // Venus : son POLE (convention IAU = cote nord du plan invariable) est a ~1 deg
+  // de la normale ecliptique -> son equateur est quasi dans l'ecliptique. Le
+  // caractere RETROGRADE n'est PAS dans l'angle du pole, il est dans le SIGNE du
+  // taux de rotation (W).
+  CHECK(obl_venus < 5.0, "Venus : pole quasi normal a l'ecliptique (equateur ~ dans l'ecliptique)");
+  CHECK(rotation_elements(Body::Venus).w_rate_deg_per_day < 0.0,
+        "Venus : rotation RETROGRADE (taux de meridien negatif)");
+  CHECK(obl_jup < 5.0, "Jupiter : obliquite faible (~3 deg, pas de saisons marquees)");
+  // Uranus roule SUR LE FLANC. `obliquity_to_ecliptic_rad` renvoie l'angle du
+  // POLE IAU (delta0 = -15 deg -> ~82 deg de la normale ecliptique) ; le "tilt
+  // axial" populaire de 97.8 deg est celui du moment cinetique (Uranus est
+  // retrograde, son pole IAU est a l'oppose : 180 - 82 = 98). Les deux disent la
+  // meme chose : l'axe est QUASI DANS LE PLAN. Ce qui compte pour le rendu, c'est
+  // la direction du pole (unique) + le signe de W (retrograde).
+  const double obl_uranus = obliquity_to_ecliptic_rad(Body::Uranus) / DEG;
+  std::printf("     Uranus : pole a %.1f deg de la normale (couche sur le flanc)\n", obl_uranus);
+  CHECK(obl_uranus > 78.0 && obl_uranus < 86.0, "Uranus : axe quasi dans le plan de l'ecliptique");
+  CHECK(rotation_elements(Body::Uranus).w_rate_deg_per_day < 0.0, "Uranus : rotation RETROGRADE");
+
+  // --- Taux du meridien origine : la Terre tourne de 360.9856 deg/jour sideral.
+  StandishEphemeris eph;
+  const Epoch t0{epoch_from_iso("2026-03-20T00:00:00").tdb};
+  const double w0 = prime_meridian_deg(Body::EarthBary, t0);
+  const double w1 = prime_meridian_deg(Body::EarthBary, Epoch{t0.tdb + DAY});
+  double dW = std::fmod(w1 - w0 + 720.0, 360.0);
+  CHECK_NEAR(dW, std::fmod(360.9856235, 360.0), 0.01, "Terre : +0.9856 deg/jour (jour sideral < solaire)");
+
+  // --- L'ORACLE COURONNE : latitude sub-solaire = declinaison solaire saisonniere.
+  struct Cas { const char* iso; double lat_attendue; const char* nom; };
+  const Cas cas[] = {
+    {"2026-06-21T00:00:00", +23.44, "solstice de juin  -> tropique du Cancer (+23.4)"},
+    {"2026-12-21T12:00:00", -23.44, "solstice de decembre -> Capricorne (-23.4)"},
+    {"2026-03-20T14:00:00",   0.0,  "equinoxe de mars -> equateur (0)"},
+    {"2026-09-22T20:00:00",   0.0,  "equinoxe de septembre -> equateur (0)"},
+  };
+  for (const Cas& c : cas) {
+    const Epoch t{epoch_from_iso(c.iso).tdb};
+    const PosVel earth = eph.state(Body::EarthBary, Body::Sun, t);
+    const double lat = subsolar_latitude_rad(Body::EarthBary, earth.r) / DEG;
+    std::printf("     %-42s : lat sub-solaire = %+6.2f deg\n", c.nom, lat);
+    CHECK(std::fabs(lat - c.lat_attendue) < 1.2, c.nom);
+  }
+}
+
+// ---------------------------------------------------------------------------
 static void test_flyby() {
   section("Assistance gravitationnelle");
   constexpr double R_J = 71492e3;
@@ -845,6 +1036,8 @@ int main() {
   test_vehicle();
   test_stm_and_od();
   test_porkchop();
+  test_launch_window();
+  test_body_orientation();
   test_flyby();
   test_mga();
   test_mga1dsm();
