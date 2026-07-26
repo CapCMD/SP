@@ -315,6 +315,7 @@ void USPSolarSystemSubsystem::BuildScene()
 
 		const double RadiusUU = BodyRadiusKm(Def.B);   // ÉCHELLE VRAIE
 		double MeshRadius = 50.0;               // sphère moteur : 50 u de rayon
+		const bool bStar = (Def.B == Body::Sun);
 		if (UStaticMesh* Imported = FindImportedMesh(Def.Asset))
 		{
 			C->SetStaticMesh(Imported);
@@ -323,15 +324,23 @@ void USPSolarSystemSubsystem::BuildScene()
 		else if (Sphere)
 		{
 			C->SetStaticMesh(Sphere);
-			const bool bStar = (Def.B == Body::Sun);
-			UMaterialInterface* Base = (bStar && EmissiveMat) ? EmissiveMat : BaseMat;
-			if (Base)
+			if (!bStar && BaseMat)
 			{
-				UMaterialInstanceDynamic* M = UMaterialInstanceDynamic::Create(Base, C);
-				M->SetVectorParameterValue(TEXT("Color"),
-				                           bStar ? Def.Color * 5.0f : Def.Color);
+				UMaterialInstanceDynamic* M = UMaterialInstanceDynamic::Create(BaseMat, C);
+				M->SetVectorParameterValue(TEXT("Color"), Def.Color);
 				C->SetMaterial(0, M);
 			}
+		}
+		// LE SOLEIL est ÉMISSIF (auto-lumineux), qu'il vienne du mesh importé (dont le
+		// matériau est ÉCLAIRÉ -> gris, car la lumière solaire est ailleurs) ou de la
+		// sphère moteur. On force donc l'émissif sur TOUTES ses sections. Une étoile
+		// ne doit pas dépendre d'un éclairage. [2026-07-26]
+		if (bStar && EmissiveMat)
+		{
+			UMaterialInstanceDynamic* M = UMaterialInstanceDynamic::Create(EmissiveMat, C);
+			M->SetVectorParameterValue(TEXT("Color"), Def.Color * 60.0f);
+			const int32 NumMat = FMath::Max(1, C->GetNumMaterials());
+			for (int32 s = 0; s < NumMat; ++s) C->SetMaterial(s, M);
 		}
 		C->SetWorldScale3D(FVector(RadiusUU / MeshRadius));
 		C->RegisterComponent();
@@ -651,8 +660,14 @@ void USPSolarSystemSubsystem::UpdateScene(double EpochTdb, const FVector& CamWor
 		const FVector RelKm = BodyWorldKm(Def, EpochTdb) - CamWorldKm;
 		const double DistKm = RelKm.Size();
 		const bool bGeom = DistKm < BodyRadiusKm(Def.B) * BODY_GEOM_FACTOR;
-		if ((Def.bMoon && !bMoons) || !bGeom) { C->SetVisibility(false); continue; }
-		C->SetVisibility(true);
+		// PROPAGE AUX ENFANTS (bPropagateToChildren=true) : sinon les anneaux de
+		// Saturne (mesh enfant) restent visibles quand le corps est caché. Et comme
+		// Saturne est toujours loin -> jamais affiché -> sa transform reste celle,
+		// initiale, de BuildScene (origine + échelle énorme) : l'anneau devient un
+		// disque géant centré sur l'œil, vu par la tranche = un trait blanc en
+		// grand cercle balayant le ciel. [bug du "trait" traqué le 2026-07-26]
+		if ((Def.bMoon && !bMoons) || !bGeom) { C->SetVisibility(false, true); continue; }
+		C->SetVisibility(true, true);
 		// rotation AVANT la position : SetWorldRotation ne touche pas la
 		// translation, et les enfants (anneaux de Saturne) suivent.
 		C->SetWorldRotation(OrientationAt(Def, EpochTdb));
