@@ -473,8 +473,6 @@ struct Session {
     // Publié dans TOUTES les scènes : la carte sert aussi de décor au menu, et
     // l'époque doit y être définie (sinon le décor est figé à J2000).
     publier_carte();
-
-    if (!jeu.mc_en_cours && jeu.mc_resultat >= 0) jeu.encaisser_mc();
   }
 
   // -------------------------------------------------------------------------
@@ -483,15 +481,11 @@ struct Session {
   // de physique côté rendu.
   void publier_carte() {
     auto& B = g_render_bridge;
-    const auto& vi = jeu.vinterp;
-    const bool vol_interp = vi.commis && !vi.fini && vi.arc_t.size() >= 2;
-    const bool vol_geo = jeu.vol.commis && !jeu.vol.fini;
 
-    // ÉPOQUE = MAINTENANT [GDD 14]. Un vol interplanétaire en cours EST l'horloge
-    // de jeu la plus avancée ; sinon, calendrier agence. (Pendant un vol GEO —
-    // heures/jours — les planètes ne bougent pas perceptiblement : calendrier
-    // agence, déclaré suffisant.)
-    const double epoch = vol_interp ? vi.t : jeu.epoch_courant();
+    // ÉPOQUE = MAINTENANT [GDD 14] : le calendrier de l'agence pilote l'état du
+    // monde. (Les anciens vols 2D — GEO/interplanétaire — qui avançaient jadis
+    // cette horloge ont été retirés avec la mécanique de vol héritée.)
+    const double epoch = jeu.epoch_courant();
     B.epoch_tdb = epoch;
 
     // --- flotte en service : éphéméride PAR ENGIN [GDD 8.3] ------------------
@@ -509,7 +503,7 @@ struct Session {
         ++n;
       }
       B.fleet.n = n;
-      B.fleet.vol_geo_actif = vol_geo;
+      B.fleet.vol_geo_actif = false;   // vol GEO 2D retiré (mécanique héritée)
     }
 
     // --- NOVELLUS dans le monde [GDD v1.2 11.1, 17.3] -----------------------
@@ -530,97 +524,12 @@ struct Session {
       B.station.valid = true;
     }
 
-    // --- vol interplanétaire : nominale + estimé + corridor + nœuds ----------
-    if (vol_interp) {
-      // interpolation linéaire de l'arc nominal à l'instant t (position ESTIMÉE :
-      // dans le modèle v0.6 l'estimé suit la nominale, l'incertitude vit dans
-      // ellipse_km — c'est le corridor, pas un troisième tracé. Déclaré.)
-      auto pos_arc = [&vi](double t, double& x_ua, double& y_ua) {
-        std::size_t k = 1;
-        while (k + 1 < vi.arc_t.size() && vi.arc_t[k] < t) ++k;
-        const double t0 = vi.arc_t[k - 1], t1 = vi.arc_t[k];
-        const double a = (t1 > t0) ? (t - t0) / (t1 - t0) : 0.0;
-        const double f = a < 0.0 ? 0.0 : (a > 1.0 ? 1.0 : a);
-        x_ua = vi.arc_x[k - 1] + f * (vi.arc_x[k] - vi.arc_x[k - 1]);
-        y_ua = vi.arc_y[k - 1] + f * (vi.arc_y[k] - vi.arc_y[k - 1]);
-      };
-
-      // l'arc nominal est FIGÉ au commit : publié une seule fois
-      const double sig = vi.t_dep + static_cast<double>(vi.arc_t.size());
-      if (B.last_arc_sig != sig) {
-        const int n_src = static_cast<int>(vi.arc_t.size());
-        const int n = n_src < RenderBridge::VehicleSnap::MAX_PTS
-                          ? n_src : RenderBridge::VehicleSnap::MAX_PTS;
-        for (int i = 0; i < n; ++i) {
-          const int k = (n_src - 1) * i / (n - 1);
-          B.vehicle.traj_m[i][0] = vi.arc_x[k] * cst::AU;
-          B.vehicle.traj_m[i][1] = vi.arc_y[k] * cst::AU;
-          B.vehicle.traj_m[i][2] = 0.0;
-        }
-        B.vehicle.n = n;
-        B.last_arc_sig = sig;
-        B.vehicle.gen.fetch_add(1);
-      }
-
-      double x, y;
-      pos_arc(vi.t, x, y);
-      B.vehicle.pos_m[0] = x * cst::AU;
-      B.vehicle.pos_m[1] = y * cst::AU;
-      B.vehicle.pos_m[2] = 0.0;
-      B.vehicle.corridor_3s_m = vi.ellipse_km * 1000.0;   // 3σ courante du modèle
-
-      // nœuds de manœuvre restants [GDD 8.3] : TCM1 / TCM2 sur l'arc
-      int n_nodes = 0;
-      const double t_noeuds[2] = {vi.t_tcm1, vi.t_tcm2};
-      const bool faits[2] = {vi.tcm1_faite, vi.tcm2_faite};
-      for (int i = 0; i < 2; ++i) {
-        if (t_noeuds[i] <= vi.arc_t.front() || t_noeuds[i] >= vi.arc_t.back()) continue;
-        pos_arc(t_noeuds[i], x, y);
-        B.vehicle.nodes_m[n_nodes][0] = x * cst::AU;
-        B.vehicle.nodes_m[n_nodes][1] = y * cst::AU;
-        B.vehicle.nodes_m[n_nodes][2] = 0.0;
-        B.vehicle.node_done[n_nodes] = faits[i];
-        ++n_nodes;
-      }
-      B.vehicle.n_nodes = n_nodes;
-      B.vehicle.valid = true;
-    } else {
-      B.vehicle.valid = false;
-      B.last_arc_sig = -1.0;
-    }
-
-    // --- vol GEO : trace estimée + orbite cible [GDD 8.3, 7.5] --------------
-    // À l'échelle VRAIE, l'orbite GEO (42 164 km) se voit directement sur la
-    // carte dès qu'on focalise la Terre.
-    if (vol_geo && jeu.vol.traj_t.size() >= 2) {
-      const auto& vo = jeu.vol;
-      const double sig = static_cast<double>(vo.traj_t.size());
-      if (B.last_geo_sig != sig) {           // la trace s'allonge : republier
-        const int n_src = static_cast<int>(vo.traj_t.size());
-        const int n = n_src < RenderBridge::GeoFlightSnap::MAX_PTS
-                          ? n_src : RenderBridge::GeoFlightSnap::MAX_PTS;
-        for (int i = 0; i < n; ++i) {
-          const int k = (n_src - 1) * i / (n - 1);
-          B.geo.traj_km[i][0] = vo.traj_x[k];
-          B.geo.traj_km[i][1] = vo.traj_y[k];
-          B.geo.traj_km[i][2] = vo.traj_z[k];
-        }
-        B.geo.n = n;
-        B.last_geo_sig = sig;
-        B.geo.gen.fetch_add(1);
-      }
-      const Vec3 p = jeu.vol_position_estimee();   // km — l'ESTIMÉ, pas la vérité
-      B.geo.pos_km[0] = p.x;
-      B.geo.pos_km[1] = p.y;
-      B.geo.pos_km[2] = p.z;
-      B.geo.sigma_km = vo.sigma_pos_km;
-      B.geo.target_sma_km =
-          (jeu.actif() ? jeu.actif()->cible_sma : 42164170.0) / 1000.0;
-      B.geo.valid = true;
-    } else {
-      B.geo.valid = false;
-      B.last_geo_sig = -1.0;
-    }
+    // Les tracés de vol 2D (interplanétaire + GEO) ont été retirés avec la
+    // mécanique de vol héritée de `app::Jeu`. Le pont garde ses champs
+    // `vehicle`/`geo` invalides : le rendu les ignore (ils sont réintroduits par
+    // la boucle de mission vécue, GDD 9, quand elle publiera une vraie trace).
+    B.vehicle.valid = false;
+    B.geo.valid = false;
   }
 };
 

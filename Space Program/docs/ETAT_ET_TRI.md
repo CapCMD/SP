@@ -491,13 +491,23 @@ ils ne sont plus atteignables en jeu, mais le code pèse encore.
 
 ### 5.3 À TRANCHER (ni évident à garder, ni à jeter)
 
-- `app/jeu.{hpp,cpp}` (2531 lignes) : contient **à la fois** le modèle d'agence
-  utile (contrats, économie, flotte, sauvegarde, époque) **et** toute la
-  mécanique du vol GEO/interplanétaire 2D (`Vol`, `VolInterp`, `Conception`,
-  `EtudeMars`, wizard, marché, Monte-Carlo). Le jeu cible refait ces boucles via
-  `MissionPlan` + phases + postes de calcul. → **Scinder** : garder l'agence,
-  déplacer/supprimer le reste quand la boucle de mission cible existera
-  (jalon D). Ne rien supprimer avant, sous peine de casser les postes.
+- ~~`app/jeu.{hpp,cpp}` (2531 lignes)~~ — **SCINDÉ le 2026-07-26.** Le modèle
+  mélangeait l'agence utile (contrats, économie, flotte, sauvegarde, époque)
+  et toute la mécanique de vol 2D héritée (`Vol`, `VolInterp`, `Conception`,
+  `EtudeMars`, wizard, marché, Monte-Carlo, installations/recherches maison).
+  Cette dernière n'était **plus atteignable** (aucun écran ne l'armait depuis
+  le rendu total UE5 : plus aucun appel à `commit()`/`interp_commit()`/
+  `vol_engager()` dans le code vif ; seul `session.hpp::publier_carte` en lisait
+  encore l'état, dans des branches toujours-fausses) et est remplacée par la
+  couche ARES + `mission/MissionLoop.hpp`. Retirée. `jeu.cpp` : **2035 → 361 l.**,
+  `jeu.hpp` : **496 → 141 l.**, `session.hpp` : **−115 l.** (branches de tracé de
+  vol mortes). Save/load : format inchangé (les clés héritées `inst*`/`rech*`
+  sont ignorées si présentes dans une vieille save). Vérifié : oracles
+  `test_carte_flotte` 135/135 + `test_session` 82/82, **build `SPEditor`
+  Succeeded**. NB : le rendu du vaisseau/GEO dans `SPSolarSystem` (piloté par
+  `RenderBridge`) reste en place mais dort (snapshots `valid=false`) — il sera
+  réveillé par la boucle de mission vécue [GDD 9] quand elle publiera une vraie
+  trace.
 - `mission/include/fen/mission/Program.hpp` : embryon de contrats, à réconcilier
   avec `MissionFsm.hpp` (GDD 4.1).
 
@@ -505,7 +515,9 @@ ils ne sont plus atteignables en jeu, mais le code pèse encore.
 
 1. Porter le contenu de `ares_ecrans.hpp` dans les postes de l'ISS → supprimer le fichier.
 2. Amputer `jeu_ecrans.hpp` de ses écrans morts → supprimer `hud.hpp`, `panels.hpp`, `implot`.
-3. Construire la boucle de mission cible (jalon D) → scinder `jeu.cpp`.
+3. ~~Construire la boucle de mission cible (jalon D) → scinder `jeu.cpp`.~~
+   — **fait** (2026-07-26) : boucle cible = `MissionLoop.hpp` ; `jeu.cpp` scindé
+   (vol 2D retiré, cf. §5.3).
 4. Purger `_archive` sauf `build_vk/`.
 
 ---
