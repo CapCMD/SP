@@ -14,6 +14,8 @@
 #include "Framework/Application/SlateApplication.h"
 #include "GameFramework/GameUserSettings.h"
 #include "Kismet/KismetSystemLibrary.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
 #include "Misc/Paths.h"
 
 // pimpl : `fen::app::Session` est du C++ pur, il ne peut pas traverser un .h UE.
@@ -76,7 +78,9 @@ void USPGameSubsystem::ArmerCapture()
 	if (Scene < 1) return;
 	fen::app::Session& S = Holder->Session;
 	S.nouvelle_partie("CAPTURE", fen::app::ModeAide::Normal);
-	S.scene = (Scene == 2) ? fen::app::SceneJeu::Carte : fen::app::SceneJeu::Station;
+	// -spscene=iss|map : même monde, cadrage différent (map=2 -> plan système).
+	S.scene = fen::app::SceneJeu::Monde;
+	S.cadrage = (Scene == 2) ? fen::app::Cadrage::Systeme : fen::app::Cadrage::Bord;
 	// `-spfocus=N` : équivalent du `--focus N` de la référence. On pose la
 	// distance de cadrage d'emblée pour que la capture ne saisisse pas le vol
 	// en cours de route.
@@ -86,9 +90,13 @@ void USPGameSubsystem::ArmerCapture()
 		fen::app::g_render_bridge.focus_body = Focus;
 		fen::app::g_render_bridge.cam.dist_km = fen::app::distance_cadrage(Focus);
 	}
+	// -spdist=<km> : distance de vue imposée (cadrer un objet proche d'un corps).
+	const double Dist = SPCapture::RequestedDist();
+	if (Dist > 0.0) fen::app::g_render_bridge.cam.dist_km = Dist;
 	// `-sppost=N` : ouvre un poste d'emblée (équivalent `--panel N`).
 	const int Post = SPCapture::RequestedPost();
-	if (Post >= 0 && S.scene == fen::app::SceneJeu::Station) S.poste_ouvert = Post;
+	if (Post >= 0 && S.scene == fen::app::SceneJeu::Monde &&
+	    S.cadrage == fen::app::Cadrage::Bord) S.poste_ouvert = Post;
 }
 
 // Résolution / plein écran. N'a de sens qu'en jeu autonome : en PIE la fenêtre

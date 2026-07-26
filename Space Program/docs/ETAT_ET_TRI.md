@@ -50,7 +50,9 @@ UnrealEditor.exe SP.uproject -game -windowed -ResX=1280 -ResY=720 -nosplash ^
 `-spfocus` = le `--focus N` de la référence (indice `fen::ephem::Body` :
 3 = Terre, 5 = Mars, 6 = Jupiter). `-sppost=N` ouvre un poste d'emblée
 (0 = AGENCE, 1 = ANALYSE, 2 = OPERATIONS, 4 = CONCEPTION, 5 = PLANIFICATION) —
-l'équivalent du `--panel N` de la référence. Prendre `-spframes=900` après tout
+l'équivalent du `--panel N` de la référence. `-spdist=<km>` impose la distance de
+vue (sinon la distance de cadrage du corps) — pour cadrer un objet proche d'un
+corps (Novellus en LEO). Prendre `-spframes=900` après tout
 changement de matériau : à froid, les shaders ne sont pas prêts à 300 frames et
 l'image capturée montre des matériaux de repli.
 
@@ -131,6 +133,107 @@ RESTE du ch.15 (gros chantier UI/technique, différé après le slice modèle) :
   ni de chemin d'exécution du code joueur (⇒ vient avec la toolchain ci-dessous) ;
 - l'**éditeur de graphe** (mode Normal, mêmes appels que le C++) ;
 - la **toolchain C++ embarquée + bac à sable** (mode Pro).
+
+### PASSAGE AU MONDE UNIQUE 1:1 (GDD v1.2, 2026-07-25)
+
+Le seul delta v1.2 non traité par les passes précédentes est **la scène unique**
+[décision 19 + ch.8.3/17.3/17.4/18], confirmé par l'utilisateur : le monde d'ARES
+est **UNE seule scène persistante = le système solaire à l'échelle 1:1**. Novellus
+ET les vaisseaux y sont placés à leur position réelle ; la **caméra libre** zoome
+en continu du plan système au plan vaisseau ; la « carte » n'est qu'un **cadrage
+lointain** du même monde, **[M] = signet de caméra**. Les **déplacements 3D
+restent** (marche 1re personne dans Novellus et dans les missions vécues) — seul
+le *pilotage* est médié par le terminal, pas l'observation ni l'ambulation.
+
+Le code partait de l'inverse : **3 scènes exclusives** `SceneJeu{Titre,Station,
+Carte}` togglées par [M]. Refactor en **plusieurs incréments**, chacun build +
+oracles verts.
+
+**Incrément 1 — FONDATION (FAIT, 2026-07-25).** Modèle de scène unifié dans le
+cœur pur, migré côté pont UE, rendu à l'identique de l'ancien couple Station/
+Carte (aucune régression visuelle voulue à ce stade) :
+- `app/bridge_flags.hpp` : `enum SceneJeu{Titre,Monde}` + nouveau
+  `enum Cadrage{Bord,Systeme}` (le plan de caméra DANS le Monde, pas une scène).
+  `carte3d_active` devient le signal « cadrage == Systeme ».
+- `app/session.hpp` : champ `cadrage`, `nouvelle_partie` → `Monde`+`Bord`,
+  publication du pont dérivée de (scène, cadrage), postes publiés au seul `Bord`.
+- Pont UE migré : `SPPlayerController` (routage entrée par cadrage ; **[M] bascule
+  le cadrage Bord↔Systeme, plus la scène**), `SPHud` (`PaintStation`/`PaintCarte`
+  selon cadrage ; visibilité poste ; reprises de partie), `SPStation` (mesh actif
+  au cadrage Bord = `Monde && !carte3d_active`), `SPGameSubsystem` (`-spscene`).
+  `SPSolarSystem` inchangé (déjà piloté par `carte3d_active`||`menu_backdrop`).
+- Oracle `tests/test_session.cpp` réécrit sur le nouveau modèle : **56/56**.
+- Build `SPEditor` : Succeeded. **NB : rendu à l'identique — la sensation d'« un
+  seul monde » n'arrive qu'à l'incrément 2.**
+
+**Incrément 2 — CONTINUITÉ (FAIT, 2026-07-25).** [M] n'est plus une bascule sèche
+mais un VOL de caméra continu, ancré sur la Terre (là où orbite Novellus), qui
+réutilise le lissage de distance déjà présent côté système (`SmoothDistKm`,
+τ=0,35 s) :
+- `app/session.hpp` : modèle `VolCamera` (progrès 0→1, smoothstep, interpolation
+  LOG de la distance de vue) + `demarrer_vol_cadrage()` ([M]) et
+  `retour_bord_immediat()` (Échap). `Session::tick(dt)` avance le vol et pilote
+  `cam.dist_km`/`focus_body`. Bord→Système : la vue s'ouvre AU RAS de la Terre
+  et RECULE ; Système→Bord : la caméra PLONGE vers la Terre puis passe la main à
+  la 1re personne à l'arrivée (fin du vol).
+- `SPPlayerController` : [M] lance le vol (plus la bascule sèche) ; zoom/orbite
+  manuel suspendu pendant le vol (`if (!vol_cam.actif) TickCarte`) ; Échap = retour
+  immédiat ; l'ambulation n'est pilotée que si l'on est encore à bord.
+- Oracle `test_session` : **73/73** (dont 17 sur le vol) ; build `SPEditor`
+  Succeeded.
+- LIMITE ASSUMÉE : un seul plan rend à la fois — il reste UNE coupure au zoom le
+  plus serré (intérieur ↔ Terre au ras), mais le MOUVEMENT de caméra est continu.
+  La coexistence visuelle (voir l'intérieur grandir dans le zoom) est l'incr. 3.
+
+**Incrément 3 — MONDE UNIQUE (moteur ch.18), EN COURS.** Constat en lisant le
+rendu : la carte porte DÉJÀ le gros du ch.18 pour le système — coordonnées double
+précision, rendu caméra-relatif (floating origin), near-clip adaptatif, et
+compression de profondeur « scaled space » (`app/scaled_space.hpp`). Le vrai
+manque est que **Novellus et l'ambulation sont un MONDE À PART** de ce pipeline.
+- **Incr. 3a — position monde de Novellus (FAIT, 2026-07-25).** Le C++ pur publie
+  la position RÉELLE de Novellus (orbite LEO 418 km, cercle écliptique déclaré,
+  helper flotte `flotte_position_rel` réutilisé — aucune physique côté rendu) sur
+  `RenderBridge::station`. Oracle `test_session` **80/80** ; build Succeeded.
+  Rien ne la REND encore — c'est 3b.
+- **Incr. 3b — Novellus rendu dans la carte : MARQUEUR FAIT (2026-07-25).**
+  Composant `StationMarker` (sphère émissive bleue, `SPSolarSystem`) placé à la
+  position LEO publiée par 3a, via le pipeline caméra-relatif + `MarkerScale` de
+  la flotte (même chemin PROUVÉ, aucune physique côté rendu). Build Succeeded ;
+  capture `-spscene=map` SANS régression (identique à `ue_terre_iau_natif.png`,
+  y compris les panneaux translucides = coquille de nuages low-poly préexistante).
+  Nouveau flag de capture **`-spdist=<km>`** (distance de vue imposée, utile pour
+  cadrer un objet proche d'un corps). CAVEAT vérifié par SCAN DE PIXELS : à la
+  date réelle du test, Novellus (418 km) est OCCULTÉ derrière la Terre — correct
+  pour un objet LEO vu de l'extérieur ; en jeu, orbiter la caméra (glisser) le
+  révèle. Le visuel positif décisif vient avec 3c (modèle extérieur + focus).
+- **Incr. 3c-1 — Novellus focalisable + label « [M] ENTRER » : FAIT (2026-07-25).**
+  Sentinelle de focus `FOCUS_STATION` (=1000, hors enum Body) comprise par le
+  rendu (`FocusWorldKm`), le picking (`PublishScreen` : Novellus dans la liste
+  écran, donc CLIQUABLE), le zoom (`SPPlayerController`) et le HUD (`SPHud` : label
+  centré « NOVELLUS / ORBITE TERRESTRE BASSE - 418 km » + « [ M ] ENTRER » vert,
+  format `ref_issfocus.png`). [M] entre déjà à bord (vol de caméra incr.2). Oracle
+  82/82 ; build OK. VÉRIFIÉ PAR CAPTURE `-spfocus=1000` : Novellus cadré contre les
+  étoiles (caméra collée → Terre hors champ, pas d'occultation), anneau de
+  désignation + label + « [M] ENTRER ». PIÈGE PAYÉ : `body_name`/`body_radius` NE
+  doivent PAS être appelés sur le sentinelle (hors enum) — court-circuités dans le
+  HUD (label) et le clamp de zoom.
+- **Incr. 3c-2 — modèle extérieur ISS : FAIT (2026-07-25), via le RENDU À ÉCHELLE
+  RÉELLE.** Le vrai modèle `ISS_stationary` (669 meshes NANITE) rend au zoom proche
+  à la place du marqueur (LOD par taille apparente), TEXTURÉ + ÉCLAIRÉ, conforme à
+  `ref_issfocus.png`. Racine du blocage trouvée par INVESTIGATION (pas captures en
+  boucle) : (1) les meshes sont Nanite ; (2) Nanite + monde caméra-relatif à
+  MICRO-ÉCHELLE (109 m = 0,109 u à 1 u = 1 km) = rien ne rend. L'utilisateur a
+  tranché la vraie cause : passer TOUTE la carte à l'ÉCHELLE RÉELLE (1 u = 1 cm,
+  voir §4). À cette échelle l'ISS fait ~10 900 u, Nanite marche, matériaux réels,
+  échelle ~1.0 — plus AUCUN hack (repli/émissif/micro). VÉRIFIÉ par capture
+  `-spfocus=1000` (ISS complète, panneaux dorés, éclairée). Composant `ExtRoot`
+  (enfant du MapActor) + `ExtLight` d'appoint ; chargé tôt (Tick) pour chauffer les
+  shaders. Bodies aussi re-vérifiés à échelle réelle (Terre jour/nuit OK, marqueur
+  Novellus en LEO visible). Build OK. RESTE : R-3 (nettoyer `scaled_space.hpp` du
+  dépôt si vraiment inutile), et **3c-3** (handoff vers l'intérieur ambulable).
+- **Incr. 3c-3 — handoff continu vers l'intérieur ambulable** : remplacer la
+  coupure au bout du vol [M] par une transition où l'intérieur prend le relais
+  quand la caméra entre dans l'enveloppe de la station — fin de la dernière coupure.
 
 ### Cadrage du CONTENU (décision du 2026-07-24)
 
@@ -326,15 +429,30 @@ Build : `Build.bat SPEditor Win64 Development -project=…\SP.uproject -WaitMute
 - **Pont sens unique** `app/bridge_flags.hpp` : le jeu écrit, le rendu lit ;
   en retour UE publie projections écran et proximité des postes. Aucun recalcul
   de physique côté rendu.
-- **Carte à l'échelle VRAIE** : 1 u = 1 km, rayons et distances réels, rendu
-  relatif à la caméra (l'œil est l'origine). Compression de profondeur
-  « scaled space » (`app/scaled_space.hpp`) : au-delà de 3e5 km,
-  `d' = D0(1+ln(d/D0))` avec le rayon suivant la même homothétie — projection
-  écran EXACTE, ordre d'occultation préservé (garanties sous oracle).
+- **Carte à l'ÉCHELLE RÉELLE : 1 u = 1 cm (natif UE), AUCUNE compression**
+  (décision utilisateur 2026-07-25 : « 1 m = 1 m point barre »). Rendu relatif à
+  la caméra (l'œil = origine, positions km rebasées en double puis converties en
+  cm réels via `UU_PER_KM = 1e5` dans `SPSolarSystem`). Un objet de 100 m fait
+  10 000 u = taille NORMALE → Nanite/culling/précision fonctionnent, plus de
+  micro-échelle. Les corps lointains restent des **marqueurs HUD** (pas de conflit
+  de z-buffer, donc pas besoin de compression). **`scaled_space.hpp` n'est plus
+  utilisé par le rendu** (fichier + oracles conservés, include retiré de
+  `SPSolarSystem`). Le « km » du pont (`cam.dist_km`, `distance_cadrage`, vol_cam)
+  reste une distance LOGIQUE ; seule la conversion km→u de rendu a changé.
 - **Station à l'échelle UE** : 1 u = 1 cm, modèle mis à 55 m d'envergure
   (valeur de la référence). Repère station (m, X = couloir, Z = haut) → UE :
   ×100 avec miroir en y.
 - **Toute approximation est DÉCLARÉE** dans le HUD [GDD 6.8].
+- **NIVEAU VIDE DÉDIÉ `/Game/Maps/SP_Empty`** (créé 2026-07-25 par
+  `Tools/make_empty_level.py`, commandlet `UnrealEditor-Cmd -run=pythonscript`).
+  Le jeu se bâtit PAR CODE (WorldSubsystems au BeginPlay) : il lui faut juste un
+  niveau vide comme conteneur. Réglé dans `Config/DefaultEngine.ini`
+  (`GameDefaultMap` + `EditorStartupMap` = SP_Empty) et
+  `Config/DefaultEditorPerProjectUserSettings.ini` (`LoadLevelAtStartup=ProjectDefault`)
+  + `Saved/Config/.../EditorPerProjectUserSettings.ini` (`[EditorStartup] LastLevel`).
+  RÉSOUT le bug PIE (l'éditeur ouvrait le template landscape `OpenWorld` et les
+  subsystems bâtissaient par-dessus). Vérifié : `-game` sur SP_Empty rend la scène
+  SP proprement.
 
 ---
 

@@ -1,4 +1,5 @@
 #include "fen/ephem/Ephemeris.hpp"
+#include "fen/ephem/BodyOrientation.hpp"   // spin_axis_ecliptic (plan équatorial de Saturne)
 #include "fen/astro/Elements.hpp"
 #include "fen/astro/Kepler.hpp"
 #include "fen/core/Constants.hpp"
@@ -183,6 +184,32 @@ Vec3 moon_geocentric(Epoch t) {
               R * std::sin(beta)};
 }
 
+// --- TITAN : orbite saturnocentrique ----------------------------------------
+// Titan N'EST PAS dans la table de Standish (planètes majeures seulement). On le
+// place sur une orbite CIRCULAIRE dans le PLAN ÉQUATORIAL de Saturne (plan de
+// Laplace ~ plan des anneaux), rayon = demi-grand axe réel, moyen mouvement tiré
+// du GM du système saturnien. Le plan vient du pôle IAU de Saturne (le MÊME que
+// celui qui incline les anneaux à 26.7° au rendu), donc Titan tourne dans le bon
+// plan incliné, solidaire des anneaux.
+// ERREUR DÉCLARÉE : e (~0.029) et l'inclinaison à l'équateur de Saturne (~0.35°)
+// sont NÉGLIGÉS ; la PHASE le long de l'orbite n'est pas calée sur l'éphéméride
+// réelle (origine au nœud ascendant à J2000). Le PLAN, le RAYON et la PÉRIODE
+// (~15.9 j) sont justes. C'est un modèle, pas un mensonge.
+// V2 : éphéméride satellitaire (SAT441) sans changer l'interface.
+Vec3 titan_saturncentric(Epoch t) {
+  const double a = TITAN_SMA_AROUND_SATURN;              // m
+  const double n = std::sqrt(MU_SATURN / (a * a * a));   // rad/s (GM système saturnien)
+  const double theta = n * t.tdb;                        // phase depuis J2000
+  const Vec3 pole = spin_axis_ecliptic(Body::Saturn);    // écliptique J2000, unitaire
+  // Base directe du plan équatorial : u = ligne des nœuds (équateur ∩ écliptique),
+  // v = 90° en avant dans le plan (orbite prograde autour du pôle). Repli sur x si
+  // le pôle est ~ normal à l'écliptique (pas le cas de Saturne, mais on protège).
+  Vec3 u = cross(Vec3{0.0, 0.0, 1.0}, pole);
+  u = (norm2(u) > 1e-12) ? unit(u) : Vec3{1.0, 0.0, 0.0};
+  const Vec3 v = unit(cross(pole, u));
+  return (u * std::cos(theta) + v * std::sin(theta)) * a;
+}
+
 } // namespace
 
 PosVel StandishEphemeris::heliocentric(Body b, Epoch t) const {
@@ -197,6 +224,16 @@ PosVel StandishEphemeris::heliocentric(Body b, Epoch t) const {
     const double dt = 60.0;
     const Vec3 vm = (moon_geocentric(t + dt) - moon_geocentric(t - dt)) / (2.0 * dt);
     return PosVel{e.r + rm, e.v + vm};
+  }
+
+  if (b == Body::Titan) {
+    // Titan n'est pas tabulé : état de Saturne + orbite saturnocentrique
+    // (cf. titan_saturncentric). Vitesse par différence centrée, comme la Lune.
+    const PosVel s = heliocentric(Body::Saturn, t);
+    const Vec3 rt = titan_saturncentric(t);
+    const double dt = 60.0;
+    const Vec3 vt = (titan_saturncentric(t + dt) - titan_saturncentric(t - dt)) / (2.0 * dt);
+    return PosVel{s.r + rt, s.v + vt};
   }
 
   const StdElem* E = table(b);

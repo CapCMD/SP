@@ -26,7 +26,6 @@
 
 // Les entêtes du jeu AVANT tout entête UE (macros PI/check, cf. SP.Build.cs).
 #include "app/bridge_flags.hpp"
-#include "app/scaled_space.hpp"
 #include "fen/core/Constants.hpp"
 #include "fen/ephem/BodyOrientation.hpp"
 #include "fen/ephem/Ephemeris.hpp"
@@ -82,8 +81,13 @@ const FBodyDef GBodies[] = {
 };
 constexpr int32 NUM_BODIES = UE_ARRAY_COUNT(GBodies);
 
-// ═══ ÉCHELLE : 1 u = 1 km. Aucune exagération, aucun plancher. ═══
-constexpr double KM_PER_M = 1.0e-3;
+// ═══ ÉCHELLE RÉELLE : 1 u = 1 cm (unité native UE), AUCUNE compression. ═══
+// Le rendu reste caméra-relatif (œil = origine, positions km rebasées en double),
+// mais on convertit en cm RÉELS : un objet de 100 m fait 10 000 u (taille NORMALE)
+// -> fini la micro-échelle qui cassait Nanite/culling/précision. Les corps
+// lointains restent des marqueurs HUD (pas de conflit de z-buffer).
+constexpr double KM_PER_M  = 1.0e-3;
+constexpr double UU_PER_KM = 1.0e5;      // 1 km = 100 000 cm = 100 000 u
 constexpr int32  ORBIT_SAMPLES = 192;
 constexpr double ORBIT_REDRAW_DAYS = 2.0;      // dérive d'éphéméride sous le pixel
 constexpr int32  FLEET_PER_CAT = 6;
@@ -92,18 +96,36 @@ constexpr int32  FLEET_TOTAL = 19;
 // Taille ANGULAIRE des marqueurs de scène (fraction de la distance à l'œil) :
 // ils gardent une taille écran constante quel que soit le zoom.
 constexpr double MARKER_ANG = 0.0022;
+// Un corps n'est rendu en GÉOMÉTRIE que si sa distance à l'œil < rayon × ce
+// facteur (sinon MARQUEUR HUD). Garde la géométrie dans le domaine où le float
+// est précis (~sub-km sur le corps) : au-delà, à l'échelle réelle, un corps à
+// ~1e14 u faceterait. ~ correspond à un rayon apparent de quelques pixels.
+constexpr double BODY_GEOM_FACTOR = 400.0;
+// PLAFOND DE PRÉCISION GPU. UE convertit la matrice monde de CHAQUE primitive en
+// format GPU (tuile+offset float) et exige que l'origine reste sous
+// UE_DF_FLOAT_MAX_VALUE = (1<<23)/4 - 1 ≈ 2,10e6 u (Core/DoubleFloat.cpp:19).
+// À l'échelle réelle (1 u = 1 cm), un composant rebasé sur un corps focalisé
+// LOINTAIN (lumière solaire, marqueurs station/flotte à des dizaines d'UA de
+// l'œil) dépasse ce plafond de 8 ordres de grandeur -> ensure « precision loss
+// while converting matrix to GPU format » + transform corrompu. On BORNE donc
+// la position de rendu des COMPOSANTS (pas les lignes d'orbite) à ce rayon, sous
+// le plafond avec marge. L'œil étant à l'origine, borner radialement préserve
+// EXACTEMENT la position écran (projection invariante par échelle radiale) ;
+// seule la profondeur du marqueur change — invisible pour un point/marqueur.
+constexpr double RENDER_MAX_UU = 1.0e6;
 
-// ═══ COMPRESSION DE PROFONDEUR (« scaled space ») ═══
-// Le contrat, ses garanties et ses oracles vivent dans app/scaled_space.hpp
-// (C++ pur, testable hors moteur) : ici on ne fait que l'appliquer. En résumé :
-// au-delà de D0 on rapproche radialement l'objet ET on réduit son rayon de la
-// même homothétie, donc la projection écran reste EXACTE ; seule la profondeur
-// est comprimée, de façon monotone.
+// ═══ REBASÉ (km) -> RENDU (cm réels) ═══
+// Ancienne « compression scaled space » SUPPRIMÉE (décision 2026-07-25 : rendu à
+// échelle réelle). On applique juste le facteur d'échelle constant km->cm. La
+// profondeur des corps lointains est gérée par le LOD (marqueurs HUD), plus par
+// une homothétie. Nom conservé pour limiter la diffusion du changement.
 FVector CompressKm(const FVector& RelKm, double* OutFactor = nullptr)
 {
-	const double F = fen::app::scaled_space_factor(RelKm.Size());
-	if (OutFactor) *OutFactor = F;
-	return (F == 1.0) ? RelKm : RelKm * F;
+	// Échelle réelle CONSTANTE (plus de compression de profondeur) : rebasé (km,
+	// relatif à l'œil) -> cm réels. Le facteur est le même pour la position ET le
+	// rayon (OutFactor), donc la taille angulaire reste exacte.
+	if (OutFactor) *OutFactor = UU_PER_KM;
+	return RelKm * UU_PER_KM;
 }
 
 // L'éphéméride Standish est sans état : une instance partagée suffit.
@@ -337,7 +359,7 @@ void USPSolarSystemSubsystem::BuildScene()
 	MapActor->SunLight->SetupAttachment(MapActor->GetRootComponent());
 	MapActor->SunLight->SetMobility(EComponentMobility::Movable);
 	MapActor->SunLight->bUseInverseSquaredFalloff = false;
-	MapActor->SunLight->SetAttenuationRadius(6.0e9f);   // km : au-delà de Neptune
+	MapActor->SunLight->SetAttenuationRadius(6.0e14f);  // 6e9 km en u (échelle réelle) : au-delà de Neptune
 	MapActor->SunLight->SetIntensity(12.0f);
 	MapActor->SunLight->SetLightFalloffExponent(0.02f);
 	MapActor->SunLight->SetCastShadows(false);
@@ -359,6 +381,24 @@ void USPSolarSystemSubsystem::BuildScene()
 	}
 	MapActor->VehicleMarker->SetVisibility(false);
 	MapActor->VehicleMarker->RegisterComponent();
+
+	// Marqueur de NOVELLUS [GDD v1.2 11.1, 17.3] : la station EST dans le monde
+	// (orbite LEO). Bleu, façon losange de la référence (ref_issfocus.png).
+	MapActor->StationMarker = NewObject<UStaticMeshComponent>(MapActor);
+	MapActor->StationMarker->SetupAttachment(MapActor->GetRootComponent());
+	MapActor->StationMarker->SetMobility(EComponentMobility::Movable);
+	MapActor->StationMarker->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	MapActor->StationMarker->SetCastShadow(false);
+	if (Sphere) MapActor->StationMarker->SetStaticMesh(Sphere);
+	if (EmissiveMat)
+	{
+		UMaterialInstanceDynamic* M =
+			UMaterialInstanceDynamic::Create(EmissiveMat, MapActor->StationMarker);
+		M->SetVectorParameterValue(TEXT("Color"), FLinearColor(0.3f, 0.7f, 1.0f) * 4.0f);
+		MapActor->StationMarker->SetMaterial(0, M);
+	}
+	MapActor->StationMarker->SetVisibility(false);
+	MapActor->StationMarker->RegisterComponent();
 
 	// Marqueurs de flotte [GDD 8.3] : petits points émissifs à leur position VRAIE.
 	const FLinearColor FleetCols[4] = {
@@ -426,6 +466,13 @@ void USPSolarSystemSubsystem::BuildScene()
 		PP.DepthOfFieldFocalDistance = 0.0f;
 		PP.bOverride_VignetteIntensity = true;
 		PP.VignetteIntensity = 0.15f;
+		// MOTION BLUR COUPÉ. Le monde est rebasé sur l'œil chaque frame : quand la
+		// caméra tourne, ce sont les OBJETS que le moteur voit « bouger » (vecteurs
+		// de mouvement énormes et faux), pas la caméra. Le motion blur les étale
+		// alors en traînées (« les textures bavent »). Une carte façon NASA Eyes
+		// n'a de toute façon aucun besoin de flou de mouvement.
+		PP.bOverride_MotionBlurAmount = true;
+		PP.MotionBlurAmount = 0.0f;
 	}
 
 	bBuilt = true;
@@ -462,9 +509,115 @@ void USPSolarSystemSubsystem::SetMapActive(bool bActive)
 FVector USPSolarSystemSubsystem::FocusWorldKm(double EpochTdb) const
 {
 	const int Focus = fen::app::g_render_bridge.focus_body.load();
+	// NOVELLUS : pas un corps du catalogue, mais focalisable. Sa position monde =
+	// Terre + offset LEO publié par le jeu [GDD v1.2 11.1, 17.3].
+	if (Focus == fen::app::FOCUS_STATION)
+	{
+		const auto& St = fen::app::g_render_bridge.station;
+		if (St.valid.load())
+		{
+			const FBodyDef* Terre = FindDef(Body::EarthBary);
+			const FVector TerrePos = Terre ? BodyWorldKm(*Terre, EpochTdb) : FVector::ZeroVector;
+			return TerrePos + EclToUeKmd(St.rel_m[0], St.rel_m[1], St.rel_m[2]);
+		}
+		return FVector::ZeroVector;
+	}
 	if (Focus < 0 || Focus >= static_cast<int>(Body::COUNT)) return FVector::ZeroVector;
 	const FBodyDef* Def = FindDef(static_cast<Body>(Focus));
 	return Def ? BodyWorldKm(*Def, EpochTdb) : FVector::ZeroVector;
+}
+
+// Charge le modèle ISS EXTÉRIEUR (multi-mesh NANITE) à l'échelle RÉELLE : le mesh
+// est déjà en cm réels (~109 m = 10 900 u), donc échelle ~1.0 et Nanite fonctionne
+// normalement. Rattaché au MapActor sous ExtRoot ; UpdateScene le positionne
+// caméra-relatif, visible de près (LOD).
+void USPSolarSystemSubsystem::BuildExteriorStation()
+{
+	bExtBuilt = true;                     // une seule tentative (succès ou non)
+	UWorld* W = GetWorld();
+	if (!W || !MapActor) return;
+
+	const FAssetRegistryModule& ARM =
+		FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+	TArray<FAssetData> Assets;
+	ARM.Get().GetAssetsByPath(
+		FName(TEXT("/Game/ISS/Exterior/ISS_stationary/StaticMeshes")), Assets, true);
+
+	TArray<UStaticMesh*> Meshes;
+	FBox Bounds(ForceInit);
+	for (const FAssetData& A : Assets)
+	{
+		if (A.AssetClassPath != UStaticMesh::StaticClass()->GetClassPathName()) continue;
+		UStaticMesh* M = Cast<UStaticMesh>(A.GetAsset());
+		if (!M) continue;
+		Meshes.Add(M);
+		const FBoxSphereBounds B = M->GetBounds();
+		Bounds += FBox(B.Origin - B.BoxExtent, B.Origin + B.BoxExtent);
+	}
+	if (Meshes.Num() == 0)
+	{
+		UE_LOG(LogTemp, Warning,
+		       TEXT("[SPSolarSystem] aucun mesh ISS exterieur sous /Game/ISS/Exterior/ISS_stationary/StaticMeshes"));
+		return;
+	}
+
+	const FVector Size = Bounds.GetSize();
+	const double SpanUU = FMath::Max3(Size.X, Size.Y, Size.Z);
+	const double EnvM = 109.0;             // envergure RÉELLE de l'ISS (~109 m)
+	// envergure réelle -> u (1 u = 1 cm) : 109 m = 10 900 u. Le mesh est déjà en
+	// cm réels (span ~10 829 u = 108 m), donc l'échelle vaut ~1.0 (normalisée ici).
+	ExtScaleKm = (SpanUU > 1.0) ? ((EnvM * 100.0) / SpanUU) : 1.0;
+	ExtCentreUU = Bounds.GetCenter();
+
+	// ExtRoot : composant enfant du MapActor (dont le rendu est déjà PROUVÉ), pas
+	// un acteur séparé.
+	ExtRoot = NewObject<USceneComponent>(MapActor, TEXT("ExtStationRoot"));
+	ExtRoot->SetupAttachment(MapActor->GetRootComponent());
+	ExtRoot->SetMobility(EComponentMobility::Movable);
+	ExtRoot->RegisterComponent();
+
+	for (UStaticMesh* M : Meshes)
+	{
+		UStaticMeshComponent* C = NewObject<UStaticMeshComponent>(MapActor);
+		C->SetupAttachment(ExtRoot);       // AVANT RegisterComponent (piège #4)
+		C->SetMobility(EComponentMobility::Movable);
+		C->SetStaticMesh(M);
+		C->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		C->SetCastShadow(false);
+		// NANITE RÉACTIVÉ : à l'échelle réelle (ISS ~10 900 u) Nanite fonctionne
+		// normalement — plus besoin du repli forcé. C'était TOUTE la difficulté du
+		// micro-échelle, supprimée à la racine par le rendu à échelle réelle.
+		// Pas de contribution Lumen : évite la préparation des champs de distance
+		// de centaines de pièces (qui bloque le rendu, très visible en headless).
+		C->bAffectDistanceFieldLighting = false;
+		C->bAffectDynamicIndirectLighting = false;
+		// Matériaux RÉELS conservés (ISS texturée) : éclairée par le Soleil de la
+		// carte + une lumière d'appoint locale (ExtLight), comme ref_issfocus.png.
+		C->RegisterComponent();
+		ExtParts.Add(C);
+	}
+	ExtRoot->SetVisibility(false, true);   // caché jusqu'à l'approche (propage aux enfants)
+
+	// Lumière d'appoint (pour un futur rendu en matériaux réels), sur le MapActor
+	// (repère NON scalé) : UpdateScene la place sur Novellus, allumée avec le modèle.
+	if (MapActor)
+	{
+		ExtLight = NewObject<UPointLightComponent>(MapActor);
+		ExtLight->SetupAttachment(MapActor->GetRootComponent());
+		ExtLight->SetMobility(EComponentMobility::Movable);
+		ExtLight->bUseInverseSquaredFalloff = false;
+		ExtLight->SetAttenuationRadius(2.0e5f);   // 2 km en u : couvre les ~109 m avec marge
+		ExtLight->SetLightFalloffExponent(0.5f);
+		ExtLight->SetIntensity(60.0f);
+		ExtLight->SetLightColor(FLinearColor(1.0f, 0.98f, 0.95f));
+		ExtLight->SetCastShadows(false);
+		ExtLight->SetVisibility(false);
+		ExtLight->RegisterComponent();
+	}
+
+	UE_LOG(LogTemp, Log,
+	       TEXT("[SPSolarSystem] ISS exterieur : %d meshes (Nanite, echelle reelle), span %.1f u -> %.0f m (x%.6g)"),
+	       Meshes.Num(), SpanUU, EnvM, ExtScaleKm);
 }
 
 // Place TOUT ce qui est monde, rebasé sur l'œil.
@@ -472,21 +625,33 @@ void USPSolarSystemSubsystem::UpdateScene(double EpochTdb, const FVector& CamWor
 {
 	auto& Bridge = fen::app::g_render_bridge;
 	const bool bMoons = Bridge.show_moons.load();
-	// R(P) : monde (km) -> rendu (l'œil est l'origine, profondeur comprimée).
+	// R(P) : monde (km) -> rendu (l'œil est l'origine). Position de COMPOSANT :
+	// bornée radialement à RENDER_MAX_UU pour rester sous le plafond de précision
+	// GPU d'UE (cf. RENDER_MAX_UU). Même direction depuis l'œil -> même position
+	// écran ; seule la profondeur change. Les lignes d'orbite ont leur R propre.
 	auto R = [&CamWorldKm](const FVector& WorldKm) {
-		return CompressKm(WorldKm - CamWorldKm);
+		const FVector P = CompressKm(WorldKm - CamWorldKm);
+		const double M = P.Size();
+		return (M > RENDER_MAX_UU) ? P * (RENDER_MAX_UU / M) : P;
 	};
 	// Taille d'un marqueur pour qu'il garde une taille écran constante.
 	auto MarkerScale = [](const FVector& Rendered) {
 		return FMath::Max(1.0e-6, Rendered.Size() * MARKER_ANG) / 50.0;   // sphère = 50 u
 	};
 
-	// --- les corps -----------------------------------------------------------
+	// --- les corps : GÉOMÉTRIE de PRÈS, sinon MARQUEUR HUD -------------------
+	// À l'échelle réelle un corps lointain est à ~1e13-1e14 u, où le float perd
+	// des centaines de km -> facettes, corps délavés. On ne rend sa GÉOMÉTRIE
+	// que s'il est assez proche pour être GROS (donc précis) ; sinon caché, le
+	// HUD le montre au marqueur (projeté en double). [pas de compression]
 	for (int32 i = 0; i < NUM_BODIES && i < MapActor->BodyMeshes.Num(); ++i)
 	{
 		const FBodyDef& Def = GBodies[i];
 		UStaticMeshComponent* C = MapActor->BodyMeshes[i];
-		if (Def.bMoon && !bMoons) { C->SetVisibility(false); continue; }
+		const FVector RelKm = BodyWorldKm(Def, EpochTdb) - CamWorldKm;
+		const double DistKm = RelKm.Size();
+		const bool bGeom = DistKm < BodyRadiusKm(Def.B) * BODY_GEOM_FACTOR;
+		if ((Def.bMoon && !bMoons) || !bGeom) { C->SetVisibility(false); continue; }
 		C->SetVisibility(true);
 		// rotation AVANT la position : SetWorldRotation ne touche pas la
 		// translation, et les enfants (anneaux de Saturne) suivent.
@@ -494,7 +659,7 @@ void USPSolarSystemSubsystem::UpdateScene(double EpochTdb, const FVector& CamWor
 		// Le rayon suit la MÊME homothétie que la position : la taille angulaire
 		// vue de l'œil reste donc exactement la vraie.
 		double Fac = 1.0;
-		const FVector P = CompressKm(BodyWorldKm(Def, EpochTdb) - CamWorldKm, &Fac);
+		const FVector P = CompressKm(RelKm, &Fac);
 		C->SetWorldLocation(P);
 		const double MeshR = BodyMeshRadius.IsValidIndex(i) ? BodyMeshRadius[i] : 50.0;
 		C->SetWorldScale3D(FVector(BodyRadiusKm(Def.B) * Fac / MeshR));
@@ -514,6 +679,52 @@ void USPSolarSystemSubsystem::UpdateScene(double EpochTdb, const FVector& CamWor
 			                               Bridge.vehicle.pos_m[2]));
 			MapActor->VehicleMarker->SetWorldLocation(P);
 			MapActor->VehicleMarker->SetWorldScale3D(FVector(MarkerScale(P)));
+		}
+	}
+
+	// --- NOVELLUS dans le monde [GDD v1.2 11.1, 17.3, 17.4] : LOD PAR TAILLE
+	// APPARENTE. De loin, un MARQUEUR (comme la flotte) ; de près, le vrai MODÈLE
+	// EXTÉRIEUR à l'échelle réelle (55 m), chargé à la demande. Les deux à la
+	// position LEO réelle (Terre + offset publié), en caméra-relatif.
+	{
+		const auto& St = Bridge.station;
+		const bool bStation = St.valid.load();
+		const FBodyDef* Terre = FindDef(Body::EarthBary);
+		const FVector TerrePos = Terre ? BodyWorldKm(*Terre, EpochTdb) : FVector::ZeroVector;
+		const FVector NovWorld = TerrePos + EclToUeKmd(St.rel_m[0], St.rel_m[1], St.rel_m[2]);
+		const FVector Pnov = R(NovWorld);
+		// bascule marqueur -> modèle quand l'envergure (55 m) dépasse ~quelques px
+		// (taille angulaire = envergure / distance de vue).
+		const double DistNov = FMath::Max(1.0e-6, (NovWorld - CamWorldKm).Size());
+		const bool bModel = bStation && ((St.envergure_m * 0.001) / DistNov > 3.0e-3);
+
+		if (MapActor->StationMarker)
+		{
+			MapActor->StationMarker->SetVisibility(bStation && !bModel);
+			if (bStation && !bModel)
+			{
+				MapActor->StationMarker->SetWorldLocation(Pnov);
+				MapActor->StationMarker->SetWorldScale3D(FVector(MarkerScale(Pnov)));
+			}
+		}
+
+		// Le modèle est construit tôt (Tick, dès la carte active) pour que ses
+		// shaders soient chauds ; ici on ne fait que le MONTRER/cacher (LOD) et le
+		// placer, caméra-relatif.
+		if (ExtRoot)
+		{
+			ExtRoot->SetVisibility(bModel, true);   // propage aux pièces
+			if (bModel)
+			{
+				// centre du modèle amené sur Novellus ; échelle réelle (km/u).
+				ExtRoot->SetWorldScale3D(FVector(ExtScaleKm));
+				ExtRoot->SetWorldLocation(Pnov - ExtCentreUU * ExtScaleKm);
+			}
+		}
+		if (ExtLight)
+		{
+			ExtLight->SetVisibility(bModel);
+			if (bModel) ExtLight->SetWorldLocation(Pnov);
 		}
 	}
 
@@ -617,14 +828,24 @@ void USPSolarSystemSubsystem::EmitOrbits(const FVector& CamWorldKm, double CamDi
 	// soit invisible (vue système) soit énorme (vue rapprochée). On la lie à la
 	// distance de l'œil pour garder ~2 px — dans l'espace COMPRIMÉ, où vivent
 	// les traits.
-	const double CamDistRender = fen::app::scaled_space_distance(CamDistKm);
+	const double CamDistRender = CamDistKm * UU_PER_KM;   // échelle réelle (cm)
 	const float Thick = static_cast<float>(FMath::Max(1.0e-4, CamDistRender * 0.0012));
 
 	// DÉCOR DU MENU : les mêmes orbites, mais en retrait — dans la référence
 	// (ref_menu.png) ce sont de simples cercles à la limite du visible.
 	const bool bDecor = fen::app::g_render_bridge.menu_backdrop.load() &&
 	                    !fen::app::g_render_bridge.carte3d_active.load();
-	const float Att = bDecor ? 0.40f : 1.0f;
+	// FONDU EN VUE RASANTE. Les orbites sont ~coplanaires (écliptique) : vues par la
+	// tranche, elles s'écrasent en UNE ligne dure traversant tout l'écran et le corps
+	// focalisé. On atténue leur opacité quand l'élévation de l'œil au-dessus du plan
+	// tombe vers zéro (façon Eyes on the Solar System). Élévation ~ |sin(pitch)| :
+	// pitch = 0 -> œil DANS le plan -> fondu quasi total ; pitch fort -> vue de dessus
+	// -> plein. Bande de transition ~1°..9° d'élévation, courbe smoothstep.
+	const double Pitch = fen::app::g_render_bridge.cam.pitch.load();
+	const double Elev  = FMath::Abs(FMath::Sin(Pitch));
+	const double GrazeT = FMath::Clamp((Elev - 0.02) / 0.14, 0.0, 1.0);
+	const float  Graze  = static_cast<float>(GrazeT * GrazeT * (3.0 - 2.0 * GrazeT));
+	const float Att = (bDecor ? 0.40f : 1.0f) * Graze;
 
 	for (const FOrbitCache& O : OrbitCache)
 	{
@@ -640,7 +861,7 @@ void USPSolarSystemSubsystem::EmitOrbits(const FVector& CamWorldKm, double CamDi
 	const auto& V = fen::app::g_render_bridge.vehicle;
 	if (V.valid.load() && V.n >= 2)
 	{
-		const FLinearColor Jaune(1.0f, 0.85f, 0.2f, 0.9f);
+		const FLinearColor Jaune(1.0f, 0.85f, 0.2f, 0.9f * Graze);
 		for (int32 k = 1; k < V.n; ++k)
 			LB->DrawLine(R(EclToUeKmd(V.traj_m[k - 1][0], V.traj_m[k - 1][1], V.traj_m[k - 1][2])),
 			             R(EclToUeKmd(V.traj_m[k][0], V.traj_m[k][1], V.traj_m[k][2])),
@@ -651,7 +872,7 @@ void USPSolarSystemSubsystem::EmitOrbits(const FVector& CamWorldKm, double CamDi
 		const double RayonKm = V.corridor_3s_m * KM_PER_M;
 		if (RayonKm > 1.0)
 		{
-			const FLinearColor Orange(1.0f, 0.6f, 0.2f, 0.55f);
+			const FLinearColor Orange(1.0f, 0.6f, 0.2f, 0.55f * Graze);
 			constexpr int32 SEG = 48;
 			FVector Prev = Centre + FVector(RayonKm, 0, 0);
 			for (int32 k = 1; k <= SEG; ++k)
@@ -691,7 +912,7 @@ void USPSolarSystemSubsystem::EmitOrbits(const FVector& CamWorldKm, double CamDi
 		const double Sma = G.target_sma_km;
 		if (Sma > 1.0)
 		{
-			const FLinearColor Vert(0.35f, 0.95f, 0.45f, 0.8f);
+			const FLinearColor Vert(0.35f, 0.95f, 0.45f, 0.8f * Graze);
 			constexpr int32 SEG = 96;
 			FVector Prev = R(GeoToWorld(Sma, 0.0, 0.0));
 			for (int32 k = 1; k <= SEG; ++k)
@@ -705,7 +926,7 @@ void USPSolarSystemSubsystem::EmitOrbits(const FVector& CamWorldKm, double CamDi
 		// trace CYAN = solution de navigation (ESTIMÉE, jamais la vérité)
 		if (G.n >= 2)
 		{
-			const FLinearColor Cyan(0.3f, 0.9f, 1.0f, 0.9f);
+			const FLinearColor Cyan(0.3f, 0.9f, 1.0f, 0.9f * Graze);
 			FVector Prev = R(GeoToWorld(G.traj_km[0][0], G.traj_km[0][1], G.traj_km[0][2]));
 			for (int32 k = 1; k < G.n; ++k)
 			{
@@ -759,6 +980,38 @@ void USPSolarSystemSubsystem::PublishScreen(const FVector& CamWorldKm, const FRo
 		It.on_screen = (Nx > -0.1 && Nx < 1.1 && Ny > -0.1 && Ny < 1.1) ? 1 : 0;
 		++N;
 	}
+
+	// NOVELLUS dans la liste écran : focalisable/cliquable comme un corps
+	// [GDD v1.2 11.1]. Rayon apparent tiré de l'envergure (55 m) -> minuscule de
+	// loin, le HUD le désigne alors au marqueur (comme un satellite).
+	{
+		const auto& St = fen::app::g_render_bridge.station;
+		if (St.valid.load() && N < fen::app::RenderBridge::ScreenBodies::MAX)
+		{
+			const FBodyDef* Terre = FindDef(Body::EarthBary);
+			const FVector TerrePos = Terre ? BodyWorldKm(*Terre, Epoch) : FVector::ZeroVector;
+			const FVector Rel =
+				(TerrePos + EclToUeKmd(St.rel_m[0], St.rel_m[1], St.rel_m[2])) - CamWorldKm;
+			const FVector Local = CamRot.UnrotateVector(Rel);
+			auto& It = S.items[N];
+			It.body = fen::app::FOCUS_STATION;
+			It.dist_km = Rel.Size();
+			if (Local.X <= 1.0)
+			{
+				It.on_screen = 0; It.nx = It.ny = -1.0f; It.r_norm = 0.0f;
+			}
+			else
+			{
+				const double Nx = 0.5 + 0.5 * (Local.Y / Local.X) / TanH;
+				const double Ny = 0.5 - 0.5 * (Local.Z / Local.X) / TanV;
+				It.nx = static_cast<float>(Nx);
+				It.ny = static_cast<float>(Ny);
+				It.r_norm = static_cast<float>(0.5 * ((St.envergure_m * 0.001) / Local.X) / TanH);
+				It.on_screen = (Nx > -0.1 && Nx < 1.1 && Ny > -0.1 && Ny < 1.1) ? 1 : 0;
+			}
+			++N;
+		}
+	}
 	S.n = N;
 }
 
@@ -772,6 +1025,11 @@ void USPSolarSystemSubsystem::Tick(float DeltaTime)
 	const bool bActive = Bridge.carte3d_active.load() || Bridge.menu_backdrop.load();
 
 	if (bActive && !bBuilt) BuildScene();
+	// Novellus vu de près : on charge son modèle extérieur DÈS que la carte est
+	// active (pas à l'approche), pour que ses shaders soient chauds au moment où
+	// le LOD le montre. Reste caché tant qu'on n'est pas assez proche. bBuilt =>
+	// MapActor existe (ExtRoot s'y rattache).
+	if (bActive && bBuilt && !bExtBuilt) BuildExteriorStation();
 	if (bActive != bWasActive) { SetMapActive(bActive); bWasActive = bActive; }
 	if (!bActive || !bBuilt) return;
 
@@ -821,13 +1079,15 @@ void USPSolarSystemSubsystem::Tick(float DeltaTime)
 	// la caméra regarde le point visé : depuis l'origine de rendu, c'est −Offset
 	const FRotator CamRot = (-Offset).Rotation();
 
-	// PLAN DE CLIPPING PROCHE, ADAPTATIF. À 1 u = 1 km, le défaut (10 u = 10 km)
-	// couperait tout ce qui est proche ; mais une valeur fixe très petite
-	// ruinerait la précision du z-buffer sur une scène qui porte loin. On
-	// l'accroche donc à la distance de vue (rapport ~2000 : précision relative
-	// ~1e-4 sur l'objet regardé), borné pour rester utilisable de bout en bout.
+	// PLAN DE CLIPPING PROCHE, ADAPTATIF. À l'échelle réelle (u = cm), la distance
+	// de vue en u = DistKm * UU_PER_KM. On accroche le near-clip à ~1/2000 de la
+	// distance regardée (précision z-buffer ~1e-4 sur l'objet visé), borné pour
+	// rester utilisable du plan vaisseau (cm) au plan système.
 	{
-		const double Near = FMath::Clamp(DistKm / 2000.0, 0.02, 1.0e5);
+		// Plafonné : en vue système il n'y a plus de géométrie proche (les corps
+		// lointains sont des marqueurs), donc un near-clip modeste suffit et
+		// garantit que le dôme de ciel (adaptatif, >= 1e8 u) n'est jamais clippé.
+		const double Near = FMath::Clamp(DistKm * UU_PER_KM / 2000.0, 1.0, 1.0e7);
 		if (LastNearClip <= 0.0 || FMath::Abs(Near - LastNearClip) > LastNearClip * 0.15)
 		{
 			if (IConsoleVariable* CVar =
@@ -844,6 +1104,28 @@ void USPSolarSystemSubsystem::Tick(float DeltaTime)
 		MapCamera->SetActorLocationAndRotation(FVector::ZeroVector, CamRot);
 		if (UCameraComponent* Cam = MapCamera->GetCameraComponent())
 			Cam->SetFieldOfView(static_cast<float>(FovDeg));
+
+		// RÉ-ASSURE LA CIBLE DE VUE CHAQUE FRAME. SetMapActive ne la pose qu'à la
+		// TRANSITION ; or en PIE il n'y a pas de pawn par défaut (DefaultPawnClass =
+		// nullptr), et le PlayerController peut reprendre la vue sur un défaut (lui-
+		// même : mauvaise rotation/FOV/near). Le rendu se fait alors via une caméra
+		// aberrante -> système solaire minuscule et décalé + dôme de ciel plein écran
+		// (« nébuleuse »), alors que le HUD, lui, projette bien sur MapCamera (labels
+		// au bon endroit). Symptôme visible en PIE, pas en -game (timing différent).
+		if (UWorld* W = GetWorld())
+			if (APlayerController* PC = W->GetFirstPlayerController())
+				if (PC->GetViewTarget() != MapCamera)
+				{
+					if (!bViewTargetReasserted)
+					{
+						UE_LOG(LogTemp, Warning,
+						       TEXT("[SPSolarSystem] vue rendue via '%s' (pas MapCamera) -> ré-assignation. "
+						            "PIE sans pawn : la carte impose sa caméra chaque frame."),
+						       *GetNameSafe(PC->GetViewTarget()));
+						bViewTargetReasserted = true;
+					}
+					PC->SetViewTarget(MapCamera);
+				}
 	}
 
 	// Orbites : l'échantillonnage (éphéméride) est mis en cache et ne se refait

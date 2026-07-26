@@ -219,12 +219,12 @@ int32 SSPWorldHud::OnPaint(const FPaintArgs& Args, const FGeometry& G, const FSl
                            const FWidgetStyle& Style, bool bParentEnabled) const
 {
 	if (!Session) return LayerId;
-	switch (Session->scene)
-	{
-		case fen::app::SceneJeu::Carte:   return PaintCarte(G, Out, LayerId + 1);
-		case fen::app::SceneJeu::Station: return PaintStation(G, Out, LayerId + 1);
-		default: break;                   // Titre : le menu peint, pas cette couche
-	}
+	// Un seul Monde : le CADRAGE décide quel HUD peindre (système = ex-carte,
+	// bord = ex-station). Titre : le menu peint, pas cette couche.
+	if (Session->scene == fen::app::SceneJeu::Monde)
+		return (Session->cadrage == fen::app::Cadrage::Systeme)
+			? PaintCarte(G, Out, LayerId + 1)
+			: PaintStation(G, Out, LayerId + 1);
 	return LayerId;
 }
 
@@ -276,12 +276,36 @@ int32 SSPWorldHud::PaintCarte(const FGeometry& G, FSlateWindowElementList& Out, 
 				Cercle(Out, Layer, G, P, RPx + 6.0f * S, Col * FLinearColor(1, 1, 1, 0.7f), 1.4f * S);
 			}
 
-			const FString Nom = FString(fen::ephem::body_name((fen::ephem::Body)It.body)).ToUpper();
+			// NOVELLUS n'est pas un corps du catalogue : nom en dur (pas de
+			// body_name hors enum).
+			const FString Nom = (It.body == fen::app::FOCUS_STATION)
+			                        ? FString(TEXT("NOVELLUS"))
+			                        : FString(fen::ephem::body_name((fen::ephem::Body)It.body)).ToUpper();
 			const FVector2D Sz = Mesure(Nom, FLabel);
 			Texte(Out, Layer + 1, G, Nom,
 			      FLabel, FVector2D(P.X + FMath::Max(RPx, RMarq) + 7.0f * S, P.Y - Sz.Y * 0.5),
 			      bFocus ? SRGB(255, 237, 189) : ColTexte);
 		}
+	}
+
+	// --- NOVELLUS focalisé : gros plan + « [M] ENTRER » [réf. ref_issfocus.png] --
+	// Le vol de caméra [M] (incr.2) fait déjà entrer à bord depuis la vue système :
+	// ici on ANNONCE l'affordance quand la station est cadrée.
+	if (B.focus_body.load() == fen::app::FOCUS_STATION)
+	{
+		const float CX = W * 0.5f;
+		const FString Titre  = TEXT("NOVELLUS");
+		const FString Sous   = TEXT("ORBITE TERRESTRE BASSE  -  418 km");
+		const FString Entrer = TEXT("[ M ]  ENTRER");
+		const FSlateFontInfo FTitre = Mono(15.0f * S, 200);
+		const FSlateFontInfo FSous  = Mono(10.0f * S, 90);
+		const FSlateFontInfo FEnt   = Mono(13.0f * S, 160);
+		const FVector2D SzT = Mesure(Titre, FTitre);
+		const FVector2D SzS = Mesure(Sous, FSous);
+		const FVector2D SzE = Mesure(Entrer, FEnt);
+		Texte(Out, Layer + 3, G, Titre,  FTitre, FVector2D(CX - SzT.X * 0.5, 548.0 * S), ColTexte);
+		Texte(Out, Layer + 3, G, Sous,   FSous,  FVector2D(CX - SzS.X * 0.5, 572.0 * S), ColTexteFaible);
+		Texte(Out, Layer + 3, G, Entrer, FEnt,   FVector2D(CX - SzE.X * 0.5, 598.0 * S), ColVert);
 	}
 
 	// --- « < SYSTEME SOLAIRE » : le fil d'Ariane (haut-gauche) ---------------
@@ -344,7 +368,7 @@ int32 SSPWorldHud::PaintCarte(const FGeometry& G, FSlateWindowElementList& Out, 
 	// une ligne, discrète, en bas à droite.
 	{
 		const FSlateFontInfo FNote = Mono(8.0f * S, 30);
-		const FString Note = TEXT("ECHELLE VRAIE 1 u = 1 km  .  orientation = IAU WGCCRE (obliquite reelle)");
+		const FString Note = TEXT("ECHELLE REELLE 1 u = 1 cm  .  orientation = IAU WGCCRE (obliquite reelle)");
 		// La mesure de Slate ignore l'interlettrage : on le rajoute à la main,
 		// sinon la note déborde par la droite.
 		const double Sz = Mesure(Note, FNote).X + Note.Len() * FNote.LetterSpacing * FNote.Size / 1000.0;
@@ -918,7 +942,8 @@ FReply SSPMenu::OnChargerSelection()
 	    Session->charger_partie(Session->saves_listees[static_cast<size_t>(Sel)].chemin))
 	{
 		Session->poste_ouvert = -1;
-		Session->scene = fen::app::SceneJeu::Station;   // on reprend À BORD
+		Session->scene = fen::app::SceneJeu::Monde;     // on reprend DANS le monde...
+		Session->cadrage = fen::app::Cadrage::Bord;     // ...À BORD de Novellus
 		SetPage(EPage::Racine);
 	}
 	else if (Session)
@@ -1026,7 +1051,8 @@ TSharedRef<SWidget> SSPModal::BuildContenu()
 			             {
 				             Session->modal = fen::app::Modal::Aucun;
 				             Session->poste_ouvert = -1;
-				             Session->scene = fen::app::SceneJeu::Station;
+				             Session->scene = fen::app::SceneJeu::Monde;
+				             Session->cadrage = fen::app::Cadrage::Bord;
 			             }
 			             else
 			             {
@@ -1809,7 +1835,8 @@ void SSPHud::Construct(const FArguments& InArgs)
 
 EVisibility SSPHud::PosteVisibility() const
 {
-	return (Session && Session->scene == fen::app::SceneJeu::Station &&
+	return (Session && Session->scene == fen::app::SceneJeu::Monde &&
+	        Session->cadrage == fen::app::Cadrage::Bord &&
 	        Session->poste_ouvert >= 0 && Session->modal == fen::app::Modal::Aucun)
 	           ? EVisibility::Visible : EVisibility::Collapsed;
 }

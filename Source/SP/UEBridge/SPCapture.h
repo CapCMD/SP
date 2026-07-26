@@ -29,6 +29,10 @@ namespace SPCapture
 	// Poste à ouvrir d'emblée (`-sppost=<0..7>`), équivalent du `--panel N` de la
 	// référence. -1 = aucun.
 	int  RequestedPost();
+	// Distance de vue imposée en km (`-spdist=<km>`) ; sinon la distance de
+	// cadrage du corps focalisé. <= 0 = non précisée. Utile pour cadrer un objet
+	// proche d'un corps (Novellus en LEO).
+	double RequestedDist();
 	// À appeler chaque frame ; déclenche la capture puis la sortie du jeu.
 	void Tick();
 }

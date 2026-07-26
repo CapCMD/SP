@@ -51,7 +51,6 @@ Uchronie **strictement organisationnelle** : même physique et mêmes technologi
 - pas de pilotage manuel « stick » temps réel du véhicule ;
 - pas de « moteur magique » contournant masse, énergie, chaleur, radiations, fiabilité ou budget ;
 - pas de scénario dramatique scripté lourd ;
-- pas de déplacement libre d'un personnage-avatar dans le vaisseau ; la **commande** de bord reste médiée par le terminal (voir 9.1) — mais l'**observation** ne l'est pas : une **caméra libre** parcourt la scène 1:1 (voir 17.3–17.4) ;
 - pas d'automatisation par scripts réutilisables des calculs (voir 2.4 et 15.6) ;
 - pas de raccourci arcade sur la physique : toute simplification est une approximation *documentée*.
 
@@ -438,8 +437,6 @@ Le cycle mesure/écart/correction enseigne la navigation réelle sans l'explicit
 ## 9.1 Rôle embarqué et médiation par le terminal
 En vivant une mission longue, le joueur devient **responsable scientifique à bord** : surveillance des systèmes vitaux (O2/CO2, eau, nourriture), expériences, diagnostics/réparations, communication avec **délai lumière réaliste**, suivi de trajectoire (voir chapitre 8).
 
-**Règle de périmètre — toute *action* de bord passe par le terminal.** La **commande** (calculs, manœuvres, diagnostics, ressources) s'effectue exclusivement au terminal : ni pilotage « stick », ni déplacement d'avatar, ni manipulation physique. Mêmes outils qu'au sol ; seuls changent le délai, la disponibilité des ressources et l'impossibilité de déléguer. En revanche l'**observation** n'est pas contrainte : la **caméra libre** de la scène 1:1 (voir 17.3–17.4) cadre le vaisseau, la station ou tout corps depuis n'importe quel point de vue, à bord comme au sol. Cette séparation *commande médiée / observation libre* est une anti-feature assumée (voir 1.5).
-
 ## 9.2 Choix d'embarquement et éligibilité
 Le joueur choisit d'embarquer ou de conduire depuis le sol. **Une seule mission vécue à la fois.** Les missions longues sont réservées à la fin de carrière (rang + maturité correspondants) : le personnage ne quitte ARES que lorsqu'il n'a plus de carrière à construire.
 
@@ -801,7 +798,7 @@ En Normal comme en Pro, le raisonnement se reconstruit à chaque analyse (voir 2
 | **Corps célestes, terrains, ciels** | Procédural, piloté par les éphémérides et les données réelles | Problème largement résolu ; l'échelle interdit toute approche manuelle |
 | **Véhicules** | Rendus depuis les données du ship builder | Le catalogue de pièces (voir 12.1) et l'éditeur en coupe (voir 12.2) fournissent déjà la géométrie : un véhicule assemblé par le joueur doit être rendu, pas modélisé |
 | **Modules de Novellus** | Authorés, réutilisés entre paliers | Nombre fini et connu (dix modules), forte valeur d'identité |
-| **Intérieurs** | Authorés, périmètre strictement limité | Poste Vigie et vues de contrôle ; aucune circulation d'un personnage-avatar (voir 9.1). La caméra libre opère dans l'espace extérieur 1:1 et cadre véhicules et stations ; elle ne réclame pas d'intérieurs habitables complets |
+| **Intérieurs** | Authorés, périmètre strictement limité | Poste Vigie et vues de contrôle |
 | **Interfaces, schémas, télémétrie** | Authorés, priorité maximale | C'est là que se passe le jeu |
 
 Aucun contenu visuel ne croît proportionnellement à la liberté de conception.

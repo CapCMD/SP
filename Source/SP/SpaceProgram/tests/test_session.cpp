@@ -46,39 +46,45 @@ int main() {
     CHECK(Session::slug_agence("Zéphyr 9") == "z_phyr_9", "slug : non-ASCII remplace");
   }
 
-  // ---- 2. aucune scène de jeu sans agence ---------------------------------
+  // ---- 2. pas de Monde sans agence ----------------------------------------
+  // Le Monde est UNIQUE (pas de scènes séparées) : quel que soit le cadrage de
+  // la caméra, on ne peut y être sans agence créée.
   {
     Session s;
-    s.scene = SceneJeu::Carte;
+    s.scene = SceneJeu::Monde; s.cadrage = Cadrage::Systeme;
     s.tick(0.016);
-    CHECK(s.scene == SceneJeu::Titre, "routage : carte sans agence -> titre");
-    s.scene = SceneJeu::Station;
+    CHECK(s.scene == SceneJeu::Titre, "routage : monde (cadrage systeme) sans agence -> titre");
+    s.scene = SceneJeu::Monde; s.cadrage = Cadrage::Bord;
     s.tick(0.016);
-    CHECK(s.scene == SceneJeu::Titre, "routage : station sans agence -> titre");
+    CHECK(s.scene == SceneJeu::Titre, "routage : monde (cadrage bord) sans agence -> titre");
   }
 
-  // ---- 3. le pont reflète EXACTEMENT la scène ------------------------------
-  // Le menu utilise la carte comme décor : les deux drapeaux ne disent pas la
-  // même chose et ne doivent jamais être confondus.
+  // ---- 3. le pont reflète EXACTEMENT scène + cadrage -----------------------
+  // Le Monde est unique ; le CADRAGE dit quel plan la caméra occupe. Le menu
+  // utilise ce même monde (plan système) comme décor : `carte3d_active` et
+  // `menu_backdrop` ne disent pas la même chose et ne doivent jamais être confondus.
   {
     Session s;
     s.nouvelle_partie("Oracle", ModeAide::Normal);
-    CHECK(s.scene == SceneJeu::Station, "nouvelle partie : on arrive A BORD");
+    CHECK(s.scene == SceneJeu::Monde && s.cadrage == Cadrage::Bord,
+          "nouvelle partie : on entre dans le Monde, A BORD");
 
     s.tick(0.016);
-    CHECK(g_render_bridge.scene.load() == (int)SceneJeu::Station, "pont : scene station");
-    CHECK(!g_render_bridge.carte3d_active.load(), "pont : carte inactive en station");
-    CHECK(!g_render_bridge.menu_backdrop.load(), "pont : pas de decor de menu en station");
-    CHECK(g_render_bridge.posts.n.load() == 8, "pont : les 8 postes publies en station");
+    CHECK(g_render_bridge.scene.load() == (int)SceneJeu::Monde, "pont : scene = Monde");
+    CHECK(!g_render_bridge.carte3d_active.load(), "pont : cadrage systeme inactif a bord");
+    CHECK(!g_render_bridge.menu_backdrop.load(), "pont : pas de decor de menu a bord");
+    CHECK(g_render_bridge.posts.n.load() == 8, "pont : les 8 postes publies a bord");
 
-    s.scene = SceneJeu::Carte;
+    // [M] = signet de caméra : on tire la vue au plan système SANS changer de scène.
+    s.cadrage = Cadrage::Systeme;
     s.tick(0.016);
-    CHECK(g_render_bridge.carte3d_active.load(), "pont : carte active");
-    CHECK(!g_render_bridge.menu_backdrop.load(), "pont : carte != decor de menu");
+    CHECK(g_render_bridge.scene.load() == (int)SceneJeu::Monde, "pont : toujours le meme Monde");
+    CHECK(g_render_bridge.carte3d_active.load(), "pont : cadrage systeme actif");
+    CHECK(!g_render_bridge.menu_backdrop.load(), "pont : cadrage systeme != decor de menu");
 
     s.scene = SceneJeu::Titre;
     s.tick(0.016);
-    CHECK(!g_render_bridge.carte3d_active.load(), "pont : carte inactive au titre");
+    CHECK(!g_render_bridge.carte3d_active.load(), "pont : cadrage systeme inactif au titre");
     CHECK(g_render_bridge.menu_backdrop.load(), "pont : decor de menu au titre");
   }
 
@@ -240,6 +246,96 @@ int main() {
       CHECK(!s.accepter_contrat(cid), "accept : pas d acceptation en double");
       CHECK(G.missions.size() == nav + 1, "accept : aucune mission dupliquee");
     }
+  }
+
+  // ---- 10. VOL DE CAMERA [M] [GDD v1.2 ch.8.3, 17.4] ----------------------
+  {
+    // (a) le modèle de vol : bornes exactes, monotone, interpolation LOG.
+    VolCamera v;
+    v.actif = true; v.duree_s = 1.0;
+    v.dist_depart_km = 7000.0; v.dist_arrivee_km = 9.0e8;
+    v.progres = 0.0;
+    CHECK(std::fabs(v.dist_courante_km() - 7000.0) < 1e-6, "vol : depart exact a p=0");
+    v.progres = 1.0;
+    CHECK(std::fabs(v.dist_courante_km() - 9.0e8) < 1.0, "vol : arrivee exacte a p=1");
+    double prec = 0.0; bool mono = true;
+    for (int i = 0; i <= 10; ++i) {
+      v.progres = i / 10.0;
+      const double d = v.dist_courante_km();
+      if (i > 0 && d < prec) mono = false;
+      prec = d;
+    }
+    CHECK(mono, "vol : distance monotone le long du vol");
+    v.progres = 0.5;
+    const double geo = std::sqrt(7000.0 * 9.0e8);        // moyenne GEOMETRIQUE
+    const double ari = 0.5 * (7000.0 + 9.0e8);           // moyenne ARITHMETIQUE
+    CHECK(std::fabs(v.dist_courante_km() - geo) < std::fabs(v.dist_courante_km() - ari),
+          "vol : interpolation logarithmique (mi-course ~ moyenne geometrique)");
+
+    // (b) intégration Session : [M] à bord lance un vol VERS le système.
+    Session s;
+    s.nouvelle_partie("Oracle", ModeAide::Normal);
+    s.demarrer_vol_cadrage();
+    CHECK(s.vol_cam.actif && s.vol_cam.sens == SensVol::VersSysteme,
+          "vol : [M] a bord -> vol vers le systeme");
+    CHECK(s.cadrage == Cadrage::Systeme, "vol : le plan systeme rend des le depart du vol");
+    CHECK(g_render_bridge.focus_body.load() == (int)ephem::Body::EarthBary,
+          "vol : la camera est ancree sur la Terre");
+    CHECK(std::fabs(g_render_bridge.cam.dist_km.load() - s.dist_bord_km()) < 1.0,
+          "vol : depart au ras de la Terre");
+    const double arrivee_avant = s.vol_cam.dist_arrivee_km;
+    s.demarrer_vol_cadrage();          // un vol à la fois : sans effet
+    CHECK(s.vol_cam.dist_arrivee_km == arrivee_avant, "vol : un seul vol a la fois");
+    s.tick(1.0);                       // le vol se termine
+    CHECK(!s.vol_cam.actif, "vol : le vol se termine");
+    CHECK(s.cadrage == Cadrage::Systeme, "vol vers systeme : on reste au plan systeme");
+    CHECK(std::fabs(g_render_bridge.cam.dist_km.load() - Session::DIST_SYSTEME_KM) < 1.0,
+          "vol : arrivee a la vue systeme");
+
+    // (c) [M] depuis le système : vol de RETOUR ; à l'arrivée, main à la 1re personne.
+    s.demarrer_vol_cadrage();
+    CHECK(s.vol_cam.actif && s.vol_cam.sens == SensVol::VersBord,
+          "vol : [M] au systeme -> vol de retour a bord");
+    CHECK(s.cadrage == Cadrage::Systeme, "vol de retour : le systeme rend encore pendant le vol");
+    s.tick(1.0);
+    CHECK(!s.vol_cam.actif && s.cadrage == Cadrage::Bord,
+          "vol de retour : a l arrivee, la main passe a la 1re personne");
+
+    // (d) Échap depuis le système : retour IMMÉDIAT (coupe un vol en cours).
+    s.demarrer_vol_cadrage();  s.tick(1.0);    // Bord -> Systeme
+    s.demarrer_vol_cadrage();                  // vol de retour en cours
+    CHECK(s.vol_cam.actif, "vol : retour en cours avant Echap");
+    s.retour_bord_immediat();
+    CHECK(!s.vol_cam.actif && s.cadrage == Cadrage::Bord,
+          "vol : Echap coupe le vol et rentre a bord immediatement");
+  }
+
+  // ---- 11. NOVELLUS dans le monde : orbite LEO publiee [GDD v1.2 11.1, 17.3] -
+  {
+    Session s;
+    s.nouvelle_partie("Oracle", ModeAide::Normal);
+    s.tick(0.016);
+    const auto& st = g_render_bridge.station;
+    CHECK(st.valid.load(), "novellus : publie dans le monde");
+    CHECK(st.altitude_km == 418.0, "novellus : altitude LEO 418 km");
+    CHECK(st.envergure_m == 109.0, "novellus : envergure reelle de l ISS");
+    const double r = std::sqrt(st.rel_m[0] * st.rel_m[0] + st.rel_m[1] * st.rel_m[1] +
+                               st.rel_m[2] * st.rel_m[2]);
+    const double rterre = ephem::body_radius(ephem::Body::EarthBary);
+    CHECK(std::fabs(r - (rterre + 418000.0)) < 1.0, "novellus : rayon = R_Terre + 418 km");
+    CHECK(std::fabs((r - rterre) / 1000.0 - 418.0) < 1e-3, "novellus : altitude coherente");
+    CHECK(std::fabs(st.rel_m[2]) < 1.0, "novellus : cercle dans le plan ecliptique (declare)");
+    // la position AVANCE avec le temps de jeu (etat au temps courant [GDD 14]).
+    const double x0 = st.rel_m[0], y0 = st.rel_m[1];
+    s.jeu.passer_mois();
+    s.tick(0.016);
+    const double dx = st.rel_m[0] - x0, dy = st.rel_m[1] - y0;
+    CHECK(std::sqrt(dx * dx + dy * dy) > 1.0, "novellus : sa position suit le temps de jeu");
+    // focus spécial Novellus : cadré de TRES pres (55 m), pas comme un corps.
+    CHECK(distance_cadrage(FOCUS_STATION) > 0.0 && distance_cadrage(FOCUS_STATION) < 100.0,
+          "novellus : le focus le cadre de pres (km)");
+    CHECK(distance_cadrage(FOCUS_STATION) < distance_cadrage((int)ephem::Body::Moon),
+          "novellus : cadre plus pres que le plus petit corps");
   }
 
   std::printf("\nSESSION : %d oracles OK, %d en echec.\n", g_ok, g_ko);

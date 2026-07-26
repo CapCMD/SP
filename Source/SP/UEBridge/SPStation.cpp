@@ -239,8 +239,12 @@ void USPStationSubsystem::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 	auto& Bridge = fen::app::g_render_bridge;
+	// La station se rend quand la caméra est au plan BORD du Monde (ex-scène
+	// Station) : même monde que le plan système, seul le cadrage change
+	// (`carte3d_active` = Cadrage::Systeme).
 	const bool bActive =
-		Bridge.scene.load() == static_cast<int>(fen::app::SceneJeu::Station);
+		Bridge.scene.load() == static_cast<int>(fen::app::SceneJeu::Monde) &&
+		!Bridge.carte3d_active.load();
 
 	if (bActive && !bBuilt) BuildScene();
 	if (bActive != bWasActive) { SetStationActive(bActive); bWasActive = bActive; }

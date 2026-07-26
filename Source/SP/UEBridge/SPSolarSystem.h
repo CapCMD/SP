@@ -6,7 +6,7 @@
 //   - le rendu ne RECALCULE rien : les positions sortent de l'éphéméride
 //     Standish (astro_core, la vérité), à l'époque publiée par le jeu via
 //     fen::app::g_render_bridge (sens unique jeu -> rendu) ;
-//   - ÉCHELLE VRAIE (1 u = 1 km) : rayons et distances réels, aucune
+//   - ÉCHELLE RÉELLE (1 u = 1 cm, natif UE) : rayons et distances réels, aucune
 //     exagération. Le rendu est RELATIF À LA CAMÉRA (floating origin) : les
 //     positions restent en double jusqu'à la soustraction, et seul l'écart
 //     œil->corps devient un float. Détail et justification dans le .cpp.
@@ -34,6 +34,10 @@ public:
 	UPROPERTY() TArray<TObjectPtr<UStaticMeshComponent>> BodyMeshes;
 	UPROPERTY() TObjectPtr<UPointLightComponent> SunLight;
 	UPROPERTY() TObjectPtr<UStaticMeshComponent> VehicleMarker;
+	// Novellus dans le monde [GDD v1.2 11.1, 17.3] : la station EST un objet du
+	// monde unique, en orbite LEO — marqueur au cadrage lointain (le vrai modèle
+	// extérieur viendra avec le LOD de zoom).
+	UPROPERTY() TObjectPtr<UStaticMeshComponent> StationMarker;
 	// Flotte en service [GDD 8.3] : un marqueur par engin, à sa position VRAIE
 	// (l'échelle vraie rend inutiles les anneaux symboliques d'avant).
 	// Layout figé : [0..5] relais GEO, [6..11] orbiteurs Mars, [12..17] sondes
@@ -57,6 +61,10 @@ public:
 private:
 	void BuildScene();                    // meshes GLB (ou sphères) + lumière + caméra
 	void SetMapActive(bool bActive);      // bascule caméra + visibilité
+	// Novellus vu de PRÈS : charge le modèle ISS extérieur (multi-mesh) à la
+	// demande, quand la caméra en approche assez pour qu'il dépasse le marqueur
+	// (LOD par taille apparente [GDD v1.2 17.4, ch.18]).
+	void BuildExteriorStation();
 	// Le point visé par la caméra (corps focalisé, ou le Soleil), en km.
 	FVector FocusWorldKm(double EpochTdb) const;
 	// Rebase + place tout ce qui est monde ; publie la projection écran.
@@ -94,4 +102,17 @@ private:
 	bool bBuilt = false;
 	bool bWasActive = false;
 	bool bLastShowMoons = false;
+	bool bViewTargetReasserted = false;   // diag one-shot : la vue avait dérivé de MapCamera
+
+	// --- Novellus vu de près : modèle ISS extérieur (chargé à la demande) ------
+	// Rattaché au MapActor (qui rend déjà les corps), sous un composant enfant :
+	// un acteur SÉPARÉ à root runtime ne rendait pas ses meshes.
+	UPROPERTY() TObjectPtr<USceneComponent> ExtRoot;
+	UPROPERTY() TArray<TObjectPtr<UStaticMeshComponent>> ExtParts;
+	// Lumière locale d'appoint : à l'échelle km + à 1 UA du Soleil, un objet de
+	// 100 m reste sombre ; on l'éclaire comme la référence (ISS ensoleillée).
+	UPROPERTY() TObjectPtr<UPointLightComponent> ExtLight;
+	bool    bExtBuilt = false;            // tenté une fois (succès ou non)
+	double  ExtScaleKm = 1.0;             // unités mesh -> km (envergure réelle)
+	FVector ExtCentreUU = FVector::ZeroVector;   // centre du modèle (unités mesh)
 };

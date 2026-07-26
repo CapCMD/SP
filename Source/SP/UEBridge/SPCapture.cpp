@@ -18,6 +18,7 @@ namespace
 	int32  Scene = -1;
 	int32  Focus = -1;
 	int32  Post = -1;
+	double Dist = -1.0;
 	int32  Frames = 150;
 	FString OutPath;
 	int32  Counter = 0;
@@ -42,8 +43,12 @@ namespace
 		}
 		FParse::Value(Cmd, TEXT("-spfocus="), Focus);
 		FParse::Value(Cmd, TEXT("-sppost="), Post);
-		UE_LOG(LogTemp, Log, TEXT("[SPCapture] scene=%d focus=%d post=%d frames=%d -> %s"),
-		       Scene, Focus, Post, Frames, *OutPath);
+		// -spdist=<km> : distance de vue imposée (sinon distance_cadrage du focus).
+		// Utile pour cadrer un objet proche d'un corps (ex. Novellus en LEO).
+		float DistF = -1.0f;
+		if (FParse::Value(Cmd, TEXT("-spdist="), DistF)) Dist = DistF;
+		UE_LOG(LogTemp, Log, TEXT("[SPCapture] scene=%d focus=%d post=%d dist=%.0f frames=%d -> %s"),
+		       Scene, Focus, Post, Dist, Frames, *OutPath);
 	}
 }
 
@@ -51,6 +56,7 @@ bool SPCapture::IsRequested() { ParseOnce(); return bRequested; }
 int  SPCapture::RequestedScene() { ParseOnce(); return Scene; }
 int  SPCapture::RequestedFocus() { ParseOnce(); return Focus; }
 int  SPCapture::RequestedPost() { ParseOnce(); return Post; }
+double SPCapture::RequestedDist() { ParseOnce(); return Dist; }
 
 void SPCapture::Tick()
 {
@@ -68,8 +74,9 @@ void SPCapture::Tick()
 		UE_LOG(LogTemp, Log, TEXT("[SPCapture] capture demandee -> %s"), *OutPath);
 		return;
 	}
-	// quelques frames de battement : l'écriture du fichier est asynchrone.
-	if (Counter >= Frames + 30)
+	// battement AVANT sortie : l'écriture (readback GPU + disque) est asynchrone,
+	// et l'extinction peut planter (teardown) avant le flush. Large marge.
+	if (Counter >= Frames + 300)
 	{
 		bDone = true;
 		UE_LOG(LogTemp, Log, TEXT("[SPCapture] terminee, sortie."));

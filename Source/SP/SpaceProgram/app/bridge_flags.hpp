@@ -17,18 +17,40 @@
 
 namespace fen::app {
 
-// LES TROIS SCÈNES DU JEU (cf. docs/reference_solar_system_map) :
-//   Titre   — menu SPACE PROGRAM (fond étoilé) ;
-//   Station — L'ACCUEIL : à bord de l'ISS, module Novellus, première personne ;
-//   Carte   — la carte du système solaire, atteinte depuis l'ISS par [M].
-// L'ISS est le QG : c'est là qu'on arrive, pas sur la carte.
-enum class SceneJeu { Titre = 0, Station = 1, Carte = 2 };
+// LE MONDE UNIQUE 1:1 [GDD v1.2 décision 19, ch.17.3-17.4] :
+//   Titre — menu SPACE PROGRAM (fond étoilé). SEUL écran distinct, AVANT la
+//           partie.
+//   Monde — LA scène 3D persistante = le système solaire à l'échelle 1:1.
+//           Novellus ET les vaisseaux y sont placés à leur position réelle. On
+//           y entre à bord (Novellus, module Vigie, première personne).
+// La « carte » n'est PAS une scène séparée : c'est un CADRAGE lointain de ce
+// même Monde (voir Cadrage ci-dessous). [M] est un signet de caméra [ch.8.3].
+enum class SceneJeu { Titre = 0, Monde = 1 };
+
+// CADRAGE DE LA CAMÉRA dans le Monde unique. Ce n'est PAS une scène : le monde
+// est le même, seule la caméra change de plan. La transition SERA continue (un
+// simple zoom, [ch.17.4]) ; cet état discret en est le point d'ancrage pour la
+// première passe (rendu à l'identique de l'ancien couple Station/Carte).
+//   Bord    — caméra au plan vaisseau/station : ambulation 1re personne active
+//             (marche dans Novellus ou dans une mission vécue, [ch.9.1]) ;
+//   Systeme — caméra tirée au plan système (ex-« carte ») : orbite, zoom,
+//             picking d'un corps.
+enum class Cadrage { Bord = 0, Systeme = 1 };
+
+// Focus caméra SPÉCIAL : Novellus. La station n'est pas un corps du catalogue
+// (`fen::ephem::Body`), mais elle est focalisable/cliquable comme un corps. On
+// lui réserve un id de focus hors de l'enum Body pour ne jamais entrer en
+// collision — le rendu (FocusWorldKm), le picking, le zoom et le HUD le
+// reconnaissent et le traitent à part.
+inline constexpr int FOCUS_STATION = 1000;
 
 struct RenderBridge {
   // Scène active, pilotée par l'UI (Interface::dessiner) et appliquée par les
   // subsystems UE (chacun s'active pour la sienne).
   std::atomic<int> scene{static_cast<int>(SceneJeu::Titre)};
-  // La carte 3D est-elle l'écran actif ? (piloté par Interface::dessiner)
+  // Le CADRAGE SYSTÈME est-il actif ? (Cadrage::Systeme dans le Monde ; l'ancien
+  // « la carte est l'écran actif »). Le rendu station s'active à l'inverse quand
+  // on est en Monde SANS ce drapeau (= Cadrage::Bord). Publié par Session::tick.
   std::atomic<bool> carte3d_active{false};
 
   // --- L'INTÉRIEUR DE L'ISS : commandes de déplacement -----------------------
@@ -125,6 +147,20 @@ struct RenderBridge {
     } craft[MAX];
     std::atomic<bool> vol_geo_actif{false}; // mission GEO en exploitation
   } fleet;
+
+  // --- NOVELLUS DANS LE MONDE [GDD v1.2 11.1, 17.3] --------------------------
+  // La station N'EST PAS une scène à part : elle a une position RÉELLE dans le
+  // monde unique, en orbite LEO autour de la Terre (418 km). Publiée ici pour
+  // que le rendu la place comme tout autre objet du monde — première brique du
+  // passage au monde unique (incr.3 : Novellus littéralement dans la scène 1:1).
+  // Orbite circulaire, plan écliptique : cercle DÉCLARÉ, même approximation que
+  // la flotte [GDD 6.8].
+  struct StationWorld {
+    std::atomic<bool> valid{false};
+    double rel_m[3]{};          // position rel. à la Terre (écliptique, m)
+    double altitude_km{0.0};    // altitude au-dessus de la surface (HUD)
+    double envergure_m{0.0};    // taille du modèle (échelle du rendu proche)
+  } station;
 
   // --- LE VOL INTERPLANÉTAIRE EN COURS [GDD 8.3] -----------------------------
   // L'écran publie : la trajectoire NOMINALE (l'arc figé au commit), la

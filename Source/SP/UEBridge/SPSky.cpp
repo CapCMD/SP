@@ -1,5 +1,8 @@
 // SPSky.cpp — le fond étoilé. Voir l'entête pour la géométrie et l'approximation.
 
+// Entête jeu AVANT tout entête UE (macros PI/check).
+#include "app/bridge_flags.hpp"
+
 #include "SPSky.h"
 
 #include "Components/StaticMeshComponent.h"
@@ -136,6 +139,7 @@ void USPSkySubsystem::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 	if (!bBuilt) { BuildSky(); return; }
+	// [BISECT] mise à jour adaptative du dôme retirée temporairement.
 
 	// DIAGNOSTIC (une fois, après quelques frames) : « construite » ne veut pas
 	// dire « rendue ». WasRecentlyRendered tranche entre un problème de scène

@@ -34,10 +34,14 @@ void ASPPlayerController::AppliquerModeEntree()
 	// même pour la station : le joueur clique dans le panneau, il ne se déplace
 	// plus (mais garde la souris pour agir sur les boutons du poste).
 	const bool bModale = (Session->modal != fen::app::Modal::Aucun);
-	const bool bPoste  = (Session->scene == fen::app::SceneJeu::Station &&
+	const bool bPoste  = (Session->scene == fen::app::SceneJeu::Monde &&
+	                      Session->cadrage == fen::app::Cadrage::Bord &&
 	                      Session->poste_ouvert >= 0);
-	const int32 Etat = static_cast<int32>(Session->scene) + (bModale ? 100 : 0) +
-	                   (bPoste ? 200 : 0);
+	// Clé de cache : scène (0/1) + cadrage (×2) + modale + poste. Le cadrage
+	// distingue les deux modes d'entrée du Monde (bord 1re personne / système).
+	const int32 Etat = static_cast<int32>(Session->scene) +
+	                   static_cast<int32>(Session->cadrage) * 2 +
+	                   (bModale ? 100 : 0) + (bPoste ? 200 : 0);
 	if (Etat == SceneAppliquee) return;
 	SceneAppliquee = Etat;
 
@@ -62,39 +66,33 @@ void ASPPlayerController::AppliquerModeEntree()
 		return;
 	}
 
-	switch (Session->scene)
+	if (Session->scene == fen::app::SceneJeu::Titre)
 	{
-		case fen::app::SceneJeu::Titre:
-		{
-			// Le menu Slate est le seul interactif : entrée UI seule.
-			FInputModeUIOnly Mode;
-			Mode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
-			SetInputMode(Mode);
-			bShowMouseCursor = true;
-			break;
-		}
-		case fen::app::SceneJeu::Station:
-		{
-			// PREMIÈRE PERSONNE : curseur capturé, le regard suit la souris.
-			// C'est précisément ce qu'ImGui rendait impossible.
-			FInputModeGameOnly Mode;
-			Mode.SetConsumeCaptureMouseDown(true);
-			SetInputMode(Mode);
-			bShowMouseCursor = false;
-			break;
-		}
-		case fen::app::SceneJeu::Carte:
-		{
-			// Façon NASA Eyes : curseur visible, molette et glisser pilotent
-			// la caméra, le clic sélectionne un corps.
-			FInputModeGameAndUI Mode;
-			Mode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
-			Mode.SetHideCursorDuringCapture(false);
-			SetInputMode(Mode);
-			bShowMouseCursor = true;
-			bGlisse = false;
-			break;
-		}
+		// Le menu Slate est le seul interactif : entrée UI seule.
+		FInputModeUIOnly Mode;
+		Mode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
+		SetInputMode(Mode);
+		bShowMouseCursor = true;
+	}
+	else if (Session->cadrage == fen::app::Cadrage::Bord)
+	{
+		// À BORD, PREMIÈRE PERSONNE : curseur capturé, le regard suit la souris.
+		// C'est précisément ce qu'ImGui rendait impossible.
+		FInputModeGameOnly Mode;
+		Mode.SetConsumeCaptureMouseDown(true);
+		SetInputMode(Mode);
+		bShowMouseCursor = false;
+	}
+	else   // Cadrage::Systeme : le plan système du Monde, façon NASA Eyes.
+	{
+		// Curseur visible, molette et glisser pilotent la caméra, le clic
+		// sélectionne un corps.
+		FInputModeGameAndUI Mode;
+		Mode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
+		Mode.SetHideCursorDuringCapture(false);
+		SetInputMode(Mode);
+		bShowMouseCursor = true;
+		bGlisse = false;
 	}
 }
 
@@ -128,42 +126,48 @@ void ASPPlayerController::PlayerTick(float DeltaTime)
 	const bool bEscDown = bEsc && !bPrecEsc;
 	bPrecM = bM; bPrecE = bE; bPrecF5 = bF5; bPrecEsc = bEsc;
 
-	switch (Session->scene)
+	if (Session->scene == fen::app::SceneJeu::Titre)
 	{
-		case fen::app::SceneJeu::Titre:
-			// DÉCOR DU MENU : la carte tourne lentement derrière le panneau
-			// (fond étoilé + orbites ténues, cf. ref_menu.png). Présentation
-			// pure — aucun état de jeu n'en dépend.
-			B.focus_body = -1;
-			B.cam.dist_km = 6.5e8;
-			B.cam.pitch = 1.15;
-			B.cam.yaw = B.cam.yaw.load() + DeltaTime * 0.012;
-			break;
-
-		case fen::app::SceneJeu::Station:
-			if (bEscDown)
-			{
-				if (Session->poste_ouvert >= 0) Session->poste_ouvert = -1;
-				else                            Session->retour_menu();
-			}
-			else if (Session->poste_ouvert < 0)
-			{
-				if (bMDown)  Session->scene = fen::app::SceneJeu::Carte;
-				if (bF5Down) Session->sauvegarder_partie();
-				if (bEDown)
-				{
-					const int Proche = B.station_out.near_post.load();
-					if (Proche >= 0) Session->poste_ouvert = Proche;
-				}
-			}
-			TickStation(DeltaTime);
-			break;
-
-		case fen::app::SceneJeu::Carte:
-			if (bMDown || bEscDown) Session->scene = fen::app::SceneJeu::Station;
+		// DÉCOR DU MENU : le monde vu au plan système tourne lentement derrière
+		// le panneau (fond étoilé + orbites ténues, cf. ref_menu.png).
+		// Présentation pure — aucun état de jeu n'en dépend.
+		B.focus_body = -1;
+		B.cam.dist_km = 6.5e8;
+		B.cam.pitch = 1.15;
+		B.cam.yaw = B.cam.yaw.load() + DeltaTime * 0.012;
+	}
+	else if (Session->cadrage == fen::app::Cadrage::Bord)
+	{
+		// À BORD DE NOVELLUS, première personne.
+		if (bEscDown)
+		{
+			if (Session->poste_ouvert >= 0) Session->poste_ouvert = -1;
+			else                            Session->retour_menu();
+		}
+		else if (Session->poste_ouvert < 0)
+		{
+			// [M] = SIGNET DE CAMÉRA : VOL continu vers le plan système, ancré
+			// sur la Terre, SANS quitter le Monde [GDD v1.2 ch.8.3, 17.4].
+			if (bMDown)  Session->demarrer_vol_cadrage();
 			if (bF5Down) Session->sauvegarder_partie();
-			TickCarte(DeltaTime);
-			break;
+			if (bEDown)
+			{
+				const int Proche = B.station_out.near_post.load();
+				if (Proche >= 0) Session->poste_ouvert = Proche;
+			}
+		}
+		// Le vol a pu basculer le cadrage : ne piloter l'ambulation que si l'on
+		// est encore effectivement à bord.
+		if (Session->cadrage == fen::app::Cadrage::Bord) TickStation(DeltaTime);
+	}
+	else   // Cadrage::Systeme : le plan système du Monde.
+	{
+		// [M] = vol de RETOUR vers le bord ; Échap = retour immédiat. Pendant le
+		// vol, le zoom/orbite manuel est suspendu (la transition pilote la caméra).
+		if (bMDown)        Session->demarrer_vol_cadrage();
+		else if (bEscDown) Session->retour_bord_immediat();
+		if (bF5Down) Session->sauvegarder_partie();
+		if (!Session->vol_cam.actif) TickCarte(DeltaTime);
 	}
 }
 
@@ -221,9 +225,13 @@ void ASPPlayerController::TickCarte(float DeltaTime)
 	if (!FMath::IsNearlyZero(Molette))
 	{
 		const double F = FMath::Exp(-Molette * 0.22);
-		const double RFocus = FocusCourant < 0
-			? 1.0e6
-			: fen::ephem::body_radius(static_cast<fen::ephem::Body>(FocusCourant)) / 1000.0;
+		// NOVELLUS (focus spécial, hors enum Body) : borne de zoom = son envergure,
+		// pas body_radius (qui n'a pas d'entrée pour lui).
+		const double RFocus = (FocusCourant == fen::app::FOCUS_STATION)
+			? 0.03
+			: FocusCourant < 0
+				? 1.0e6
+				: fen::ephem::body_radius(static_cast<fen::ephem::Body>(FocusCourant)) / 1000.0;
 		B.cam.dist_km = FMath::Clamp(B.cam.dist_km.load() * F, RFocus * 1.15, 2.0e10);
 	}
 

@@ -40,6 +40,7 @@ namespace fen::app {
 // (Reprise telle quelle de ui/carte3d_ecran.hpp — l'entrée native l'appelle au
 // changement de focus.)
 inline double distance_cadrage(int body) {
+  if (body == FOCUS_STATION) return 1.0;            // Novellus (~55 m) cadré de près (km)
   if (body < 0) return 9.0e8;                       // vue système (~6 UA)
   const double r_km = ephem::body_radius((ephem::Body)body) / 1000.0;
   return std::max(6.0 * r_km, 3000.0);
@@ -54,9 +55,50 @@ inline double distance_cadrage(int body) {
 //              confort, atteint par une ligne discrète du panneau.
 enum class Modal { Aucun = 0, GameOver, Reglages };
 
+// ═══ VOL DE CAMÉRA [GDD v1.2 ch.8.3, 17.4] ═══
+// [M] n'est pas une bascule sèche mais un VOL continu entre le plan bord et le
+// plan système, ancré sur la Terre (là où est Novellus). La caméra du système
+// existe déjà et sait « voler » (lissage log de la distance de vue) : ce modèle
+// PILOTE simplement sa distance cible le long d'un chemin lissé, en C++ pur donc
+// sous oracle. La coexistence VISUELLE des deux rendus (voir l'intérieur grandir
+// dans le zoom) demande le moteur ch.18 (incrément 3) — ici, un seul plan rend à
+// la fois, mais le MOUVEMENT de caméra est continu, plus une coupure sèche.
+enum class SensVol { VersSysteme = 0, VersBord = 1 };
+
+struct VolCamera {
+  bool     actif{false};
+  SensVol  sens{SensVol::VersSysteme};
+  double   progres{0.0};           // 0..1
+  double   duree_s{0.9};
+  double   dist_depart_km{0.0};
+  double   dist_arrivee_km{0.0};
+
+  // Distance de vue courante : interpolation LOGARITHMIQUE (du rayon terrestre à
+  // 6 UA il y a des ordres de grandeur) sous un lissage smoothstep (départ et
+  // arrivée sans à-coup).
+  double dist_courante_km() const {
+    const double p = progres < 0.0 ? 0.0 : (progres > 1.0 ? 1.0 : progres);
+    const double e = p * p * (3.0 - 2.0 * p);
+    const double a = std::log(dist_depart_km);
+    const double b = std::log(dist_arrivee_km);
+    return std::exp(a + (b - a) * e);
+  }
+  void avancer(double dt) {
+    if (!actif || duree_s <= 0.0) { progres = 1.0; return; }
+    progres += dt / duree_s;
+    if (progres > 1.0) progres = 1.0;
+  }
+  bool fini() const { return progres >= 1.0; }
+};
+
 struct Session {
   Jeu jeu;
   SceneJeu scene{SceneJeu::Titre};
+  // Cadrage de la caméra DANS le Monde unique [GDD v1.2 ch.17.4] : à bord
+  // (ambulation 1re personne) ou tiré au plan système (ex-« carte »). [M] le
+  // bascule ; ce n'est jamais un changement de scène.
+  Cadrage  cadrage{Cadrage::Bord};
+  VolCamera vol_cam;                  // vol de caméra [M] en cours (voir plus bas)
   Modal modal{Modal::Aucun};
   int  poste_ouvert{-1};             // ISS : poste de travail ouvert (-1 = aucun)
   bool quitter{false};
@@ -163,7 +205,8 @@ struct Session {
     saves_scannees = false;
     poste_ouvert = -1;
     modal = Modal::Aucun;
-    scene = SceneJeu::Station;             // on arrive À BORD, pas sur la carte
+    scene = SceneJeu::Monde;               // on entre DANS le monde unique...
+    cadrage = Cadrage::Bord;               // ...à bord de Novellus [GDD 1.4, 11.1]
   }
 
   // Repartir après une faillite : le modèle est remis à zéro, on revient au
@@ -172,6 +215,7 @@ struct Session {
     jeu.reinitialiser();
     modal = Modal::Aucun;
     poste_ouvert = -1;
+    cadrage = Cadrage::Bord;
     saves_scannees = false;
     scene = SceneJeu::Titre;
   }
@@ -339,17 +383,66 @@ struct Session {
     scene = SceneJeu::Titre;
   }
 
+  // ═══ VOL DE CAMÉRA [M] ═══ (voir VolCamera plus haut)
+  static constexpr double DIST_SYSTEME_KM = 9.0e8;   // ~6 UA : le système interne cadré
+  // Distance « bord » : au ras de la Terre (là où orbite Novellus), Terre plein
+  // cadre. Même borne serrée que le zoom manuel de la carte (rayon × 1.15).
+  double dist_bord_km() const {
+    return ephem::body_radius(ephem::Body::EarthBary) / 1000.0 * 1.15;
+  }
+
+  // [M] : lance le vol continu entre bord et système, ancré sur la Terre.
+  void demarrer_vol_cadrage() {
+    if (vol_cam.actif || scene != SceneJeu::Monde) return;   // un vol à la fois
+    vol_cam.actif = true;
+    vol_cam.progres = 0.0;
+    if (cadrage == Cadrage::Bord) {
+      // On quitte le bord : la vue système s'ouvre AU RAS de la Terre puis recule.
+      cadrage = Cadrage::Systeme;                 // le plan système rend dès maintenant
+      vol_cam.sens = SensVol::VersSysteme;
+      vol_cam.dist_depart_km  = dist_bord_km();
+      vol_cam.dist_arrivee_km = DIST_SYSTEME_KM;
+    } else {
+      // On rentre à bord : la caméra plonge vers la Terre, la main passe à la 1re
+      // personne À L'ARRIVÉE (fin du vol).
+      vol_cam.sens = SensVol::VersBord;
+      vol_cam.dist_depart_km  = std::max(1.0, g_render_bridge.cam.dist_km.load());
+      vol_cam.dist_arrivee_km = dist_bord_km();
+    }
+    g_render_bridge.focus_body = static_cast<int>(ephem::Body::EarthBary);
+    g_render_bridge.cam.dist_km = vol_cam.dist_depart_km;
+  }
+
+  // Échap depuis le système : retour IMMÉDIAT à bord (coupe tout vol en cours).
+  void retour_bord_immediat() {
+    vol_cam.actif = false;
+    cadrage = Cadrage::Bord;
+  }
+
   // -------------------------------------------------------------------------
   // LA FRAME : mise à jour d'état + publication du pont. Appelée une fois par
   // frame par USPGameSubsystem, AVANT que le monde UE ne lise le pont.
   void tick(double dt_reel) {
-    (void)dt_reel;
     // couche ARES : création/reset/rattrapage mensuel (lecture seule sur l'agence)
     jeu.ares.assurer(jeu.agence, jeu.epoch_courant());
 
-    // garde-fous de routage : sans agence créée, aucune scène de jeu.
-    if ((scene == SceneJeu::Carte || scene == SceneJeu::Station) && !jeu.agence.creee)
+    // garde-fous de routage : sans agence créée, on ne peut pas être dans le Monde.
+    if (scene == SceneJeu::Monde && !jeu.agence.creee)
       scene = SceneJeu::Titre;
+    if (scene != SceneJeu::Monde) vol_cam.actif = false;   // pas de vol hors du Monde
+
+    // ═══ VOL DE CAMÉRA [M] ═══ : avance la transition et PILOTE la distance de
+    // vue cible (le lissage côté rendu la suit). À l'arrivée d'un vol de RETOUR,
+    // la main passe à la 1re personne (cadrage Bord).
+    if (vol_cam.actif) {
+      vol_cam.avancer(dt_reel);
+      g_render_bridge.focus_body = static_cast<int>(ephem::Body::EarthBary);
+      g_render_bridge.cam.dist_km = vol_cam.dist_courante_km();
+      if (vol_cam.fini()) {
+        if (vol_cam.sens == SensVol::VersBord) cadrage = Cadrage::Bord;
+        vol_cam.actif = false;
+      }
+    }
 
     // LA FAILLITE EST UN GAME OVER, imposé par le MODÈLE [économie stricte] :
     // c'est le seul état que l'UI ne peut pas refuser. Il se pose par-dessus la
@@ -364,14 +457,19 @@ struct Session {
       modal = Modal::Aucun;
     }
 
-    // pont rendu 3D : chaque subsystem UE s'active pour SA scène.
+    // pont rendu 3D : le Monde est unique ; le CADRAGE dit quel plan la caméra
+    // occupe. Le rendu station s'active au cadrage Bord, le rendu système au
+    // cadrage Systeme — les deux sont le MÊME monde [GDD v1.2 ch.17.3].
     g_render_bridge.scene = static_cast<int>(scene);
-    g_render_bridge.carte3d_active = (scene == SceneJeu::Carte);
-    // Le menu n'a plus de fond peint : c'est la carte, en retrait, qui lui sert
-    // de décor (ciel étoilé + orbites ténues) — format ref_menu.png.
+    g_render_bridge.carte3d_active =
+        (scene == SceneJeu::Monde && cadrage == Cadrage::Systeme);
+    // Le menu n'a plus de fond peint : c'est le monde vu au plan système, en
+    // retrait, qui lui sert de décor (ciel étoilé + orbites ténues) — ref_menu.png.
     g_render_bridge.menu_backdrop = (scene == SceneJeu::Titre);
 
-    if (scene == SceneJeu::Station) publier_postes();
+    // Les postes ne sont publiés qu'à bord (cadrage Bord) : c'est là qu'on les
+    // approche à pied.
+    if (scene == SceneJeu::Monde && cadrage == Cadrage::Bord) publier_postes();
     // Publié dans TOUTES les scènes : la carte sert aussi de décor au menu, et
     // l'époque doit y être définie (sinon le décor est figé à J2000).
     publier_carte();
@@ -412,6 +510,24 @@ struct Session {
       }
       B.fleet.n = n;
       B.fleet.vol_geo_actif = vol_geo;
+    }
+
+    // --- NOVELLUS dans le monde [GDD v1.2 11.1, 17.3] -----------------------
+    // La station a une position RÉELLE dans le monde unique : orbite circulaire
+    // LEO (418 km) autour de la Terre, plan écliptique. On RÉUTILISE le helper de
+    // la flotte (aucune physique dupliquée côté rendu) : un relais GEO n'est
+    // qu'un cercle képlérien rel. Terre — Novellus est le même modèle, en LEO.
+    {
+      EnginFlotte nv;
+      nv.type   = EnginFlotte::RelaisGeo;   // -> parent Terre, cercle en plan écliptique
+      nv.sma_m  = ephem::body_radius(ephem::Body::EarthBary) + 418000.0;  // R_Terre + 418 km
+      nv.phase0 = 0.0;
+      nv.t0     = 0.0;
+      const Vec3 p = jeu.flotte_position_rel(nv, epoch);
+      B.station.rel_m[0] = p.x; B.station.rel_m[1] = p.y; B.station.rel_m[2] = p.z;
+      B.station.altitude_km = 418.0;
+      B.station.envergure_m = 109.0;         // envergure RÉELLE de l'ISS (~109 m, arrays comprises)
+      B.station.valid = true;
     }
 
     // --- vol interplanétaire : nominale + estimé + corridor + nœuds ----------
