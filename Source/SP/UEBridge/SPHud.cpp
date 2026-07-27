@@ -221,17 +221,23 @@ int32 SSPWorldHud::OnPaint(const FPaintArgs& Args, const FGeometry& G, const FSl
 	if (!Session) return LayerId;
 	// Un seul Monde : le CADRAGE décide quel HUD peindre (système = ex-carte,
 	// bord = ex-station). Titre : le menu peint, pas cette couche.
-	if (Session->scene == fen::app::SceneJeu::Monde)
-		return (Session->cadrage == fen::app::Cadrage::Systeme)
-			? PaintCarte(G, Out, LayerId + 1)
-			: PaintStation(G, Out, LayerId + 1);
-	return LayerId;
+	if (Session->scene != fen::app::SceneJeu::Monde) return LayerId;
+	// EN TRANSIT (vol de caméra [M], incr. 3c-3) : aucun HUD. Les deux plans se
+	// relaient au milieu du vol ; peindre le fil d'Ariane et la barre de temps
+	// par-dessus une caméra qui plonge dans la station referait exactement la
+	// coupure qu'on vient de supprimer.
+	if (Session->vol_cam.actif) return LayerId;
+	return (Session->cadrage == fen::app::Cadrage::Systeme)
+		? PaintCarte(G, Out, LayerId + 1)
+		: PaintStation(G, Out, LayerId + 1);
 }
 
 // ---------------------------------------------------------------------------
 // LA CARTE — HUD MINIMAL, format ref_systeme.png :
-//   « < SYSTEME SOLAIRE » en haut-gauche, « LIVE » en bas-gauche, barre de temps
-//   en bas-centre. AUCUN panneau latéral (le gros panneau ImGui est supprimé).
+//   « < SYSTEME SOLAIRE » en haut-gauche, et rien d'autre que les marqueurs des
+//   corps. AUCUN panneau latéral (le gros panneau ImGui est supprimé).
+//   La barre de temps du bas et le témoin « LIVE » de la référence ont été
+//   RETIRÉS le 2026-07-27 : le bandeau permanent les répétait (voir plus bas).
 int32 SSPWorldHud::PaintCarte(const FGeometry& G, FSlateWindowElementList& Out, int32 Layer) const
 {
 	const FVector2D Taille = G.GetLocalSize();
@@ -289,79 +295,50 @@ int32 SSPWorldHud::PaintCarte(const FGeometry& G, FSlateWindowElementList& Out, 
 	}
 
 	// --- NOVELLUS focalisé : gros plan + « [M] ENTRER » [réf. ref_issfocus.png] --
-	// Le vol de caméra [M] (incr.2) fait déjà entrer à bord depuis la vue système :
-	// ici on ANNONCE l'affordance quand la station est cadrée.
-	if (B.focus_body.load() == fen::app::FOCUS_STATION)
+	// Le vol de caméra [M] fait entrer à bord depuis la vue système : ici on
+	// ANNONCE l'affordance quand la station est cadrée. C'est une affordance de
+	// GROS PLAN : elle ne se peint que si la station se DISTINGUE, au même critère
+	// que le LOD du modèle extérieur (envergure / distance de vue). Sans ce garde,
+	// le titre s'affichait plein écran alors que Novellus est sous-pixellique.
 	{
-		const float CX = W * 0.5f;
-		const FString Titre  = TEXT("NOVELLUS");
-		const FString Sous   = TEXT("ORBITE TERRESTRE BASSE  -  418 km");
-		const FString Entrer = TEXT("[ M ]  ENTRER");
-		const FSlateFontInfo FTitre = Mono(15.0f * S, 200);
-		const FSlateFontInfo FSous  = Mono(10.0f * S, 90);
-		const FSlateFontInfo FEnt   = Mono(13.0f * S, 160);
-		const FVector2D SzT = Mesure(Titre, FTitre);
-		const FVector2D SzS = Mesure(Sous, FSous);
-		const FVector2D SzE = Mesure(Entrer, FEnt);
-		Texte(Out, Layer + 3, G, Titre,  FTitre, FVector2D(CX - SzT.X * 0.5, 548.0 * S), ColTexte);
-		Texte(Out, Layer + 3, G, Sous,   FSous,  FVector2D(CX - SzS.X * 0.5, 572.0 * S), ColTexteFaible);
-		Texte(Out, Layer + 3, G, Entrer, FEnt,   FVector2D(CX - SzE.X * 0.5, 598.0 * S), ColVert);
+		const double DistVueKm = B.cam.dist_km.load();
+		const double EnvKm = B.station.envergure_m * 0.001;
+		const bool bGrosPlan = B.focus_body.load() == fen::app::FOCUS_STATION &&
+		                       DistVueKm > 0.0 && (EnvKm / DistVueKm) > 3.0e-3;
+		if (bGrosPlan)
+		{
+			const float CX = W * 0.5f;
+			const FString Titre  = TEXT("NOVELLUS");
+			const FString Sous   = TEXT("ORBITE TERRESTRE BASSE  -  418 km");
+			const FString Entrer = TEXT("[ M ]  ENTRER");
+			const FSlateFontInfo FTitre = Mono(15.0f * S, 200);
+			const FSlateFontInfo FSous  = Mono(10.0f * S, 90);
+			const FSlateFontInfo FEnt   = Mono(13.0f * S, 160);
+			const FVector2D SzT = Mesure(Titre, FTitre);
+			const FVector2D SzS = Mesure(Sous, FSous);
+			const FVector2D SzE = Mesure(Entrer, FEnt);
+			Texte(Out, Layer + 3, G, Titre,  FTitre, FVector2D(CX - SzT.X * 0.5, 548.0 * S), ColTexte);
+			Texte(Out, Layer + 3, G, Sous,   FSous,  FVector2D(CX - SzS.X * 0.5, 572.0 * S), ColTexteFaible);
+			Texte(Out, Layer + 3, G, Entrer, FEnt,   FVector2D(CX - SzE.X * 0.5, 598.0 * S), ColVert);
+		}
 	}
 
 	// --- « < SYSTEME SOLAIRE » : le fil d'Ariane (haut-gauche) ---------------
 	Texte(Out, Layer + 2, G, TEXT("<  SYSTEME SOLAIRE"), Mono(10.0f * S, 80),
 	      FVector2D(34.0 * S, 26.0 * S), ColTexte);
 
-	// --- « LIVE » : on regarde l'ÉTAT COURANT, jamais une rediffusion [GDD 14]
-	{
-		const FVector2D P(44.0 * S, 673.0 * S);
-		Cercle(Out, Layer + 2, G, P + FVector2D(4.0 * S, 6.0 * S), 4.5f * S, ColTexte, 1.2f * S);
-		Texte(Out, Layer + 2, G, TEXT("LIVE"), Mono(10.0f * S, 80),
-		      FVector2D(64.0 * S, 666.0 * S), ColTexte);
-	}
-
-	// --- LA BARRE DE TEMPS ----------------------------------------------------
-	// INDICATEUR, PAS UNE COMMANDE [GDD 14] : le temps du jeu est UNIQUE et
-	// piloté par le système temporel de l'agence (avec ses coûts). La barre
-	// affiche la date de jeu, la cadence courante et l'heure — le curseur est
-	// posé sur REAL RATE et n'est pas saisissable.
-	{
-		FString Date, Heure;
-		DateHeure(B.epoch_tdb.load(), Date, Heure);
-		const FSlateFontInfo FBarre = Mono(10.0f * S, 40);
-		const float CX = W * 0.5f;
-		const float YTexte = 647.0f * S;
-		const float YRail = 675.0f * S;
-		const float DemiRail = 172.0f * S;
-
-		const FString Cadence = TEXT("REAL RATE");
-		const FVector2D SzD = Mesure(Date, FBarre);
-		const FVector2D SzC = Mesure(Cadence, FBarre);
-		const FVector2D SzH = Mesure(Heure, FBarre);
-		Texte(Out, Layer + 2, G, Date, FBarre,
-		      FVector2D(CX - 113.0 * S - SzD.X * 0.5, YTexte), ColTexte);
-		Texte(Out, Layer + 2, G, Cadence, FBarre, FVector2D(CX - SzC.X * 0.5, YTexte), ColVert);
-		Texte(Out, Layer + 2, G, Heure, FBarre,
-		      FVector2D(CX + 113.0 * S - SzH.X * 0.5, YTexte), ColTexte);
-
-		// le rail et ses graduations
-		Ligne(Out, Layer + 2, G, FVector2D(CX - DemiRail, YRail), FVector2D(CX + DemiRail, YRail),
-		      SRGB(115, 128, 148, 0.8f), 1.0f * S);
-		for (int32 k = 0; k <= 8; ++k)
-		{
-			const float X = CX - DemiRail + (2.0f * DemiRail * k) / 8.0f;
-			Ligne(Out, Layer + 2, G, FVector2D(X, YRail - 3.0 * S), FVector2D(X, YRail + 3.0 * S),
-			      SRGB(115, 128, 148, 0.8f), 1.0f * S);
-		}
-		// le curseur, au centre = cadence réelle
-		Disque(Out, Layer + 3, G, FVector2D(CX, YRail), 8.0f * S, ColVert);
-
-		// glyphe de pause (indicateur d'état, à gauche du rail)
-		const float XP = CX - DemiRail - 34.0f * S;
-		Boite(Out, Layer + 2, G, FVector2D(XP, YRail - 7.0 * S), FVector2D(2.5 * S, 14.0 * S), ColTexte);
-		Boite(Out, Layer + 2, G, FVector2D(XP + 6.0 * S, YRail - 7.0 * S),
-		     FVector2D(2.5 * S, 14.0 * S), ColTexte);
-	}
+	// --- PLUS DE BARRE DE TEMPS NI DE « LIVE » EN BAS (décision du 2026-07-27) --
+	// La référence `ref_systeme.png` porte une barre de temps en bas-centre
+	// (date | cadence | heure + rail) et un témoin « LIVE » en bas-gauche. Les
+	// deux ont été retirés : depuis que le BANDEAU DU TEMPS (`SSPTemps`,
+	// haut-droite) est permanent et présent dans TOUT le Monde, ils disaient la
+	// même chose une seconde fois, sur ce seul écran — et le bandeau en dit
+	// davantage (les crans sont cliquables, le plafond de mission y est visible
+	// [GDD 14.3]). « LIVE » suivait le même sort : l'horloge du bandeau EST
+	// l'état courant, l'annoncer une seconde fois n'apprend rien.
+	// DIVERGENCE ASSUMÉE d'avec la référence, à ne pas « recorriger » plus tard :
+	// la référence n'avait pas de bandeau permanent, elle avait besoin de cette
+	// barre. Le HUD de la carte reste MINIMAL — c'est même l'esprit du format.
 
 	// --- approximations DÉCLARÉES [GDD 6.8] ----------------------------------
 	// Le HUD est minimal, mais une approximation non déclarée reste interdite :
@@ -392,6 +369,8 @@ int32 SSPWorldHud::PaintStation(const FGeometry& G, FSlateWindowElementList& Out
 	const FSlateFontInfo FBarre = Mono(9.0f * S, 50);
 	// L'entrée est NATIVE depuis le passage en rendu total UE5 : la souris est
 	// capturée, on ne « glisse » plus pour regarder.
+	// L'état du temps n'est PAS répété ici : c'est le rôle du bandeau permanent en
+	// haut à droite (`SSPTemps`), présent aux deux cadrages.
 	const FString Haut = FString::Printf(
 		TEXT("%s   |   ZQSD/WASD se deplacer   |   SOURIS : regarder   |   "
 		     "E : poste   |   M : carte   |   F5 : sauvegarder"),
@@ -690,8 +669,9 @@ TSharedRef<SWidget> LigneKV(const FString& K, const FString& V,
 }
 
 // Petit bouton d'ACTION dans un poste (compact, liseré discret).
-TSharedRef<SWidget> BoutonAction(const FText& Libelle, FOnClicked OnClick,
-                                 bool Enabled = true)
+// Le style des boutons d'action, partagé (postes ET bandeau du temps) : une seule
+// définition, donc une seule apparence.
+const FButtonStyle& StyleBouton()
 {
 	static FButtonStyle St = []() {
 		FButtonStyle B;
@@ -702,7 +682,13 @@ TSharedRef<SWidget> BoutonAction(const FText& Libelle, FOnClicked OnClick,
 		B.SetPressedPadding(FMargin(8, 3));
 		return B;
 	}();
-	return SNew(SButton).ButtonStyle(&St).IsEnabled(Enabled)
+	return St;
+}
+
+TSharedRef<SWidget> BoutonAction(const FText& Libelle, FOnClicked OnClick,
+                                 bool Enabled = true)
+{
+	return SNew(SButton).ButtonStyle(&StyleBouton()).IsEnabled(Enabled)
 		.HAlign(HAlign_Center).VAlign(VAlign_Center).OnClicked(OnClick)
 		[ Txt(Libelle.ToString(), 9.0f, Enabled ? ColTexte : ColTexteFaible, 60) ];
 }
@@ -1130,6 +1116,158 @@ TSharedRef<SWidget> SSPModal::BuildContenu()
 // ═══════════════════════════════════════════════════════════════════════════
 // LES POSTES DE TRAVAIL — le cœur C++ remonte au joueur.
 // ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
+// LE BANDEAU DU TEMPS — haut-droite, partout dans le Monde. Voir SPHud.h.
+// ═══════════════════════════════════════════════════════════════════════════
+namespace {
+
+// Les cinq crans de `fen::game::TimeRate`, dans l'ordre de l'enum. Libellés
+// courts : le bandeau est permanent, il doit rester discret.
+struct CranTemps { const TCHAR* Court; const TCHAR* Long; };
+const CranTemps CRANS[5] = {
+	{TEXT("II"),   TEXT("PAUSE")},
+	{TEXT("REEL"), TEXT("TEMPS REEL")},
+	{TEXT("JOUR"), TEXT("1 JOUR / S")},
+	{TEXT("SEM"),  TEXT("1 SEMAINE / S")},
+	{TEXT("MOIS"), TEXT("1 MOIS / S")},
+};
+
+} // namespace
+
+void SSPTemps::Construct(const FArguments& InArgs)
+{
+	Session = InArgs._Session;
+
+	// LES CRANS. Tous CLIQUABLES, y compris le courant (le poser deux fois est sans
+	// effet) : c'est la COULEUR qui dit où l'on en est, pas le grisé. Désactiver le
+	// cran courant le rendait plus terne que les autres — l'inverse de ce qu'on veut
+	// d'un indicateur d'état permanent.
+	TSharedRef<SHorizontalBox> Boutons = SNew(SHorizontalBox);
+	Boutons->SetVisibility(EVisibility::SelfHitTestInvisible);
+	for (int32 k = 0; k < 5; ++k)
+	{
+		Boutons->AddSlot().AutoWidth().Padding(0, 0, 3, 0)
+		[
+			SNew(SButton)
+			.ButtonStyle(&StyleBouton())
+			.HAlign(HAlign_Center).VAlign(VAlign_Center)
+			.OnClicked_Lambda([this, k]() {
+				// Le modèle borne : le cran au-dessus du plafond [GDD 14.3] se pose
+				// AU PLAFOND, jamais à la valeur demandée. Le refus se VOIT (le cran
+				// interdit est déjà barré en rouge), il ne se devine pas.
+				if (Session) Session->jeu.regler_cadence(static_cast<fen::game::TimeRate>(k));
+				return FReply::Handled();
+			})
+			[
+				SNew(STextBlock).Font(Mono(9.0f, 60)).Text(FText::FromString(CRANS[k].Court))
+				.ColorAndOpacity_Lambda([this, k]() -> FSlateColor {
+					const bool bActif = Session && static_cast<int32>(Session->jeu.cadence) == k;
+					// AU-DESSUS DU PLAFOND DE LA MISSION [GDD 14.3] : le cran existe
+					// toujours (il redeviendra atteignable), mais il est marqué comme
+					// fermé — rouge éteint. Sans ce signal, un clic sans effet passerait
+					// pour un bug d'interface.
+					if (k > g_render_bridge.cadence_max.load())
+						return FSlateColor(SRGB(150, 66, 62));
+					// Le cran courant : ambre en pause, vert sinon — la même
+					// convention de couleur que la barre de temps de la carte. Les
+					// autres restent en retrait.
+					if (!bActif) return FSlateColor(SRGB(124, 132, 142));
+					return FSlateColor(k == 0 ? SRGB(255, 189, 87) : ColVert);
+				})
+			]
+		];
+	}
+
+	ChildSlot
+	[
+		SNew(SDPIScaler).DPIScale_Lambda([this]() { return Echelle; })
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().FillWidth(1.0f)[ SNullWidget::NullWidget ]
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Top).Padding(0, 14, 18, 0)
+			[
+				SNew(SBorder)
+				.BorderImage(Plein())
+				.BorderBackgroundColor(FSlateColor(SRGB(10, 14, 20, 0.72f)))
+				.Padding(FMargin(12, 8))
+				.Visibility(EVisibility::SelfHitTestInvisible)
+				[
+					SNew(SVerticalBox)
+					.Visibility(EVisibility::SelfHitTestInvisible)
+					// date + heure : l'état COURANT du monde [GDD 14]
+					+ SVerticalBox::Slot().AutoHeight()
+					[
+						SNew(SHorizontalBox)
+						.Visibility(EVisibility::SelfHitTestInvisible)
+						+ SHorizontalBox::Slot().AutoWidth()
+						[
+							SNew(STextBlock).Font(Mono(10.0f, 40))
+							.ColorAndOpacity(FSlateColor(ColTexte))
+							.Text_Lambda([]() {
+								FString D, H; DateHeure(g_render_bridge.epoch_tdb.load(), D, H);
+								return FText::FromString(D);
+							})
+						]
+						+ SHorizontalBox::Slot().FillWidth(1.0f).HAlign(HAlign_Right)
+						[
+							SNew(STextBlock).Font(Mono(10.0f, 40))
+							.ColorAndOpacity(FSlateColor(ColTexte))
+							.Text_Lambda([]() {
+								FString D, H; DateHeure(g_render_bridge.epoch_tdb.load(), D, H);
+								return FText::FromString(H);
+							})
+						]
+					]
+					// Les crans. Pas de ligne « cadence en clair » : le cran ACTIF est
+					// déjà nommé et coloré, et le bandeau doit rester assez court pour
+					// ne pas empiéter sur le cadre d'un poste ouvert (constaté en
+					// capture). La carte, elle, l'épelle en entier dans sa barre.
+					+ SVerticalBox::Slot().AutoHeight().Padding(0, 4, 0, 0)[ Boutons ]
+					// LE RYTHME IMPOSÉ PAR LA MISSION [GDD 14.3] — « toute manœuvre
+					// fine ramène le temps à un rythme lent ». La phase qui l'impose
+					// est NOMMÉE : le joueur doit comprendre en un coup d'œil que le
+					// monde ralentit parce qu'une ascension est en cours, et non parce
+					// que le jeu bloque. Ligne absente le reste du temps (le bandeau
+					// est permanent : il ne doit pas grossir pour rien).
+					+ SVerticalBox::Slot().AutoHeight().Padding(0, 3, 0, 0)
+					[
+						SNew(STextBlock).Font(Mono(8.0f, 60))
+						.ColorAndOpacity(FSlateColor(SRGB(255, 189, 87)))
+						.Visibility_Lambda([]() {
+							return g_render_bridge.tempo_contraint.load()
+								? EVisibility::HitTestInvisible : EVisibility::Collapsed;
+						})
+						.Text_Lambda([]() {
+							const auto p = static_cast<fen::mission::FlightPhase>(
+								g_render_bridge.tempo_phase.load());
+							return FText::FromString(FString::Printf(
+								TEXT("RYTHME IMPOSE : %s"),
+								ANSI_TO_TCHAR(fen::mission::phase_name(p))));
+						})
+					]
+					// les touches : le bandeau se pilote aussi sans la souris (et à
+					// bord, où le curseur est capturé, C'EST le seul moyen).
+					+ SVerticalBox::Slot().AutoHeight().Padding(0, 4, 0, 0)
+					[
+						SNew(STextBlock).Font(Mono(8.0f, 30))
+						.ColorAndOpacity(FSlateColor(SRGB(102, 115, 133, 0.9f)))
+						.Text(FText::FromString(TEXT("[ P ] pause / reprise    [ 1-5 ] cadence")))
+					]
+				]
+			]
+		]
+	];
+}
+
+void SSPTemps::Tick(const FGeometry& AllottedGeometry, const double InCurrentTime,
+                    const float InDeltaTime)
+{
+	SCompoundWidget::Tick(AllottedGeometry, InCurrentTime, InDeltaTime);
+	// Échelle sur la géométrie ALLOUÉE, jamais sur la taille du viewport (piège n°19).
+	const double H = AllottedGeometry.GetLocalSize().Y;
+	if (H > 1.0) Echelle = static_cast<float>(H / 720.0);
+}
+
 void SSPPoste::Construct(const FArguments& InArgs)
 {
 	Session = InArgs._Session;
@@ -1229,7 +1367,71 @@ TSharedRef<SWidget> SSPPoste::BuildAgence()
 		          SRGB(140, 179, 255)) ];
 	}
 
-	Col->AddSlot().AutoHeight().Padding(0, 8, 0, 6)
+	// ═══ LE SYSTÈME TEMPOREL DE L'AGENCE [GDD 14.2] ═══
+	// C'est ICI que le temps se pilote, et nulle part ailleurs : la barre de temps
+	// de la carte est un indicateur [GDD 14]. Accélérer n'est PAS neutre — les
+	// recettes garanties hors activité (≈ 35 Md€/an) sont inférieures aux coûts
+	// fixes (≈ 44 Md€/an) : le temps qui passe sans programme érode la trésorerie
+	// puis la réserve [GDD 13.2]. On le DIT au joueur, sous les boutons.
+	{
+		using fen::game::TimeRate;
+		const TimeRate courante = Session->jeu.cadence;
+		static const TCHAR* const Libelles[5] = {
+			TEXT("PAUSE"), TEXT("REEL"), TEXT("JOUR/S"), TEXT("SEMAINE/S"), TEXT("MOIS/S")
+		};
+		// LE PLAFOND DE LA MISSION [GDD 14.3] : les crans au-dessus sont fermés
+		// tant qu'une manœuvre fine est en cours. Le poste étant le réglage
+		// « institutionnel », c'est ici qu'on doit lire le POURQUOI en toutes
+		// lettres — un bouton éteint sans motif serait une panne, pas une règle.
+		const fen::mission::TempoLimit Tempo = Session->jeu.plafond_temps();
+		TSharedRef<SHorizontalBox> Cadences = SNew(SHorizontalBox);
+		Cadences->AddSlot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 8, 0)
+		[ Txt(TEXT("CADENCE DU TEMPS"), 10.0f, ColTexteFaible, 90) ];
+		for (int32 k = 0; k < 5; ++k)
+		{
+			const TimeRate r = static_cast<TimeRate>(k);
+			const bool bActive = (r == courante);
+			const bool bFerme = k > static_cast<int32>(Tempo.max_rate);
+			Cadences->AddSlot().AutoWidth().Padding(0, 0, 3, 0)
+			[
+				// Le cran courant est DÉSACTIVÉ : il n'y a rien à y cliquer, et le
+				// griser est ce qui montre où l'on en est. Un cran au-dessus du
+				// plafond l'est aussi, pour la raison inverse.
+				BoutonAction(FText::FromString(FString(Libelles[k])),
+				             FOnClicked::CreateLambda([this, r]() {
+					             Session->jeu.regler_cadence(r);
+					             Rebuild();
+					             return FReply::Handled();
+				             }), !bActive && !bFerme)
+			];
+		}
+		Col->AddSlot().AutoHeight().Padding(0, 8, 0, 2)[ Cadences ];
+		if (Tempo.constrained)
+		{
+			// DEUX LIGNES COURTES, pas une longue : le cadre du poste CLIPPE le
+			// texte au lieu de le replier (constaté en capture) — une explication
+			// tronquée en plein milieu vaut moins que pas d'explication du tout.
+			Col->AddSlot().AutoHeight().Padding(0, 0, 0, 1)
+			[ Txt(FString::Printf(
+			          TEXT("%s en cours (%s) : rythme limite a %s [GDD 14.3]."),
+			          ANSI_TO_TCHAR(fen::mission::phase_name(Tempo.phase)),
+			          ANSI_TO_TCHAR(Tempo.mission_id.c_str()),
+			          Libelles[static_cast<int32>(Tempo.max_rate)]),
+			      9.0f, SRGB(255, 189, 87), 40) ];
+			Col->AddSlot().AutoHeight().Padding(0, 0, 0, 4)
+			[ Txt(TEXT("Une manoeuvre fine se conduit, elle ne se survole pas."),
+			      9.0f, SRGB(255, 189, 87), 40) ];
+		}
+		// L'AVERTISSEMENT CHIFFRÉ, tiré du modèle et non d'un texte décoratif.
+		const double solde_an = G.finance.annual_idle_balance_me();
+		Col->AddSlot().AutoHeight().Padding(0, 0, 0, 6)
+		[ Txt(FString::Printf(
+		          TEXT("Sans programme ni service, le temps coute %.1f Md EUR/an (recettes garanties < couts fixes)."),
+		          -solde_an / 1000.0),
+		      9.0f, SRGB(255, 189, 87), 40) ];
+	}
+
+	Col->AddSlot().AutoHeight().Padding(0, 4, 0, 6)
 	[
 		SNew(SHorizontalBox)
 		+ SHorizontalBox::Slot().FillWidth(1.0f).VAlign(VAlign_Center)
@@ -1822,6 +2024,13 @@ void SSPHud::Construct(const FArguments& InArgs)
 		[
 			SAssignNew(Poste, SSPPoste).Session(Session)
 		]
+		// LE BANDEAU DU TEMPS : au-dessus du poste (il ne doit JAMAIS être masqué —
+		// le temps coule et se paie pendant qu'on travaille dans un poste), sous la
+		// modale (une décision suspend tout).
+		+ SOverlay::Slot()
+		[
+			SAssignNew(Temps, SSPTemps).Session(Session)
+		]
 		+ SOverlay::Slot()
 		[
 			SAssignNew(Modale, SSPModal).Session(Session)
@@ -1831,6 +2040,7 @@ void SSPHud::Construct(const FArguments& InArgs)
 	WorldHud->SetVisibility(TAttribute<EVisibility>::CreateSP(this, &SSPHud::WorldVisibility));
 	Modale->SetVisibility(TAttribute<EVisibility>::CreateSP(this, &SSPHud::ModalVisibility));
 	Poste->SetVisibility(TAttribute<EVisibility>::CreateSP(this, &SSPHud::PosteVisibility));
+	Temps->SetVisibility(TAttribute<EVisibility>::CreateSP(this, &SSPHud::TempsVisibility));
 }
 
 EVisibility SSPHud::PosteVisibility() const
@@ -1839,6 +2049,18 @@ EVisibility SSPHud::PosteVisibility() const
 	        Session->cadrage == fen::app::Cadrage::Bord &&
 	        Session->poste_ouvert >= 0 && Session->modal == fen::app::Modal::Aucun)
 	           ? EVisibility::Visible : EVisibility::Collapsed;
+}
+
+// LE BANDEAU DU TEMPS : partout dans le Monde — les deux cadrages, poste ouvert
+// compris. Masqué sous une modale (elle porte une décision, le monde attend) et au
+// menu (pas de partie, donc pas d'horloge).
+// `SelfHitTestInvisible` et NON `Visible` : le bandeau laisse passer la souris,
+// seuls ses boutons la prennent (piège n°6).
+EVisibility SSPHud::TempsVisibility() const
+{
+	return (Session && Session->scene == fen::app::SceneJeu::Monde &&
+	        Session->modal == fen::app::Modal::Aucun)
+	           ? EVisibility::SelfHitTestInvisible : EVisibility::Collapsed;
 }
 
 EVisibility SSPHud::ModalVisibility() const

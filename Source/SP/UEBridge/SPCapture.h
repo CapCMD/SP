@@ -33,6 +33,24 @@ namespace SPCapture
 	// cadrage du corps focalisé. <= 0 = non précisée. Utile pour cadrer un objet
 	// proche d'un corps (Novellus en LEO).
 	double RequestedDist();
+	// `-sphandoff` : GÈLE LA SCÈNE À L'INSTANT DE LA REPRISE (incr. 3c-3), c.-à-d.
+	// à la toute fin du vol [M] d'entrée — plan système actif, caméra amarrée sur
+	// l'œil du pawn, intérieur en coexistence. C'est l'ORACLE VISUEL du handoff :
+	// l'image doit être celle de `-spscene=iss` (la première personne canonique).
+	// Si les deux diffèrent, la coupure est toujours là, simplement déplacée.
+	bool RequestedHandoff();
+	// `-spcadence=<0..4>` : cadence du temps au démarrage (`fen::game::TimeRate` —
+	// 0 pause, 1 réel, 2 jour/s, 3 semaine/s, 4 mois/s). Sert à vérifier de bout en
+	// bout que le temps COULE [GDD 14.2] : deux captures à `-spframes` différents
+	// doivent montrer une date, une heure et un ciel qui ont avancé. -1 = non
+	// précisée (la partie reste en pause, son état par défaut).
+	int RequestedCadence();
+	// `-spvol` : place une mission EN VOL (phase d'ASCENSION) à l'instant de la
+	// capture. Même office que `-sphandoff` : rendre VÉRIFIABLE un instant qui,
+	// autrement, ne s'atteint qu'en jouant la boucle de mission entière. C'est
+	// l'oracle visuel du RYTHME IMPOSÉ [GDD 14.3] — le bandeau du temps doit
+	// nommer la phase et fermer les crans au-dessus du plafond.
+	bool RequestedVol();
 	// À appeler chaque frame ; déclenche la capture puis la sortie du jeu.
 	void Tick();
 }

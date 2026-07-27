@@ -64,17 +64,31 @@ public:
 
 private:
 	void BuildScene();                 // assemble les meshes + éclairage
-	void SetStationActive(bool bActive);
+	void SetStationVisible(bool bVisible);     // la géométrie rend-elle ?
+	void SetStationInControl(bool bControl);   // le joueur est-il aux commandes ?
+	// HANDOFF (incr. 3c-3) : hors du repère canonique, la station est rebasée sur
+	// la position de rendu de Novellus (que la carte publie), pour coexister avec
+	// le plan système pendant le vol [M].
+	void AppliquerDecalage(bool bCoexiste);
 
 	UPROPERTY() TObjectPtr<ASPStationActor> StationActor;
 	UPROPERTY() TObjectPtr<ASPStationPawn> Pawn;
 	UPROPERTY() TObjectPtr<AActor> PreviousViewTarget;
 	// Plafonniers du couloir : sans eux la station est noire (l'émissif du
-	// modèle n'éclaire pas les autres surfaces).
+	// modèle n'éclaire pas les autres surfaces). Portés par un acteur unique, pour
+	// qu'un seul déplacement les emmène tous.
+	UPROPERTY() TObjectPtr<AActor> LightsHolder;
 	UPROPERTY() TArray<TObjectPtr<UPointLightComponent>> StationLights;
 
 	bool bBuilt = false;
-	bool bWasActive = false;
+	bool bWasVisible = false;
+	bool bWasInControl = false;
 	double Yaw = 0.0, Pitch = 0.0;
-	int32 DiagTick = 0;
+
+	// Repère CANONIQUE (celui où le pawn marche et où vit la collision) et
+	// décalage courant appliqué par-dessus. Nul en dehors de la coexistence.
+	FVector CanonStationLoc = FVector::ZeroVector;
+	FVector CanonLightsLoc = FVector::ZeroVector;
+	FVector CanonPawnLoc = FVector::ZeroVector;
+	FVector Decalage = FVector::ZeroVector;
 };

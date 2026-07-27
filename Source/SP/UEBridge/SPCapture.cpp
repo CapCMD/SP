@@ -19,6 +19,9 @@ namespace
 	int32  Focus = -1;
 	int32  Post = -1;
 	double Dist = -1.0;
+	bool   bHandoff = false;
+	int32  Cadence = -1;
+	bool   bVol = false;
 	int32  Frames = 150;
 	FString OutPath;
 	int32  Counter = 0;
@@ -47,8 +50,12 @@ namespace
 		// Utile pour cadrer un objet proche d'un corps (ex. Novellus en LEO).
 		float DistF = -1.0f;
 		if (FParse::Value(Cmd, TEXT("-spdist="), DistF)) Dist = DistF;
-		UE_LOG(LogTemp, Log, TEXT("[SPCapture] scene=%d focus=%d post=%d dist=%.0f frames=%d -> %s"),
-		       Scene, Focus, Post, Dist, Frames, *OutPath);
+		bHandoff = FParse::Param(Cmd, TEXT("sphandoff"));
+		FParse::Value(Cmd, TEXT("-spcadence="), Cadence);
+		bVol = FParse::Param(Cmd, TEXT("spvol"));
+		UE_LOG(LogTemp, Log,
+		       TEXT("[SPCapture] scene=%d focus=%d post=%d dist=%.0f handoff=%d cadence=%d vol=%d frames=%d -> %s"),
+		       Scene, Focus, Post, Dist, bHandoff ? 1 : 0, Cadence, bVol ? 1 : 0, Frames, *OutPath);
 	}
 }
 
@@ -57,6 +64,9 @@ int  SPCapture::RequestedScene() { ParseOnce(); return Scene; }
 int  SPCapture::RequestedFocus() { ParseOnce(); return Focus; }
 int  SPCapture::RequestedPost() { ParseOnce(); return Post; }
 double SPCapture::RequestedDist() { ParseOnce(); return Dist; }
+bool SPCapture::RequestedHandoff() { ParseOnce(); return bHandoff; }
+int  SPCapture::RequestedCadence() { ParseOnce(); return Cadence; }
+bool SPCapture::RequestedVol() { ParseOnce(); return bVol; }
 
 void SPCapture::Tick()
 {

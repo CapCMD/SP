@@ -30,6 +30,7 @@
 #include "fen/astro/Porkchop.hpp"
 #include "fen/astro/LaunchWindow.hpp"
 #include "fen/ephem/BodyOrientation.hpp"
+#include "fen/ephem/Satellites.hpp"
 #include "fen/astro/Flyby.hpp"
 #include "fen/astro/Mga.hpp"
 #include "fen/astro/Mga1Dsm.hpp"
@@ -772,6 +773,103 @@ static void test_body_orientation() {
 }
 
 // ---------------------------------------------------------------------------
+// LES LUNES MAJEURES [GDD 7.1] — la table se vérifie contre la physique.
+// Le modèle (Satellites.hpp) DÉRIVE la période de (a, GM du parent) par la 3e loi
+// de Kepler ; la table porte en plus la période sidérale PUBLIÉE, qui n'entre
+// dans aucun calcul. Les confronter, c'est faire relire le demi-grand axe de
+// chaque lune par la mécanique céleste : une faute de frappe déplace la lune, et
+// le désaccord la dénonce. C'est la leçon du piège n°21, rendue systématique.
+static void test_satellites() {
+  section("Lunes majeures (table satellitaire)");
+  using namespace fen::ephem;
+  std::size_t n = 0;
+  const SatelliteDef* T = satellite_table(n);
+  CHECK(n == 19, "table : 19 lunes majeures (celles dont le projet a le mesh)");
+
+  const StandishEphemeris eph;
+  double pire = 0.0;
+  const char* pire_nom = "";
+  for (std::size_t i = 0; i < n; ++i) {
+    const SatelliteDef& s = T[i];
+    // --- ORACLE 1 : Kepler retrouve la période publiée -----------------------
+    const double p = satellite_period_days(s);
+    const double err = std::fabs(p - s.period_days_ref) / s.period_days_ref;
+    if (err > pire) { pire = err; pire_nom = s.name; }
+    // 1 % : seuil SERRÉ, pour que l'oracle morde vraiment. Ce qui reste vient du
+    // GM de système des géantes et de l'excentricité négligée, pas d'une donnée
+    // douteuse. (C'est ce seuil qui a dénoncé Pluton-Charon à 5,9 %.)
+    CHECK(err < 0.01, s.name);
+
+    // --- ORACLE 2 : la géométrie tient ---------------------------------------
+    CHECK(s.sma_m > 2.0 * body_radius(s.parent), "la lune orbite AU-DESSUS de son parent");
+    CHECK(body_radius(s.b) > 0.0 && body_mu(s.b) > 0.0,
+          "rayon et GM non nuls (piege n.27 : un 0 se propage en silence)");
+    CHECK(std::string(body_name(s.b)) == s.name, "body_name passe par la table");
+    CHECK(is_satellite(s.b) && !is_satellite(s.parent), "le parent n'est pas un satellite");
+
+    // --- ORACLE 3 : le rayon orbital est CONSTANT (orbite circulaire déclarée)
+    // et la lune reste dans le plan qu'on lui a donné.
+    const Vec3 r0 = satellite_parentcentric(s, Epoch{0.0});
+    const Vec3 r1 = satellite_parentcentric(s, Epoch{0.37 * s.period_days_ref * DAY});
+    CHECK_NEAR(std::sqrt(norm2(r1)) / std::sqrt(norm2(r0)), 1.0, 1e-12,
+               "orbite circulaire : le rayon ne varie pas");
+
+    // --- ORACLE 4 : le SENS de révolution est celui de l'inclinaison ---------
+    // h = r x v projeté sur le pôle du parent : positif = prograde. Triton doit
+    // sortir NÉGATIF sans aucun cas particulier dans le code.
+    const double dt = 60.0;
+    const Vec3 rm = satellite_parentcentric(s, Epoch{-dt});
+    const Vec3 rp = satellite_parentcentric(s, Epoch{+dt});
+    const Vec3 v = (rp - rm) / (2.0 * dt);
+    const Vec3 h = cross(r0, v);
+    const double sens = dot(unit(h), spin_axis_ecliptic(s.parent));
+    const bool retrograde = s.incl_eq_deg > 90.0;
+    CHECK(retrograde ? (sens < 0.0) : (sens > 0.0),
+          retrograde ? "sens RETROGRADE (i > 90 deg)" : "sens prograde");
+
+    // --- ORACLE 5 : l'éphéméride raccroche le satellite à son parent ---------
+    // La distance héliocentrique lune-parent doit valoir le demi-grand axe : c'est
+    // ce qui prouve que `heliocentric` compose bien parent + orbite locale.
+    const Epoch t{epoch_from_iso("2026-07-27T00:00:00").tdb};
+    const Vec3 d = eph.state(s.b, s.parent, t).r;
+    CHECK_NEAR(std::sqrt(norm2(d)) / s.sma_m, 1.0, 1e-9,
+               "ephemeride : la lune est a son demi-grand axe de son parent");
+  }
+  std::printf("     pire ecart periode Kepler vs publiee : %.2f %% (%s)\n",
+              100.0 * pire, pire_nom);
+
+  // --- Ancres nommées : ce que ces lunes ONT de particulier ------------------
+  const SatelliteDef* triton = satellite_def(Body::Triton);
+  CHECK(triton && triton->incl_eq_deg > 90.0, "Triton est retrograde (capture, pas accretion)");
+  const SatelliteDef* iapetus = satellite_def(Body::Iapetus);
+  CHECK(iapetus && iapetus->incl_eq_deg > 10.0, "Iapetus est fortement incline sur l'equateur de Saturne");
+  // Résonance de Laplace 1:2:4 des galiléennes — un fait physique que la table
+  // doit reproduire SANS qu'on l'y ait écrit.
+  const double t_io = satellite_period_days(*satellite_def(Body::Io));
+  const double t_eu = satellite_period_days(*satellite_def(Body::Europa));
+  const double t_ga = satellite_period_days(*satellite_def(Body::Ganymede));
+  std::printf("     resonance de Laplace : Europa/Io = %.3f  Ganymede/Europa = %.3f\n",
+              t_eu / t_io, t_ga / t_eu);
+  CHECK(std::fabs(t_eu / t_io - 2.0) < 0.02, "galileennes : Europa fait 2 periodes d'Io");
+  CHECK(std::fabs(t_ga / t_eu - 2.0) < 0.02, "galileennes : Ganymede fait 2 periodes d'Europa");
+
+  // Le plan des lunes d'Uranus est COUCHÉ avec la planète (~98 deg) : c'est la
+  // signature visuelle du système, et elle doit sortir du pôle IAU, pas d'un
+  // réglage. On mesure l'angle entre le pôle orbital de Titania et l'écliptique.
+  const SatelliteDef* titania = satellite_def(Body::Titania);
+  const Vec3 r0 = satellite_parentcentric(*titania, Epoch{0.0});
+  const Vec3 r1 = satellite_parentcentric(*titania, Epoch{60.0});
+  const Vec3 hn = unit(cross(r0, (r1 - r0)));
+  const double incl_ecl = std::acos(std::clamp(std::fabs(hn.z), -1.0, 1.0)) / DEG;
+  std::printf("     plan des lunes d'Uranus : %.1f deg sur l'ecliptique (systeme couche)\n", incl_ecl);
+  CHECK(incl_ecl > 70.0, "les lunes d'Uranus orbitent dans un plan quasi perpendiculaire a l'ecliptique");
+
+  // La Lune n'est PAS dans la table : elle garde son modèle Montenbruck & Gill,
+  // meilleur. Un bon modèle ne se remplace pas par un modèle générique.
+  CHECK(!is_satellite(Body::Moon), "la Lune garde sa serie M&G, hors table generique");
+}
+
+// ---------------------------------------------------------------------------
 static void test_flyby() {
   section("Assistance gravitationnelle");
   constexpr double R_J = 71492e3;
@@ -1038,6 +1136,7 @@ int main() {
   test_porkchop();
   test_launch_window();
   test_body_orientation();
+  test_satellites();
   test_flyby();
   test_mga();
   test_mga1dsm();

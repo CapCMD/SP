@@ -41,6 +41,7 @@ private:
 	void AppliquerModeEntree();          // curseur / capture selon la scène
 	void TickStation(float DeltaTime);   // ambulation première personne
 	void TickCarte(float DeltaTime);     // caméra orbitale + picking
+	void TickCadence();                  // cadence du temps [GDD 14.2]
 	int  CorpsSousCurseur() const;       // picking sur la projection publiée
 
 	fen::app::Session* Session = nullptr;
@@ -49,6 +50,11 @@ private:
 	FVector2D PosClicBas = FVector2D::ZeroVector;
 	// Anti-répétition : une touche ne doit agir qu'au FRONT descendant.
 	bool bPrecM = false, bPrecE = false, bPrecF5 = false, bPrecEsc = false;
+	bool bPrecP = false, bPrecCran[5] = {};
+	// Dernière cadence NON nulle : [P] y revient, pour qu'une pause d'observation
+	// ne fasse pas oublier le réglage. `int32` et non `fen::game::TimeRate` : un
+	// entête UE n'inclut jamais un entête du jeu (convention du projet).
+	int32 CadenceMemo = 1;               // 1 = temps réel
 };
 
 // Le mode de jeu n'existe que pour imposer NOTRE contrôleur : sans lui, UE

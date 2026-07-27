@@ -41,6 +41,19 @@ inline const PosteDef* postes_def(int& n) {
   return P;
 }
 
+// ═══ LE MODÈLE DE NOVELLUS, en repère station ═══
+// Repère station : X = axe du couloir, Z = haut, MÈTRES, origine au CENTRE du
+// modèle. Valeurs RELEVÉES dans le jeu de référence (`target_span`,
+// `novellus_pos`) — rien d'inventé. Elles vivent ici, en C++ pur, parce que les
+// DEUX côtés de la frontière en ont besoin : le rendu pour poser le modèle et le
+// pawn (UEBridge/SPStation.cpp), la session pour calculer la pose de caméra du
+// handoff [GDD v1.2 17.4] — un seul chiffre, une seule source.
+inline constexpr double STATION_ENVERGURE_M = 55.0;   // plus grande dimension du modèle
+// Le point d'apparition du joueur : le module NOVELLUS (QG), et son cap.
+inline constexpr double NOVELLUS_OEIL_M[3] = {19.68, -3.67, -1.10};
+inline constexpr double NOVELLUS_YAW_RAD = 3.19;
+inline constexpr double NOVELLUS_PITCH_RAD = -0.03;
+
 // Le modèle 3D réel étant chargé, les postes sont regroupés dans NOVELLUS et
 // alignés le long du couloir (même disposition que le jeu de référence). UE
 // n'a qu'à tester la proximité et republier `near_post`.
@@ -48,7 +61,8 @@ inline void publier_postes() {
   auto& B = g_render_bridge;
   int n = 0;
   postes_def(n);
-  const double base_x = 19.68, base_y = -3.67, base_z = -1.10;   // Novellus
+  const double base_x = NOVELLUS_OEIL_M[0], base_y = NOVELLUS_OEIL_M[1],
+               base_z = NOVELLUS_OEIL_M[2];
   for (int i = 0; i < n && i < RenderBridge::PostSnap::MAX; ++i) {
     auto& it = B.posts.items[i];
     it.x = static_cast<float>(base_x + (i - (n - 1) * 0.5) * 1.7);

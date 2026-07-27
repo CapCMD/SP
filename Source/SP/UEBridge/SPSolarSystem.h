@@ -19,6 +19,8 @@
 
 class UStaticMeshComponent;
 class UPointLightComponent;
+class UMaterialInstanceDynamic;
+class UDirectionalLightComponent;
 class ACameraActor;
 
 // L'acteur porteur : un composant de mesh par corps + la lumière du Soleil.
@@ -32,7 +34,7 @@ public:
 	ASPSolarSystemMapActor();
 
 	UPROPERTY() TArray<TObjectPtr<UStaticMeshComponent>> BodyMeshes;
-	UPROPERTY() TObjectPtr<UPointLightComponent> SunLight;
+	UPROPERTY() TObjectPtr<UDirectionalLightComponent> SunLight;
 	UPROPERTY() TObjectPtr<UStaticMeshComponent> VehicleMarker;
 	// Novellus dans le monde [GDD v1.2 11.1, 17.3] : la station EST un objet du
 	// monde unique, en orbite LEO — marqueur au cadrage lointain (le vrai modèle
@@ -57,6 +59,18 @@ public:
 	virtual void Tick(float DeltaTime) override;
 	virtual TStatId GetStatId() const override;
 	virtual bool IsTickableInEditor() const override { return false; }
+
+	// La position de NOVELLUS dans le repère de RENDU (u, l'œil à l'origine),
+	// telle que la dernière frame l'a calculée. SPStation en a besoin pour poser
+	// la géométrie INTÉRIEURE exactement là où était le modèle extérieur pendant
+	// la coexistence (`RenderBridge::interieur_coexiste`, incr. 3c-3) : le
+	// rebasage caméra-relatif et l'éphéméride vivent ici, on ne les duplique pas.
+	bool GetNovellusRenderUU(FVector& Out) const
+	{
+		if (!bNovellusRenderValid) return false;
+		Out = NovellusRenderUU;
+		return true;
+	}
 
 private:
 	void BuildScene();                    // meshes GLB (ou sphères) + lumière + caméra
@@ -84,24 +98,65 @@ private:
 	// Suivi lissé du point visé (le focus « vole » vers sa cible, façon NASA Eyes).
 	FVector SmoothFocusKm = FVector::ZeroVector;
 	bool    bFocusPrimed = false;
+	// Cible de la frame précédente : sert à ADVECTER le point lissé du mouvement
+	// propre du corps suivi, pour que le lissage n'amortisse QUE les changements de
+	// focus et n'introduise aucun retard de poursuite (voir Tick).
+	FVector LastTargetFocusKm = FVector::ZeroVector;
+	int     LastFocusId = -0x7FFFFFFF;   // aucun focus réel : force le non-advect
 	// Distance de vue LISSÉE. Le contrôleur publie une distance CIBLE ; l'œil
 	// s'en approche en douceur, ce qui donne le « vol » vers un corps quand on
 	// clique dessus — et rend la molette fluide sans la rendre molle.
 	double  SmoothDistKm = -1.0;
+	// ORIENTATION LISSÉE. Le glisser souris écrivait yaw/pitch en direct : la
+	// caméra collait au pixel, donc au moindre tremblement de la main, et l'arrêt
+	// était sec. On amortit comme la distance (même τ), ce qui donne le glissé
+	// d'Eyes on the Solar System. COURT-CIRCUITÉ pendant un vol scripté
+	// (`cam.vol_camera`) : là, le rendu doit SUIVRE la pose publiée au pixel près,
+	// sinon le handoff manque son amarrage (piège n°32).
+	double  SmoothYaw = 0.0, SmoothPitch = 0.0;
+	bool    bOrientPrimed = false;
 
 	// Une polyligne MONDE (km absolus) par corps, échantillonnée sur une période.
-	struct FOrbitCache { FLinearColor Color; TArray<FVector> PointsKm; };
+	// `bMoon`/`CenterKm`/`RadiusKm` servent au LOD des orbites : une orbite de
+	// lune vue du plan système est un POINT (Phobos : 9 376 km à 6 UA). L'émettre
+	// coûte 192 segments dégénérés par lune et par frame, et brouille la planète
+	// d'un pâté. On la saute tant qu'elle n'est pas assez grande à l'écran —
+	// même doctrine de séparabilité que les marqueurs.
+	// LES POINTS D'UNE ORBITE DE LUNE SONT RELATIFS À SON PARENT, et recentrés à
+	// l'ÉMISSION (chaque frame) sur la position courante de la planète. Les cuire
+	// en absolu était un piège : le cache ne se refait que tous les 2 jours
+	// d'époque, pendant lesquels la Terre parcourt 2,6 millions de km — l'anneau
+	// lunaire (384 000 km) se serait détaché de sa planète, de plusieurs fois son
+	// propre diamètre. `ParentBody` = `fen::ephem::Body` (int : le header du jeu
+	// n'a pas à remonter jusqu'ici).
+	struct FOrbitCache
+	{
+		FLinearColor    Color;
+		TArray<FVector> PointsKm;      // absolus (planètes) ou relatifs au parent (lunes)
+		bool            bMoon = false;
+		int             Body = 0;      // `fen::ephem::Body` : met en avant survol/focus
+		int             ParentBody = 0;
+		double          RadiusKm = 0.0;
+	};
 	TArray<FOrbitCache> OrbitCache;
 
 	// Rayon de la sphère englobante du mesh de chaque corps : l'échelle est
 	// recalculée à chaque frame (elle suit la compression de profondeur).
 	TArray<double> BodyMeshRadius;
-	double LastNearClip = -1.0;
+
+	// Le matériau VIVANT de chaque corps (même index que BodyMeshes). On lui passe
+	// la DIRECTION DU SOLEIL à chaque frame : c'est elle qui place le terminateur
+	// et allume la carte de nuit du côté sombre. Sans cela, le jour/nuit serait
+	// figé sur une direction écrite en dur — donc faux dès que le temps coule.
+	UPROPERTY() TArray<TObjectPtr<UMaterialInstanceDynamic>> BodyMids;
+
+	// Novellus dans le repère de rendu (voir GetNovellusRenderUU).
+	FVector NovellusRenderUU = FVector::ZeroVector;
+	bool    bNovellusRenderValid = false;
 
 	double LastOrbitEpoch = -1.0e300;
 	bool bBuilt = false;
 	bool bWasActive = false;
-	bool bLastShowMoons = false;
 	bool bViewTargetReasserted = false;   // diag one-shot : la vue avait dérivé de MapCamera
 
 	// --- Novellus vu de près : modèle ISS extérieur (chargé à la demande) ------

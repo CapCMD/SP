@@ -41,6 +41,12 @@ int main() {
     const double idle_net = f.revenue.guaranteed_yr() - f.annual_fixed();
     CHECK(idle_net < -5000.0 && idle_net > -15000.0,
           "13.2 : l oisivete draine de l ordre de 9 Md€/an");
+    // LE PRIX DU TEMPS, exposé par le modèle [GDD 14.2] : c'est ce chiffre que le
+    // poste AGENCE affiche avant d'accélérer, il ne le recalcule pas lui-même.
+    CHECK_NEAR(f.annual_idle_balance_me(), idle_net, 1e-9,
+               "14.2 : le modele expose le prix du temps qui passe");
+    CHECK(f.annual_idle_balance_me() < 0.0,
+          "14.2 : accelerer sans programme COUTE (solde inactif negatif)");
     // À pleine activité, l'agence est au moins à l'équilibre.
     CHECK(f.revenue.annual(1.0, 1.0) >= f.annual_fixed(),
           "13.2 : a pleine activite, l agence tient l equilibre");

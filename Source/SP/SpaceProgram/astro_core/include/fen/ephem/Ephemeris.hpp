@@ -18,8 +18,22 @@
 
 namespace fen::ephem {
 
+// LES LUNES SONT AJOUTÉES EN FIN D'ENUM, jamais intercalées : les indices des
+// douze premiers corps sont documentés et utilisés en ligne de commande
+// (`-spfocus 3` = Terre, 7 = Saturne, 9 = Uranus). Les intercaler renuméroterait
+// silencieusement tout ce qui les cite. `COUNT` reste dernier.
+// Leur éphéméride est un modèle DÉCLARÉ, distinct de Standish : voir
+// `fen/ephem/Satellites.hpp` (orbite circulaire dans le plan équatorial du
+// parent). La Lune, elle, garde sa série Montenbruck & Gill.
 enum class Body { Sun, Mercury, Venus, EarthBary, Moon, Mars, Jupiter, Saturn, Titan,
-                  Uranus, Neptune, Pluto, COUNT };
+                  Uranus, Neptune, Pluto,
+                  // lunes majeures (Satellites.hpp)
+                  Phobos, Deimos,
+                  Io, Europa, Ganymede, Callisto,
+                  Mimas, Enceladus, Tethys, Dione, Rhea, Iapetus,
+                  Miranda, Umbriel, Titania, Oberon,
+                  Triton, Charon,
+                  COUNT };
 
 const char* body_name(Body b);
 double body_mu(Body b);      // m^3/s^2

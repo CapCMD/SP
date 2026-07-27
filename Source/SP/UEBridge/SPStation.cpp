@@ -15,8 +15,12 @@
 
 // Les entêtes du jeu AVANT tout entête UE (macros PI/check, cf. SP.Build.cs).
 #include "app/bridge_flags.hpp"
+#include "app/postes.hpp"
 
 #include "SPStation.h"
+
+#include "SPCameraPost.h"
+#include "SPSolarSystem.h"
 
 #include "AssetRegistry/AssetData.h"
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -34,15 +38,15 @@ namespace {
 // Le modèle : ~310 StaticMesh dans un repère COMMUN (transformations cuites).
 const TCHAR* ISS_INTERIOR_PATH = TEXT("/Game/ISS/Interior/ISS_Internal/StaticMeshes");
 
-// Plus grande dimension visée, en mètres (valeur du jeu de référence).
-constexpr double STATION_SPAN_M = 55.0;
 constexpr double UU_PER_M = 100.0;
 
-// POINT D'APPARITION : le module NOVELLUS, QG du joueur — position relevée dans
-// le jeu de référence (`novellus_pos`, repère station en mètres) et cap associé.
-constexpr double NOVELLUS_M[3] = {19.68, -3.67, -1.10};
-constexpr double NOVELLUS_YAW_RAD = 3.19;
-constexpr double NOVELLUS_PITCH_RAD = -0.03;
+// Le gabarit de la station et le point d'apparition NOVELLUS vivent en C++ pur
+// (app/postes.hpp) : la SESSION en a besoin pour calculer la pose d'amarrage du
+// handoff [GDD v1.2 17.4]. Un seul chiffre, une seule source.
+constexpr double STATION_SPAN_M = fen::app::STATION_ENVERGURE_M;
+constexpr const double* NOVELLUS_M = fen::app::NOVELLUS_OEIL_M;
+constexpr double NOVELLUS_YAW_RAD = fen::app::NOVELLUS_YAW_RAD;
+constexpr double NOVELLUS_PITCH_RAD = fen::app::NOVELLUS_PITCH_RAD;
 
 // repère station (m, droitier) -> monde UE (cm, gaucher) : miroir en y.
 FVector StationToWorld(double Xm, double Ym, double Zm)
@@ -73,6 +77,10 @@ ASPStationPawn::ASPStationPawn()
 	Camera = CreateDefaultSubobject<UCameraComponent>(TEXT("Camera"));
 	Camera->SetupAttachment(Capsule);
 	Camera->bUsePawnControlRotation = false;
+	// L'IMAGE DU MONDE UNIQUE : le même post-traitement que la caméra du plan
+	// système. Un seul monde, une seule exposition — sans quoi la reprise du vol
+	// [M] sauterait en luminance (cf. SPCameraPost.h).
+	SPCameraPost::Appliquer(Camera->PostProcessSettings);
 
 	Movement = CreateDefaultSubobject<UFloatingPawnMovement>(TEXT("Movement"));
 	Movement->UpdatedComponent = Capsule;
@@ -140,9 +148,11 @@ void USPStationSubsystem::BuildScene()
 
 	StationActor = W->SpawnActor<ASPStationActor>();
 	// Le centre du modèle est amené à l'origine du monde : un point du repère
-	// station (mètres) se lit alors directement en ×100 dans le monde.
+	// station (mètres) se lit alors directement en ×100 dans le monde. C'est le
+	// repère CANONIQUE — celui où le pawn marche et où vit la collision.
 	StationActor->SetActorScale3D(FVector(Scale));
-	StationActor->SetActorLocation(-Centre * Scale);
+	CanonStationLoc = -Centre * Scale;
+	StationActor->SetActorLocation(CanonStationLoc);
 
 	for (UStaticMesh* M : Meshes)
 	{
@@ -158,6 +168,18 @@ void USPStationSubsystem::BuildScene()
 		C->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
 		C->SetCollisionProfileName(TEXT("BlockAll"));
 		C->SetCastShadow(false);
+		// ═══ LA COQUE OCCULTE LE SOLEIL — exprimé par CANAL D'ÉCLAIRAGE ═══
+		// Dans le monde unique, l'intérieur et le plan système coexistent (incr.
+		// 3c-3) ; or le Soleil de la carte est un PointLight sans décroissance et de
+		// rayon 6e14 u, et RIEN ne porte d'ombre ici (SetCastShadow(false) partout,
+		// pour le coût). Il éclairait donc l'intérieur À TRAVERS la coque : mesuré
+		// +18/255 de luminance sur la capture du handoff, plus un gradient — soit
+		// exactement une coupure d'éclairage à la reprise.
+		// L'occultation par la coque est un FAIT physique : on l'exprime en mettant
+		// l'intérieur (et ses seules lampes) sur le canal 1, hors d'atteinte des
+		// lumières du plan système. APPROXIMATION DÉCLARÉE [GDD 6.8] : une vraie
+		// occultation viendrait d'ombres portées, pas d'un canal.
+		C->SetLightingChannels(false, true, false);
 		C->RegisterComponent();
 		StationActor->Parts.Add(C);
 	}
@@ -170,6 +192,8 @@ void USPStationSubsystem::BuildScene()
 	{
 		AActor* Holder = W->SpawnActor<AActor>();
 		Holder->SetRootComponent(NewObject<USceneComponent>(Holder, TEXT("Root")));
+		LightsHolder = Holder;
+		CanonLightsLoc = Holder->GetActorLocation();
 		// le couloir principal court le long de X, sur ~55 m
 		for (int32 i = 0; i < 12; ++i)
 		{
@@ -183,6 +207,9 @@ void USPStationSubsystem::BuildScene()
 			L->SetIntensity(9.0f);
 			L->SetLightColor(FLinearColor(0.92f, 0.95f, 1.00f));
 			L->SetCastShadows(false);
+			// Canal 1 : les plafonniers éclairent la station, pas la Terre qui passe
+			// derrière le hublot (cf. le canal des meshes plus haut).
+			L->SetLightingChannels(false, true, false);
 			L->SetWorldLocation(StationToWorld(Xm, 0.0, 0.6));
 			L->RegisterComponent();
 			StationLights.Add(L);
@@ -206,24 +233,59 @@ void USPStationSubsystem::BuildScene()
 		L->SetIntensity(7.0f);
 		L->SetLightColor(FLinearColor(0.95f, 0.97f, 1.00f));
 		L->SetCastShadows(false);
+		L->SetLightingChannels(false, true, false);   // canal de la station
 		L->RegisterComponent();
 	}
+
+	CanonPawnLoc = Spawn;
 
 	UE_LOG(LogTemp, Log,
 	       TEXT("[SPStation] %d meshes, span %.1f m -> x%.4f, spawn Novellus (%.2f %.2f %.2f) m"),
 	       Meshes.Num(), SpanUU / UU_PER_M, Scale,
 	       NOVELLUS_M[0], NOVELLUS_M[1], NOVELLUS_M[2]);
 	bBuilt = true;
+
+	// L'ŒIL PUBLIÉ EST VALIDE DÈS QUE LA SCÈNE EXISTE — indépendamment de qui
+	// tient la caméra. `Session::pose_bord` s'en sert pour ramener le vol [M]
+	// EXACTEMENT là où le joueur a quitté le bord (le lier aux commandes ferait
+	// retomber la caméra sur le point d'apparition à chaque retour), et
+	// SPSolarSystem s'en sert pour aligner l'orientation à la reprise. On le publie
+	// donc d'emblée : sans cela, un premier retour depuis le plan système
+	// mélangerait le regard vers un cap nul (`-spscene=map`, par exemple).
+	{
+		auto& Out = fen::app::g_render_bridge.station_out;
+		Out.eye_m[0] = static_cast<float>(NOVELLUS_M[0]);
+		Out.eye_m[1] = static_cast<float>(NOVELLUS_M[1]);
+		Out.eye_m[2] = static_cast<float>(NOVELLUS_M[2]);
+		Out.yaw = static_cast<float>(Yaw);
+		Out.pitch = static_cast<float>(Pitch);
+		Out.fov_deg = (Pawn && Pawn->Camera) ? Pawn->Camera->FieldOfView : 90.0f;
+		Out.ready = (Pawn != nullptr);
+	}
 }
 
-void USPStationSubsystem::SetStationActive(bool bActive)
+// La géométrie rend-elle ? Vrai aux commandes, et aussi pendant la COEXISTENCE
+// (l'œil du plan système est dans l'enveloppe, incr. 3c-3).
+void USPStationSubsystem::SetStationVisible(bool bVisible)
 {
-	if (StationActor) StationActor->SetActorHiddenInGame(!bActive);
-	for (UPointLightComponent* L : StationLights) if (L) L->SetVisibility(bActive);
+	if (StationActor) StationActor->SetActorHiddenInGame(!bVisible);
+	for (UPointLightComponent* L : StationLights) if (L) L->SetVisibility(bVisible);
+}
+
+// Le joueur est-il aux commandes en première personne ? C'est la SEULE condition
+// qui donne la caméra au pawn — pendant la coexistence, la carte garde la vue.
+void USPStationSubsystem::SetStationInControl(bool bControl)
+{
 	UWorld* W = GetWorld();
 	APlayerController* PC = W ? W->GetFirstPlayerController() : nullptr;
+	if (!bControl && Pawn && Pawn->Movement)
+	{
+		// On lâche les commandes : pas de dérive résiduelle pendant la transition
+		// (le repère du pawn doit être stable, cf. AppliquerDecalage).
+		Pawn->Movement->StopMovementImmediately();
+	}
 	if (!PC) return;
-	if (bActive)
+	if (bControl)
 	{
 		PreviousViewTarget = PC->GetViewTarget();
 		if (Pawn) PC->SetViewTargetWithBlend(Pawn, 0.0f);
@@ -232,23 +294,78 @@ void USPStationSubsystem::SetStationActive(bool bActive)
 	{
 		PC->SetViewTargetWithBlend(PreviousViewTarget, 0.0f);
 	}
-	fen::app::g_render_bridge.station_out.ready = bActive && Pawn != nullptr;
+}
+
+// ---------------------------------------------------------------------------
+// HANDOFF (incr. 3c-3) : pendant la coexistence, la station est REBASÉE sur la
+// position de rendu de Novellus — le point exact où la carte plaçait le modèle
+// extérieur. L'œil du plan système, qui est à l'origine du rendu, se retrouve
+// donc DANS la station, à la place même de l'œil du pawn en fin de vol.
+// Hors coexistence, retour au repère canonique, à l'unité près.
+void USPStationSubsystem::AppliquerDecalage(bool bCoexiste)
+{
+	FVector Cible = FVector::ZeroVector;
+	if (bCoexiste)
+	{
+		// Le rebasage caméra-relatif et l'éphéméride vivent dans la carte : on le
+		// LUI demande, on ne recalcule rien ici [doctrine du pont].
+		if (UWorld* W = GetWorld())
+			if (USPSolarSystemSubsystem* Map = W->GetSubsystem<USPSolarSystemSubsystem>())
+			{
+				FVector Pnov;
+				if (Map->GetNovellusRenderUU(Pnov)) Cible = Pnov;
+			}
+	}
+	if (Cible.Equals(Decalage, 0.01)) return;      // 0,1 mm : rien à bouger
+
+	const bool bEtaitCanonique = Decalage.IsNearlyZero();
+	const bool bSeraCanonique = Cible.IsNearlyZero();
+	// On quitte le repère canonique : mémoriser la pose VIVANTE du pawn, pour y
+	// revenir exactement (le joueur ne repart pas au point d'apparition).
+	if (bEtaitCanonique && !bSeraCanonique && Pawn) CanonPawnLoc = Pawn->GetActorLocation();
+	Decalage = Cible;
+
+	if (StationActor)
+	{
+		// Collision coupée hors du repère canonique : déplacer 310 corps de
+		// collision complexes à chaque frame remuerait la scène physique pour rien
+		// — le pawn ne se déplace pas pendant la transition. Une seule bascule par
+		// transition (la cible, elle, change à chaque frame).
+		if (bEtaitCanonique != bSeraCanonique)
+			StationActor->SetActorEnableCollision(bSeraCanonique);
+		StationActor->SetActorLocation(CanonStationLoc + Cible);
+	}
+	if (LightsHolder) LightsHolder->SetActorLocation(CanonLightsLoc + Cible);
+	if (Pawn)
+	{
+		Pawn->SetActorLocation(CanonPawnLoc + Cible, /*bSweep=*/false, nullptr,
+		                       ETeleportType::TeleportPhysics);
+	}
 }
 
 void USPStationSubsystem::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 	auto& Bridge = fen::app::g_render_bridge;
-	// La station se rend quand la caméra est au plan BORD du Monde (ex-scène
-	// Station) : même monde que le plan système, seul le cadrage change
-	// (`carte3d_active` = Cadrage::Systeme).
-	const bool bActive =
-		Bridge.scene.load() == static_cast<int>(fen::app::SceneJeu::Monde) &&
-		!Bridge.carte3d_active.load();
+	const bool bMonde =
+		Bridge.scene.load() == static_cast<int>(fen::app::SceneJeu::Monde);
+	// LA MAIN : la caméra est au plan BORD du Monde — même monde que le plan
+	// système, seul le cadrage change (`carte3d_active` = Cadrage::Systeme).
+	const bool bMain = bMonde && !Bridge.carte3d_active.load();
+	// LA COEXISTENCE (incr. 3c-3) : l'œil du plan système est DANS l'enveloppe de
+	// la station. La géométrie intérieure rend, à la position réelle de Novellus,
+	// AVANT que la main ne passe — c'est ce qui supprime la dernière coupure.
+	const bool bCoexiste = bMonde && !bMain && Bridge.interieur_coexiste.load();
+	const bool bRendu = bMain || bCoexiste;
 
-	if (bActive && !bBuilt) BuildScene();
-	if (bActive != bWasActive) { SetStationActive(bActive); bWasActive = bActive; }
-	if (!bActive || !Pawn) return;
+	if (bRendu && !bBuilt) BuildScene();
+	if (bRendu != bWasVisible) { SetStationVisible(bRendu); bWasVisible = bRendu; }
+	if (bMain != bWasInControl) { SetStationInControl(bMain); bWasInControl = bMain; }
+	if (!bBuilt || !Pawn) return;
+
+	AppliquerDecalage(bCoexiste);
+
+	if (!bMain) return;   // pas aux commandes : ni entrée, ni republication
 
 	// --- regard : le HUD publie le delta souris, on le consomme --------------
 	auto& In = Bridge.station_in;

@@ -75,8 +75,49 @@ void Jeu::depense_obligatoire(double musd, const std::string& motif) {
   }
 }
 
+// TOUTE PARTIE DEMARRE EN PAUSE [GDD 14.2]. Le temps est une DEPENSE (charges
+// fixes superieures aux recettes garanties) : il ne doit jamais se mettre a couler
+// sans que le joueur l'ait demande - ni a la fondation, ni au chargement, ni en
+// heritant la cadence de la partie precedente.
+void Jeu::remettre_horloge_en_pause() {
+  cadence = game::TimeRate::Paused;
+  accu_jours = 0.0;
+}
+
+// ---------------------------------------------------------------------------
+// LE RYTHME DU TEMPS EN MISSION [GDD 14.3]. La loi vit dans le coeur pur
+// (mission/MissionTempo.hpp) ; ici on la branche sur la partie en cours.
+// ---------------------------------------------------------------------------
+mission::TempoLimit Jeu::plafond_temps() const {
+  if (!ares.initialisee()) return {};          // pas de mission : aucun plafond
+  const auto& G = *ares.etat;
+  return mission::tempo_limit(G.missions, G.clock.now_days());
+}
+
+// La porte d'entree du joueur. Renvoie FAUX si la demande a du etre bornee :
+// l'appelant (bandeau du temps, poste AGENCE, touches) sait donc qu'il doit
+// MONTRER un refus, et non poser un cran qui ne s'appliquera pas.
+bool Jeu::regler_cadence(game::TimeRate r) {
+  const game::TimeRate plafond = plafond_temps().max_rate;
+  const bool borne = static_cast<int>(r) > static_cast<int>(plafond);
+  cadence = borne ? plafond : r;
+  return !borne;
+}
+
+// RAMENE la cadence sous le plafond. C'est le verbe du GDD : ce n'est pas au
+// joueur de ralentir quand une manoeuvre fine commence, c'est la manoeuvre qui
+// ralentit le monde. Renvoie vrai si elle a effectivement freine.
+bool Jeu::appliquer_plafond() {
+  const game::TimeRate plafond = plafond_temps().max_rate;
+  if (static_cast<int>(cadence) <= static_cast<int>(plafond)) return false;
+  cadence = plafond;
+  accu_jours = 0.0;   // le reste accumule appartenait a l'ancienne cadence
+  return true;
+}
+
 void Jeu::reinitialiser() {
   agence = Agence{};
+  remettre_horloge_en_pause();
   contrat_actif = -1;
   donnees_gbit = echantillons_kg = 0;
   relais_geo = orbiteurs_mars = sondes_lointaines = 0;
@@ -154,7 +195,48 @@ double Jeu::epoch_courant() const {
   // v0.7 (epoch0 absent de la save) gardent leur calendrier illustratif 2027.
   const double base = (epoch0_tdb != 0.0) ? epoch0_tdb
                                           : epoch_from_iso("2027-03-14T00:00:00").tdb;
-  return base + agence.mois * 30.44 * DAY;
+  return base + agence.mois * ARES_MONTH_S;
+}
+
+// ---------------------------------------------------------------------------
+// LE TEMPS QUI COULE [GDD 14.2]. Voir jeu.hpp pour la doctrine (calendrier
+// continu, comptabilite mensuelle, sous-pas fixes).
+// ---------------------------------------------------------------------------
+double Jeu::faire_couler_le_temps(double dt_reel_s) {
+  if (!agence.creee || game_over) { accu_jours = 0.0; return 0.0; }
+  // [GDD 14.3] LE PLAFOND D'ABORD : une phase critique qui s'ouvre freine le
+  // monde DANS LA FRAME OU ELLE S'OUVRE. Le rappeler ici plutot qu'au seul
+  // reglage rend la faute impossible - qui que ce soit qui ait pose `cadence`,
+  // pas une seconde de jeu ne se convertit au-dessus du plafond.
+  appliquer_plafond();
+  const double s_par_s = game::rate_seconds_per_second(cadence);
+  if (s_par_s <= 0.0 || !(dt_reel_s > 0.0)) return 0.0;
+  // GARDE-FOU : une frame anormalement longue (compilation de shaders, fenetre
+  // deplacee, point d'arret) ne doit pas TELEPORTER le calendrier de plusieurs
+  // mois - ce serait une avance que le joueur n'a pas demandee, avec ses charges.
+  const double dt = (dt_reel_s > 0.25) ? 0.25 : dt_reel_s;
+  accu_jours += dt * s_par_s / DAY;
+  const double pas = std::floor(accu_jours / PAS_JOURS);
+  if (pas < 1.0) return 0.0;
+  const double jours = pas * PAS_JOURS;
+  accu_jours -= jours;
+  avancer_temps(jours);
+  return jours;
+}
+
+void Jeu::avancer_temps(double jours) {
+  if (!agence.creee || game_over || !(jours > 0.0)) return;
+  const double cible = agence.mois + jours * DAY / ARES_MONTH_S;
+  // Solder chaque mois ENTIER franchi. passer_mois() porte la comptabilite ET
+  // incremente `mois` de 1 : en le repositionnant d'abord sur la frontiere, on
+  // avance donc de frontiere en frontiere, sans jamais en sauter ni en compter
+  // deux fois. La boucle termine : chaque tour augmente floor(mois) de 1.
+  while (std::floor(cible) > std::floor(agence.mois)) {
+    agence.mois = std::floor(agence.mois);
+    passer_mois();
+    if (game_over) return;      // faillite : le calendrier s'arrete la
+  }
+  agence.mois = cible;
 }
 
 // ---------------------------------------------------------------------------
@@ -236,6 +318,7 @@ static double epoch_reelle_tdb() {
 
 void Jeu::creer_agence(const std::string& nom, ModeAide mode) {
   agence = Agence{};
+  remettre_horloge_en_pause();
   agence.creee = true;
   agence.mode = mode;
   agence.nom = nom.empty() ? "AGENCE SANS NOM" : nom;
@@ -313,6 +396,7 @@ bool Jeu::charger(const std::string& chemin) {
   if (!std::getline(f, ligne) || ligne.rfind("FENETRE_SAUVEGARDE", 0) != 0) return false;
   generer_contrats();
   agence = Agence{}; agence.creee = true;
+  remettre_horloge_en_pause();     // on ne charge JAMAIS dans une partie qui defile
   contrat_actif = -1; donnees_gbit = echantillons_kg = 0;
   relais_geo = orbiteurs_mars = sondes_lointaines = 0; flotte.clear();
   epoch0_tdb = 0;   // saves d'avant v0.7 : reste 0 -> calendrier illustratif

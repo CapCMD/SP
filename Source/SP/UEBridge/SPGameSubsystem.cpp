@@ -91,10 +91,64 @@ void USPGameSubsystem::ArmerCapture()
 	// -spdist=<km> : distance de vue imposée (cadrer un objet proche d'un corps).
 	const double Dist = SPCapture::RequestedDist();
 	if (Dist > 0.0) fen::app::g_render_bridge.cam.dist_km = Dist;
+	// `-spvol` : ÉPINGLE UNE MISSION EN ASCENSION, pour capturer le RYTHME IMPOSÉ
+	// [GDD 14.3]. Sans ce drapeau l'instant ne s'atteint qu'en jouant toute la
+	// boucle de mission (contrat, conception, fenêtre, qualification, feu vert) —
+	// invérifiable en capture. Même office que `-sphandoff`, et même précaution :
+	// on pose l'ÉTAT DU MODÈLE, jamais le pont, sinon la capture ne prouverait que
+	// l'existence du drapeau. À combiner avec `-spcadence=4` : la demande « mois/s »
+	// doit ressortir bornée au temps réel.
+	if (SPCapture::RequestedVol())
+	{
+		S.jeu.ares.assurer(S.jeu.agence, S.jeu.epoch_courant());
+		if (S.jeu.ares.initialisee())
+		{
+			auto& G = *S.jeu.ares.etat;
+			fen::mission::Mission M;
+			M.contract.id = "CAP-VOL";
+			M.contract.title = "Capture : mission en vol";
+			M.contract.family = "sat";
+			M.state = fen::mission::MissionState::Launched;
+			M.state_entered_days = G.clock.now_days();
+			G.missions.push_back(std::move(M));
+		}
+	}
+	// `-spcadence=N` : fait COULER le temps d'emblée [GDD 14.2], pour vérifier de
+	// bout en bout (date, heure, positions des corps) que deux captures prises à
+	// des `-spframes` différents montrent un monde qui a avancé.
+	// Le drapeau de capture passe par la MÊME porte que le joueur : une capture
+	// doit montrer le monde tel qu'il se joue, plafond de mission compris
+	// [GDD 14.3] — sinon l'oracle visuel mentirait sur ce point précis.
+	const int Cad = SPCapture::RequestedCadence();
+	if (Cad >= 0 && Cad <= 4) S.jeu.regler_cadence(static_cast<fen::game::TimeRate>(Cad));
 	// `-sppost=N` : ouvre un poste d'emblée (équivalent `--panel N`).
 	const int Post = SPCapture::RequestedPost();
 	if (Post >= 0 && S.scene == fen::app::SceneJeu::Monde &&
 	    S.cadrage == fen::app::Cadrage::Bord) S.poste_ouvert = Post;
+}
+
+// `-sphandoff` : ÉPINGLE LA SESSION À L'ULTIME INSTANT DU VOL [M] D'ENTRÉE
+// (incr. 3c-3), pour capturer la reprise en première personne. On pilote le
+// MODÈLE (le vol de caméra), jamais le pont directement : c'est donc le VRAI
+// chemin de code qui pose la caméra, sinon la capture ne prouverait rien.
+// À utiliser avec `-spscene=map`. L'image attendue est celle de `-spscene=iss`.
+void USPGameSubsystem::EpinglerHandoff()
+{
+	if (!SPCapture::RequestedHandoff()) return;
+	fen::app::Session& S = Holder->Session;
+	if (!S.jeu.agence.creee) return;              // ArmerCapture n'a pas encore ouvert la partie
+	const fen::app::Session::PoseBord Pb = S.pose_bord();
+	S.cadrage = fen::app::Cadrage::Systeme;
+	S.vol_cam.actif = true;
+	S.vol_cam.sens = fen::app::SensVol::VersBord;
+	S.vol_cam.dist_depart_km  = fen::app::Session::DIST_SYSTEME_KM;
+	S.vol_cam.dist_arrivee_km = Pb.dist_km;
+	S.vol_cam.yaw_depart   = fen::app::Session::YAW_SYSTEME;   S.vol_cam.yaw_arrivee   = Pb.yaw;
+	S.vol_cam.pitch_depart = fen::app::Session::PITCH_SYSTEME; S.vol_cam.pitch_arrivee = Pb.pitch;
+	// Durée immense + progrès au bout : le vol est AU POINT D'ARRIVÉE sans jamais
+	// franchir `fini()`, donc la main ne passe pas et l'état reste capturable.
+	S.vol_cam.duree_s = 1.0e9;
+	S.vol_cam.progres = 1.0 - 1.0e-9;
 }
 
 // Résolution / plein écran. N'a de sens qu'en jeu autonome : en PIE la fenêtre
@@ -120,6 +174,7 @@ void USPGameSubsystem::Tick(float DeltaTime)
 	if (!Holder) return;
 
 	ArmerCapture();
+	EpinglerHandoff();
 
 	// L'ÉTAT AVANT LE MONDE : Session::tick publie le pont, les subsystems de
 	// monde (station, carte, ciel) le liront dans leur propre Tick.

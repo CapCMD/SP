@@ -23,6 +23,7 @@
 #include "fen/core/Constants.hpp"
 #include "fen/core/Vec3.hpp"
 #include "fen/ephem/Ephemeris.hpp"
+#include "fen/mission/MissionTempo.hpp"
 #include "fen/mission/Program.hpp"
 
 namespace fen::app {
@@ -111,11 +112,57 @@ struct Jeu {
   std::string raison_faillite;
   double cout_programme{0};         // depenses depuis la signature (marge par mission)
 
+  // ═══ LE TEMPS QUI COULE [GDD 14.2] ═══
+  // Le calendrier de l'agence (`agence.mois`) est CONTINU ; la COMPTABILITE, elle,
+  // reste MENSUELLE - charges, revenus et echeances sont des grandeurs par mois.
+  // On fait donc couler le calendrier et on solde le mois a chaque frontiere
+  // entiere franchie.
+  //
+  // SOUS-PAS FIXES [GDD 14, doctrine de fen::game::GameClock] : le temps n'avance
+  // que par multiples de PAS_JOURS. Accelerer change le NOMBRE de sous-pas par
+  // frame, jamais leur taille : le calendrier prend les memes valeurs quelle que
+  // soit la cadence de RENDU. APPROXIMATION DECLAREE [GDD 6.8] : les systemes
+  // continus (recherche) sont appeles une fois par frame avec le total quantifie,
+  // pas une fois par sous-pas - exact au flottant pres, sauf une fin de projet en
+  // milieu de lot (au plus un demi-jour perdu a la cadence la plus rapide).
+  //
+  // LE PILOTAGE PASSE PAR regler_cadence() : c'est la SEULE porte d'entree, et
+  // elle borne au plafond du moment [GDD 14.3]. Ecrire `cadence` directement
+  // n'est pas une faute silencieuse pour autant - faire_couler_le_temps()
+  // rappelle le plafond avant de convertir la moindre seconde.
+  game::TimeRate cadence{game::TimeRate::Paused};
+  double accu_jours{0.0};                            // reste non encore converti
+  static constexpr double PAS_JOURS = 1.0 / 64.0;    // sous-pas fixe (GameClock)
+
   Jeu();
 
   // --- agence / gestion ---
   void creer_agence(const std::string& nom, ModeAide mode);
   void passer_mois();               // LE TOUR : charges, revenus science, echeances
+  // Convertit du temps REEL en avance de calendrier selon `cadence`. Renvoie les
+  // jours de jeu effectivement ecoules (0 en pause, ou si le sous-pas n'est pas
+  // encore atteint).
+  double faire_couler_le_temps(double dt_reel_s);
+  // Avance le calendrier de `jours`, en soldant chaque mois entier franchi.
+  void avancer_temps(double jours);
+  // Remet la cadence en PAUSE (fondation, chargement, reset) : le temps est une
+  // depense, il ne coule jamais sans que le joueur l'ait demande.
+  void remettre_horloge_en_pause();
+
+  // ═══ LE RYTHME DU TEMPS EN MISSION [GDD 14.3] ═══
+  // « Toute manoeuvre fine RAMENE le temps a un rythme lent. » Le plafond est
+  // DEDUIT de la duree propre de la phase critique en cours
+  // (mission/MissionTempo.hpp) : il n'est ni saisi, ni suggere.
+  //   plafond_temps()    - ce que la partie autorise MAINTENANT, avec sa raison ;
+  //   regler_cadence()   - la porte d'entree du joueur : borne, et dit si elle a
+  //                        du borner (l'UI en fait un refus visible) ;
+  //   appliquer_plafond()- RAMENE la cadence courante sous le plafond. Appelee
+  //                        au feu vert d'une mission et avant chaque ecoulement,
+  //                        pour qu'entrer en phase critique ralentisse le monde
+  //                        au lieu d'attendre un geste du joueur.
+  mission::TempoLimit plafond_temps() const;
+  bool regler_cadence(game::TimeRate r);
+  bool appliquer_plafond();
   double revenu_mensuel_gbit() const;   // pour la carte : ce que rapporte la flotte
   double epoch_courant() const;         // s TDB estime a partir du calendrier agence
   // --- flotte [GDD 8.3] : position ESTIMEE d'un engin a l'epoque t ---

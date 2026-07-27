@@ -16,7 +16,13 @@ def new_dm():
     except Exception:
         return unreal.new_object(unreal.DynamicMesh)
 
+# Filet de securite (cf. subdivide_planets.py) : en commandlet le registre peut
+# ne pas avoir balaye le dossier, et la liste serait VIDE sans erreur.
+# Les unreal.log vont dans Saved/Logs/SP.log, pas dans la sortie standard.
+unreal.AssetRegistryHelpers.get_asset_registry().scan_paths_synchronous([ROOT], True)
+
 assets = unreal.EditorAssetLibrary.list_assets(ROOT, recursive=True, include_folder=False)
+unreal.log(f"[normales] {len(assets)} actifs sous {ROOT}")
 n = 0
 for a in assets:
     if "Circle" in a:

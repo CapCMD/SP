@@ -126,6 +126,15 @@ void ASPPlayerController::PlayerTick(float DeltaTime)
 	const bool bEscDown = bEsc && !bPrecEsc;
 	bPrecM = bM; bPrecE = bE; bPrecF5 = bF5; bPrecEsc = bEsc;
 
+	// ═══ CADENCE DU TEMPS [GDD 14.2] ═══ : dans TOUT le Monde, aux deux cadrages,
+	// et même poste ouvert. Ce n'est PAS le « curseur de temps » que [GDD 14]
+	// interdit — ce sont les mêmes CINQ CRANS discrets que le poste AGENCE, qui
+	// passent par le système temporel de l'agence et en portent les coûts. Le
+	// raccourci ne fait qu'y donner accès de partout : sans lui, lancer le temps
+	// obligeait à rentrer à bord et à marcher jusqu'au module AGENCE, y compris
+	// depuis le plan système. Injouable, signalé à l'essai en PIE.
+	TickCadence();
+
 	if (Session->scene == fen::app::SceneJeu::Titre)
 	{
 		// DÉCOR DU MENU : le monde vu au plan système tourne lentement derrière
@@ -168,6 +177,56 @@ void ASPPlayerController::PlayerTick(float DeltaTime)
 		else if (bEscDown) Session->retour_bord_immediat();
 		if (bF5Down) Session->sauvegarder_partie();
 		if (!Session->vol_cam.actif) TickCarte(DeltaTime);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// LA CADENCE DU TEMPS [GDD 14.2]. Cinq crans discrets, jamais un facteur libre :
+// un facteur arbitraire casserait la reproductibilité des prélèvements
+// (fen::game::TimeRate). Touches choisies pour ne rien recouvrir de l'ambulation
+// (ZQSD, espace, ctrl, maj) ni des raccourcis existants (E, M, F5, Échap) ; UE
+// nomme les touches par leur POSITION physique, la rangée 1-5 marche donc aussi
+// bien en AZERTY qu'en QWERTY (même raison que W/A/S/D).
+//   [P]     pause / reprise à la dernière cadence
+//   [1..5]  pause, temps réel, jour/s, semaine/s, mois/s
+void ASPPlayerController::TickCadence()
+{
+	if (!Session || Session->scene != fen::app::SceneJeu::Monde) return;
+	using fen::game::TimeRate;
+
+	// Toutes les demandes passent par `regler_cadence` : c'est elle qui borne au
+	// plafond de la mission [GDD 14.3]. La MÉMOIRE, elle, garde le cran DEMANDÉ et
+	// non le cran obtenu — sinon une ascension traversée en pause ferait oublier
+	// définitivement au joueur la cadence à laquelle il jouait.
+	const bool bP = IsInputKeyDown(EKeys::P);
+	if (bP && !bPrecP)
+	{
+		if (Session->jeu.cadence == TimeRate::Paused)
+			Session->jeu.regler_cadence(static_cast<TimeRate>(FMath::Clamp(CadenceMemo, 1, 4)));
+		else
+		{
+			// On ne mémorise PAS une cadence qu'on n'a pas choisie : sous plafond,
+			// la valeur courante est celle que la mission impose, pas celle que le
+			// joueur jouait. La mémoriser lui ferait perdre son réglage de croisière
+			// à la première pause pendant une ascension.
+			if (!Session->jeu.plafond_temps().constrained)
+				CadenceMemo = static_cast<int32>(Session->jeu.cadence);
+			Session->jeu.regler_cadence(TimeRate::Paused);
+		}
+	}
+	bPrecP = bP;
+
+	static const FKey Crans[5] = {EKeys::One, EKeys::Two, EKeys::Three,
+	                              EKeys::Four, EKeys::Five};
+	for (int32 k = 0; k < 5; ++k)
+	{
+		const bool bDown = IsInputKeyDown(Crans[k]);
+		if (bDown && !bPrecCran[k])
+		{
+			if (k > 0) CadenceMemo = k;
+			Session->jeu.regler_cadence(static_cast<TimeRate>(k));
+		}
+		bPrecCran[k] = bDown;
 	}
 }
 
@@ -225,10 +284,12 @@ void ASPPlayerController::TickCarte(float DeltaTime)
 	if (!FMath::IsNearlyZero(Molette))
 	{
 		const double F = FMath::Exp(-Molette * 0.22);
-		// NOVELLUS (focus spécial, hors enum Body) : borne de zoom = son envergure,
-		// pas body_radius (qui n'a pas d'entrée pour lui).
+		// NOVELLUS (focus spécial, hors enum Body) : la borne de zoom est son
+		// ENVELOPPE, pas body_radius (qui n'a pas d'entrée pour lui). La molette
+		// s'arrête donc AU RAS DE LA COQUE : entrer à bord est le rôle de [M] (vol
+		// de caméra + handoff, incr. 3c-3), jamais celui du zoom manuel.
 		const double RFocus = (FocusCourant == fen::app::FOCUS_STATION)
-			? 0.03
+			? fen::app::STATION_ENVERGURE_M * 0.5 / 1000.0
 			: FocusCourant < 0
 				? 1.0e6
 				: fen::ephem::body_radius(static_cast<fen::ephem::Body>(FocusCourant)) / 1000.0;
@@ -247,7 +308,15 @@ void ASPPlayerController::TickCarte(float DeltaTime)
 		const FVector2D D = Souris - PosClicBas;
 		if (!D.IsNearlyZero())
 		{
-			B.cam.yaw = B.cam.yaw.load() - D.X * 0.006;
+			// SENS DE ROTATION : on SAISIT le monde et on le tire, comme dans Eyes
+			// on the Solar System — glisser vers la droite fait partir l'objet vers
+			// la droite. La caméra étant en (cos p·cos y, cos p·sin y, sin p) et
+			// regardant le point visé, un yaw CROISSANT la déplace vers SA GAUCHE,
+			// donc l'objet vers la droite : le signe est donc « + ».
+			// (C'était « − » : glisser à droite envoyait l'objet à gauche.)
+			B.cam.yaw = B.cam.yaw.load() + D.X * 0.006;
+			// Le pitch, lui, était déjà dans le bon sens : tirer vers le bas fait
+			// basculer le sommet vers soi, donc monte l'œil.
 			B.cam.pitch = FMath::Clamp(B.cam.pitch.load() + D.Y * 0.006, -1.5, 1.5);
 			PosClicBas = Souris;
 		}

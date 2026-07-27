@@ -18,6 +18,28 @@ namespace fen::mission {
 enum class FlightPhase {
   Ground = 0, Launch, LeoOps, TransferCruise, CriticalManeuver, Edl, SurfaceOps,
 };
+inline const char* phase_name(FlightPhase p) {
+  switch (p) {
+    case FlightPhase::Launch:           return "ASCENSION";
+    case FlightPhase::LeoOps:           return "OPERATIONS LEO";
+    case FlightPhase::TransferCruise:   return "CROISIERE";
+    case FlightPhase::CriticalManeuver: return "MANOEUVRE CRITIQUE";
+    // « EDL » est le terme du glossaire [GDD Annexe A] : c'est le mot du métier,
+    // et il tient dans un bandeau permanent — l'épeler déborderait.
+    case FlightPhase::Edl:              return "EDL";
+    case FlightPhase::SurfaceOps:       return "OPERATIONS DE SURFACE";
+    default:                            return "AU SOL";
+  }
+}
+
+// LA PHASE CRITIQUE — une seule définition pour tout le moteur. Elle sert ici à
+// majorer les taux d'anomalie, et dans MissionTempo.hpp à borner la cadence du
+// temps [GDD 14.3] : ces deux lois disent la MÊME chose (une manœuvre fine est
+// un moment où tout compte), elles doivent donc lire le même prédicat.
+inline bool is_critical_phase(FlightPhase p) {
+  return p == FlightPhase::CriticalManeuver || p == FlightPhase::Edl ||
+         p == FlightPhase::Launch;
+}
 
 enum class EventKind {
   Micrometeorite, SolarParticleEvent, LifeSupportFault, MedicalEmergency,
@@ -82,10 +104,7 @@ inline double effective_rate(const EventSpec& s, const EventContext& c) {
     lambda *= (1.0 - c.system_reliability) / 0.02;   // normalisé à R=0.98
   if (s.kind == EventKind::MedicalEmergency)
     lambda *= c.medical_risk_factor;
-  const bool critical = (c.phase == FlightPhase::CriticalManeuver ||
-                         c.phase == FlightPhase::Edl ||
-                         c.phase == FlightPhase::Launch);
-  if (critical) lambda *= s.phase_factor_critical;
+  if (is_critical_phase(c.phase)) lambda *= s.phase_factor_critical;
   return lambda;
 }
 

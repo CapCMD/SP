@@ -57,12 +57,19 @@ enum class Modal { Aucun = 0, GameOver, Reglages };
 
 // ═══ VOL DE CAMÉRA [GDD v1.2 ch.8.3, 17.4] ═══
 // [M] n'est pas une bascule sèche mais un VOL continu entre le plan bord et le
-// plan système, ancré sur la Terre (là où est Novellus). La caméra du système
-// existe déjà et sait « voler » (lissage log de la distance de vue) : ce modèle
-// PILOTE simplement sa distance cible le long d'un chemin lissé, en C++ pur donc
-// sous oracle. La coexistence VISUELLE des deux rendus (voir l'intérieur grandir
-// dans le zoom) demande le moteur ch.18 (incrément 3) — ici, un seul plan rend à
-// la fois, mais le MOUVEMENT de caméra est continu, plus une coupure sèche.
+// plan système, ancré sur NOVELLUS elle-même (c'est vers la station qu'on plonge,
+// c'est d'elle qu'on s'éloigne). La caméra du système existe déjà et sait
+// « voler » (lissage log de la distance de vue) : ce modèle PILOTE sa distance ET
+// sa direction le long d'un chemin lissé, en C++ pur donc sous oracle.
+//
+// LE HANDOFF (incr. 3c-3) : le vol de retour ne s'arrête pas « quelque part
+// au-dessus de la Terre » puis coupe — il AMARRE la caméra sur la position et le
+// regard de l'œil du pawn. Deux seuils, distincts :
+//   . enveloppe de la station franchie -> la géométrie INTÉRIEURE rend (le
+//     modèle extérieur s'efface) : bascule de LOD, faite là où elle est le moins
+//     visible, au passage de la coque ;
+//   . fin du vol -> la MAIN passe à la 1re personne, alors que la caméra est
+//     déjà, au pixel, celle du pawn : la reprise est invisible.
 enum class SensVol { VersSysteme = 0, VersBord = 1 };
 
 struct VolCamera {
@@ -72,16 +79,36 @@ struct VolCamera {
   double   duree_s{0.9};
   double   dist_depart_km{0.0};
   double   dist_arrivee_km{0.0};
+  // ORBITE de caméra : pour amarrer l'œil sur celui du pawn, la DIRECTION compte
+  // autant que la distance — la distance seule laisserait la caméra arriver par
+  // n'importe quel côté de la station.
+  double   yaw_depart{0.0},   yaw_arrivee{0.0};
+  double   pitch_depart{0.0}, pitch_arrivee{0.0};
 
-  // Distance de vue courante : interpolation LOGARITHMIQUE (du rayon terrestre à
-  // 6 UA il y a des ordres de grandeur) sous un lissage smoothstep (départ et
-  // arrivée sans à-coup).
+  // Départ et arrivée sans à-coup (smoothstep).
+  static double lissage(double p) {
+    const double c = p < 0.0 ? 0.0 : (p > 1.0 ? 1.0 : p);
+    return c * c * (3.0 - 2.0 * c);
+  }
+
+  // Distance de vue courante : interpolation LOGARITHMIQUE (de l'intérieur d'un
+  // module à 6 UA il y a dix ordres de grandeur).
   double dist_courante_km() const {
-    const double p = progres < 0.0 ? 0.0 : (progres > 1.0 ? 1.0 : progres);
-    const double e = p * p * (3.0 - 2.0 * p);
     const double a = std::log(dist_depart_km);
     const double b = std::log(dist_arrivee_km);
-    return std::exp(a + (b - a) * e);
+    return std::exp(a + (b - a) * lissage(progres));
+  }
+  // Le yaw se parcourt par le PLUS COURT chemin : sans repli dans ±π, un vol
+  // pouvait faire presque un tour complet autour de la station.
+  double yaw_courant() const {
+    constexpr double DEUX_PI = 6.283185307179586476925287;
+    double d = yaw_arrivee - yaw_depart;
+    while (d >  DEUX_PI * 0.5) d -= DEUX_PI;
+    while (d < -DEUX_PI * 0.5) d += DEUX_PI;
+    return yaw_depart + d * lissage(progres);
+  }
+  double pitch_courant() const {
+    return pitch_depart + (pitch_arrivee - pitch_depart) * lissage(progres);
   }
   void avancer(double dt) {
     if (!actif || duree_s <= 0.0) { progres = 1.0; return; }
@@ -349,6 +376,14 @@ struct Session {
 
     m->advance(target, G.clock.now_days());
 
+    // ═══ LE FEU VERT RAMÈNE LE TEMPS À UN RYTHME LENT [GDD 14.3] ═══
+    // Le vol commence par une ascension de ~9 minutes : à la cadence « mois/s »
+    // elle serait franchie en deux centièmes de seconde réelle, sans que rien
+    // n'ait pu être observé ni corrigé. Ce n'est donc pas au joueur de ralentir
+    // avant de lancer — c'est la manœuvre qui freine le monde, ici, dans la
+    // frame même du feu vert.
+    jeu.appliquer_plafond();
+
     // LE VOL S'EXÉCUTE : issue déterministe (graine agence + mission).
     if (target == St::Debrief) {
       mission_outcome = mission::fly_mission(
@@ -385,63 +420,179 @@ struct Session {
 
   // ═══ VOL DE CAMÉRA [M] ═══ (voir VolCamera plus haut)
   static constexpr double DIST_SYSTEME_KM = 9.0e8;   // ~6 UA : le système interne cadré
-  // Distance « bord » : au ras de la Terre (là où orbite Novellus), Terre plein
-  // cadre. Même borne serrée que le zoom manuel de la carte (rayon × 1.15).
-  double dist_bord_km() const {
-    return ephem::body_radius(ephem::Body::EarthBary) / 1000.0 * 1.15;
+  // Pose de la vue système : les valeurs de repos du pont (RenderBridge::MapCam).
+  static constexpr double YAW_SYSTEME = 0.60;
+  static constexpr double PITCH_SYSTEME = 1.05;
+
+  // ═══ POSE D'AMARRAGE DE LA CAMÉRA (le handoff) ═══
+  // La caméra de la carte est une ORBITE : œil = point visé + (dist, yaw, pitch).
+  // Pour que la reprise en 1re personne soit invisible, cette orbite doit finir
+  // pile sur l'œil du pawn. On convertit donc la position de l'œil (repère
+  // station, mètres) en (dist, yaw, pitch) autour du centre de la station.
+  //
+  // Repère station -> monde de rendu : MIROIR EN Y (glTF droitier -> UE gaucher),
+  // comme partout dans ce projet. Le modèle est posé sans rotation : l'attitude
+  // réelle de la station n'est pas modélisée — APPROXIMATION DÉCLARÉE [GDD 6.8],
+  // la même que porte déjà le modèle extérieur.
+  struct PoseBord { double dist_km, yaw, pitch; };
+
+  PoseBord pose_bord() const {
+    const auto& O = g_render_bridge.station_out;
+    double m[3] = {NOVELLUS_OEIL_M[0], NOVELLUS_OEIL_M[1], NOVELLUS_OEIL_M[2]};
+    // UE publie l'œil VIVANT du pawn : on ressort donc là où l'on est entré, pas
+    // au point d'apparition. Avant qu'il n'ait bâti la scène, la pose de la
+    // référence fait foi (même chiffre, même source : app/postes.hpp).
+    if (O.ready.load()) {
+      m[0] = O.eye_m[0].load(); m[1] = O.eye_m[1].load(); m[2] = O.eye_m[2].load();
+    }
+    double o[3] = {m[0] / 1000.0, -m[1] / 1000.0, m[2] / 1000.0};
+    double r = std::sqrt(o[0] * o[0] + o[1] * o[1] + o[2] * o[2]);
+    if (!(r > 1.0e-5)) {   // œil au centre exact : direction indéfinie -> référence
+      o[0] =  NOVELLUS_OEIL_M[0] / 1000.0;
+      o[1] = -NOVELLUS_OEIL_M[1] / 1000.0;
+      o[2] =  NOVELLUS_OEIL_M[2] / 1000.0;
+      r = std::sqrt(o[0] * o[0] + o[1] * o[1] + o[2] * o[2]);
+    }
+    const double s = std::max(-1.0, std::min(1.0, o[2] / r));
+    return {r, std::atan2(o[1], o[0]), std::asin(s)};
   }
 
-  // [M] : lance le vol continu entre bord et système, ancré sur la Terre.
+  double dist_bord_km() const { return pose_bord().dist_km; }
+
+  // ENVELOPPE DE LA STATION : demi-envergure du modèle intérieur (55 m -> 27,5 m).
+  // C'est le seuil de COEXISTENCE. Plancher relatif à la pose de l'œil : si le
+  // joueur s'est éloigné dans le couloir, l'enveloppe s'ouvre avec lui, sinon la
+  // fenêtre de bascule serait nulle.
+  double rayon_enveloppe_km() const {
+    return std::max(STATION_ENVERGURE_M * 0.5 / 1000.0, pose_bord().dist_km * 1.35);
+  }
+
+  // MÉLANGE DU REGARD : 0 hors de l'enveloppe (la caméra regarde la station), 1
+  // à l'arrivée sur l'œil du pawn (la caméra regarde CE QUE regarde le pawn).
+  // Piloté par la DISTANCE et non par le progrès du vol : la bascule se joue donc
+  // exactement sur la portion qui traverse la coque, et elle est SYMÉTRIQUE
+  // (l'entrée et la sortie suivent la même loi).
+  double melange_regard(double dist_km) const {
+    const double a = pose_bord().dist_km;
+    const double e = rayon_enveloppe_km();
+    if (dist_km <= a) return 1.0;
+    if (dist_km >= e) return 0.0;
+    const double t = (e - dist_km) / (e - a);
+    return t * t * (3.0 - 2.0 * t);
+  }
+
+  // Publie l'état de caméra du vol en cours. Un seul endroit écrit ces champs :
+  // la géométrie du handoff reste vérifiable d'un seul coup d'œil.
+  void publier_camera_vol() {
+    auto& B = g_render_bridge;
+    const double d = vol_cam.dist_courante_km();
+    B.cam.dist_km = d;
+    B.cam.yaw = vol_cam.yaw_courant();
+    B.cam.pitch = vol_cam.pitch_courant();
+    B.cam.look_to_bord = melange_regard(d);
+    B.cam.vol_camera = vol_cam.actif;
+    B.interieur_coexiste = (d <= rayon_enveloppe_km());
+  }
+
+  // [M] : lance le vol continu entre bord et système, ancré sur NOVELLUS.
   void demarrer_vol_cadrage() {
     if (vol_cam.actif || scene != SceneJeu::Monde) return;   // un vol à la fois
+    const PoseBord pb = pose_bord();
     vol_cam.actif = true;
     vol_cam.progres = 0.0;
     if (cadrage == Cadrage::Bord) {
-      // On quitte le bord : la vue système s'ouvre AU RAS de la Terre puis recule.
-      cadrage = Cadrage::Systeme;                 // le plan système rend dès maintenant
+      // On quitte le bord : la vue s'ouvre DEPUIS L'ŒIL du joueur et recule. Le
+      // plan système rend dès maintenant, mais l'intérieur coexiste tant qu'on
+      // n'a pas franchi la coque — d'où l'absence de saut au départ.
+      cadrage = Cadrage::Systeme;
       vol_cam.sens = SensVol::VersSysteme;
-      vol_cam.dist_depart_km  = dist_bord_km();
+      vol_cam.dist_depart_km  = pb.dist_km;
       vol_cam.dist_arrivee_km = DIST_SYSTEME_KM;
+      vol_cam.yaw_depart   = pb.yaw;    vol_cam.yaw_arrivee   = YAW_SYSTEME;
+      vol_cam.pitch_depart = pb.pitch;  vol_cam.pitch_arrivee = PITCH_SYSTEME;
     } else {
-      // On rentre à bord : la caméra plonge vers la Terre, la main passe à la 1re
-      // personne À L'ARRIVÉE (fin du vol).
+      // On rentre à bord : la caméra plonge vers Novellus et s'AMARRE sur l'œil
+      // du pawn ; la main passe à la 1re personne à l'arrivée, sans coupure.
       vol_cam.sens = SensVol::VersBord;
-      vol_cam.dist_depart_km  = std::max(1.0, g_render_bridge.cam.dist_km.load());
-      vol_cam.dist_arrivee_km = dist_bord_km();
+      vol_cam.dist_depart_km  = std::max(pb.dist_km, g_render_bridge.cam.dist_km.load());
+      vol_cam.dist_arrivee_km = pb.dist_km;
+      vol_cam.yaw_depart   = g_render_bridge.cam.yaw.load();    vol_cam.yaw_arrivee   = pb.yaw;
+      vol_cam.pitch_depart = g_render_bridge.cam.pitch.load();  vol_cam.pitch_arrivee = pb.pitch;
     }
-    g_render_bridge.focus_body = static_cast<int>(ephem::Body::EarthBary);
-    g_render_bridge.cam.dist_km = vol_cam.dist_depart_km;
+    g_render_bridge.focus_body = FOCUS_STATION;
+    publier_camera_vol();
   }
 
   // Échap depuis le système : retour IMMÉDIAT à bord (coupe tout vol en cours).
+  // Reste une coupure SÈCHE, et c'est son objet : c'est la sortie de secours.
   void retour_bord_immediat() {
     vol_cam.actif = false;
     cadrage = Cadrage::Bord;
+    g_render_bridge.cam.look_to_bord = 0.0;
+    g_render_bridge.cam.vol_camera = false;
+    g_render_bridge.interieur_coexiste = false;
   }
 
   // -------------------------------------------------------------------------
   // LA FRAME : mise à jour d'état + publication du pont. Appelée une fois par
   // frame par USPGameSubsystem, AVANT que le monde UE ne lise le pont.
   void tick(double dt_reel) {
+    // ═══ LE TEMPS QUI COULE [GDD 14.2] ═══ — AVANT tout le reste, pour que la
+    // couche ARES et la publication du pont voient déjà le nouveau calendrier.
+    // Le temps ne coule que DANS une partie et hors modale : une modale porte une
+    // décision (faillite, réglages), le monde l'attend. Un POSTE OUVERT, lui, ne
+    // suspend PAS le temps — c'est précisément au poste AGENCE qu'on règle la
+    // cadence, et il faut la voir agir. La cadence par défaut est la PAUSE : rien
+    // ne bouge tant que le joueur ne l'a pas demandé.
+    if (scene == SceneJeu::Monde && modal == Modal::Aucun)
+      jeu.faire_couler_le_temps(dt_reel);
+
     // couche ARES : création/reset/rattrapage mensuel (lecture seule sur l'agence)
     jeu.ares.assurer(jeu.agence, jeu.epoch_courant());
+
+    // ═══ LA PHASE DE VOL EST DÉRIVÉE [GDD 14.3] ═══
+    // `Mission::phase` pilote les taux d'anomalie (Events.hpp) mais RIEN ne la
+    // renseignait : elle ne pouvait être posée qu'à la main, c'est-à-dire
+    // exactement le drapeau abstrait que la doctrine interdit. Elle est
+    // maintenant recopiée depuis `flight_phase_of` — fonction de l'état FSM, du
+    // temps passé dedans et de la famille — donc toujours vivante et rejouable.
+    if (jeu.ares.initialisee()) {
+      auto& G = *jeu.ares.etat;
+      const double now_days = G.clock.now_days();
+      for (auto& m : G.missions) m.phase = mission::flight_phase_of(m, now_days);
+    }
 
     // garde-fous de routage : sans agence créée, on ne peut pas être dans le Monde.
     if (scene == SceneJeu::Monde && !jeu.agence.creee)
       scene = SceneJeu::Titre;
     if (scene != SceneJeu::Monde) vol_cam.actif = false;   // pas de vol hors du Monde
 
-    // ═══ VOL DE CAMÉRA [M] ═══ : avance la transition et PILOTE la distance de
-    // vue cible (le lissage côté rendu la suit). À l'arrivée d'un vol de RETOUR,
-    // la main passe à la 1re personne (cadrage Bord).
+    // ═══ VOL DE CAMÉRA [M] ═══ : avance la transition et PILOTE la pose de
+    // caméra cible (le lissage côté rendu la suit). À l'arrivée d'un vol de
+    // RETOUR, la main passe à la 1re personne — la caméra étant DÉJÀ amarrée sur
+    // l'œil du pawn, la reprise ne se voit pas (incr. 3c-3).
     if (vol_cam.actif) {
       vol_cam.avancer(dt_reel);
-      g_render_bridge.focus_body = static_cast<int>(ephem::Body::EarthBary);
-      g_render_bridge.cam.dist_km = vol_cam.dist_courante_km();
+      g_render_bridge.focus_body = FOCUS_STATION;
+      publier_camera_vol();
       if (vol_cam.fini()) {
-        if (vol_cam.sens == SensVol::VersBord) cadrage = Cadrage::Bord;
+        if (vol_cam.sens == SensVol::VersBord) {
+          cadrage = Cadrage::Bord;
+        } else {
+          // Au plan système, Novellus est sous-pixellique (109 m vus de 6 UA) :
+          // l'ancre utile redevient la TERRE. Le point visé saute de 418 km à
+          // 1 UA de distance de vue — invisible, et DÉCLARÉ ici [GDD 6.8].
+          g_render_bridge.focus_body = static_cast<int>(ephem::Body::EarthBary);
+        }
         vol_cam.actif = false;
       }
+    }
+    // Hors vol, aucune coexistence ni mélange de regard : au plan système on
+    // regarde le point visé, au bord la station rend dans son repère canonique.
+    if (!vol_cam.actif) {
+      g_render_bridge.cam.look_to_bord = 0.0;
+      g_render_bridge.cam.vol_camera = false;
+      g_render_bridge.interieur_coexiste = false;
     }
 
     // LA FAILLITE EST UN GAME OVER, imposé par le MODÈLE [économie stricte] :
@@ -487,6 +638,17 @@ struct Session {
     // cette horloge ont été retirés avec la mécanique de vol héritée.)
     const double epoch = jeu.epoch_courant();
     B.epoch_tdb = epoch;
+    // La barre de temps AFFICHE la cadence, elle ne la commande pas [GDD 14].
+    B.cadence = static_cast<int>(jeu.cadence);
+    // ... et le PLAFOND que la mission impose [GDD 14.3], pour que le bandeau du
+    // temps grise ce qui est interdit et NOMME la phase qui l'interdit. Un cran
+    // refusé sans motif affiché serait un mécanisme incompréhensible.
+    {
+      const mission::TempoLimit lim = jeu.plafond_temps();
+      B.cadence_max = static_cast<int>(lim.max_rate);
+      B.tempo_phase = static_cast<int>(lim.phase);
+      B.tempo_contraint = lim.constrained;
+    }
 
     // --- flotte en service : éphéméride PAR ENGIN [GDD 8.3] ------------------
     // Position ESTIMÉE de chaque engin à l'époque de jeu, relative à son corps

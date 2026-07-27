@@ -37,6 +37,7 @@ public:
 
 private:
 	void ArmerCapture();          // -spcapture : ouvre d'emblée la scène demandée
+	void EpinglerHandoff();       // -sphandoff : gèle l'instant de la reprise 1re personne
 	void AppliquerAffichage();    // résolution / plein écran demandés par les réglages
 
 	// Pointeur NU, volontairement : le code généré par UHT instancierait le

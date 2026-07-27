@@ -172,6 +172,13 @@ struct AgencyFinance {
   bool inactivity_pressure_holds() const {
     return revenue.guaranteed_yr() < annual_fixed();
   }
+  // LE PRIX DU TEMPS QUI PASSE [GDD 13.2, 14.2] : solde annuel d'une agence
+  // inactive = recettes garanties − coûts fixes. NÉGATIF par construction (c'est
+  // l'invariant ci-dessus). Vit ici et pas dans l'interface : le poste AGENCE
+  // l'AFFICHE au joueur avant qu'il n'accélère, il ne le recalcule pas.
+  double annual_idle_balance_me() const {
+    return revenue.guaranteed_yr() - annual_fixed();
+  }
 
   double reserve_ratio() const {
     return reserve_target_me > 0.0 ? reserve_me / reserve_target_me : 0.0;

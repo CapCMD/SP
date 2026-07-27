@@ -1,5 +1,6 @@
 #include "fen/ephem/Ephemeris.hpp"
 #include "fen/ephem/BodyOrientation.hpp"   // spin_axis_ecliptic (plan équatorial de Saturne)
+#include "fen/ephem/Satellites.hpp"        // les lunes majeures (modèle déclaré)
 #include "fen/astro/Elements.hpp"
 #include "fen/astro/Kepler.hpp"
 #include "fen/core/Constants.hpp"
@@ -84,7 +85,11 @@ const char* body_name(Body b) {
     case Body::Uranus: return "URANUS";
     case Body::Neptune: return "NEPTUNE";
     case Body::Pluto: return "PLUTO";
-    default: return "?";
+    // Les lunes portent leur nom dans la table satellitaire : une seule source.
+    default: {
+      const SatelliteDef* s = satellite_def(b);
+      return s ? s->name : "?";
+    }
   }
 }
 
@@ -102,7 +107,12 @@ double body_mu(Body b) {
     case Body::Uranus: return MU_URANUS;
     case Body::Neptune: return MU_NEPTUNE;
     case Body::Pluto: return MU_PLUTO;
-    default: return 0.0;
+    default: {
+      // Une lune a un GM comme un autre corps : le lire dans la table plutôt que
+      // de rendre 0 (piège n°27 — un zéro se propage en silence).
+      const SatelliteDef* s = satellite_def(b);
+      return s ? s->mu : 0.0;
+    }
   }
 }
 
@@ -122,7 +132,10 @@ double body_radius(Body b) {
     case Body::Uranus: return R_URANUS;
     case Body::Neptune: return R_NEPTUNE;
     case Body::Pluto: return R_PLUTO;
-    default: return 0.0;
+    default: {
+      const SatelliteDef* s = satellite_def(b);
+      return s ? s->radius_m : 0.0;
+    }
   }
 }
 
@@ -135,7 +148,15 @@ double StandishEphemeris::declared_position_error(Body b) const {
     case Body::Moon:      return 5.0e5;   // ~500 km (serie tronquee M&G)
     case Body::Jupiter:   return 1.0e8;
     case Body::Saturn:    return 3.0e8;
-    default:              return 0.0;
+    default: {
+      // LUNES : l'erreur est DOMINÉE par la phase, que le modèle ne cale pas sur
+      // une éphéméride satellitaire (Satellites.hpp). Une phase inconnue sur une
+      // orbite de rayon a, c'est une erreur de l'ordre de a — on l'annonce ainsi,
+      // sans flatterie, plutôt que de rendre 0 (« exact »).
+      const SatelliteDef* s = satellite_def(b);
+      if (s) return s->sma_m + declared_position_error(s->parent);
+      return 0.0;
+    }
   }
 }
 
@@ -184,31 +205,11 @@ Vec3 moon_geocentric(Epoch t) {
               R * std::sin(beta)};
 }
 
-// --- TITAN : orbite saturnocentrique ----------------------------------------
-// Titan N'EST PAS dans la table de Standish (planètes majeures seulement). On le
-// place sur une orbite CIRCULAIRE dans le PLAN ÉQUATORIAL de Saturne (plan de
-// Laplace ~ plan des anneaux), rayon = demi-grand axe réel, moyen mouvement tiré
-// du GM du système saturnien. Le plan vient du pôle IAU de Saturne (le MÊME que
-// celui qui incline les anneaux à 26.7° au rendu), donc Titan tourne dans le bon
-// plan incliné, solidaire des anneaux.
-// ERREUR DÉCLARÉE : e (~0.029) et l'inclinaison à l'équateur de Saturne (~0.35°)
-// sont NÉGLIGÉS ; la PHASE le long de l'orbite n'est pas calée sur l'éphéméride
-// réelle (origine au nœud ascendant à J2000). Le PLAN, le RAYON et la PÉRIODE
-// (~15.9 j) sont justes. C'est un modèle, pas un mensonge.
-// V2 : éphéméride satellitaire (SAT441) sans changer l'interface.
-Vec3 titan_saturncentric(Epoch t) {
-  const double a = TITAN_SMA_AROUND_SATURN;              // m
-  const double n = std::sqrt(MU_SATURN / (a * a * a));   // rad/s (GM système saturnien)
-  const double theta = n * t.tdb;                        // phase depuis J2000
-  const Vec3 pole = spin_axis_ecliptic(Body::Saturn);    // écliptique J2000, unitaire
-  // Base directe du plan équatorial : u = ligne des nœuds (équateur ∩ écliptique),
-  // v = 90° en avant dans le plan (orbite prograde autour du pôle). Repli sur x si
-  // le pôle est ~ normal à l'écliptique (pas le cas de Saturne, mais on protège).
-  Vec3 u = cross(Vec3{0.0, 0.0, 1.0}, pole);
-  u = (norm2(u) > 1e-12) ? unit(u) : Vec3{1.0, 0.0, 0.0};
-  const Vec3 v = unit(cross(pole, u));
-  return (u * std::cos(theta) + v * std::sin(theta)) * a;
-}
+// NB : le cas particulier `titan_saturncentric` a été RETIRÉ (2026-07-27). Titan
+// n'était qu'un premier satellite câblé à la main ; son modèle (orbite circulaire
+// dans le plan équatorial du parent, pôle IAU) est devenu la règle générale de
+// `fen/ephem/Satellites.hpp`, qui le sert désormais comme les dix-sept autres —
+// avec en prime son inclinaison réelle (0,35°), qui était négligée ici.
 
 } // namespace
 
@@ -226,14 +227,16 @@ PosVel StandishEphemeris::heliocentric(Body b, Epoch t) const {
     return PosVel{e.r + rm, e.v + vm};
   }
 
-  if (b == Body::Titan) {
-    // Titan n'est pas tabulé : état de Saturne + orbite saturnocentrique
-    // (cf. titan_saturncentric). Vitesse par différence centrée, comme la Lune.
-    const PosVel s = heliocentric(Body::Saturn, t);
-    const Vec3 rt = titan_saturncentric(t);
+  // LUNES MAJEURES : état du parent + orbite parentocentrique (Satellites.hpp).
+  // Vitesse par différence centrée, comme pour la Lune. Un seul chemin pour les
+  // dix-huit satellites — Titan compris, qui n'a plus de traitement propre.
+  if (const SatelliteDef* s = satellite_def(b)) {
+    const PosVel p = heliocentric(s->parent, t);
+    const Vec3 rs = satellite_parentcentric(*s, t);
     const double dt = 60.0;
-    const Vec3 vt = (titan_saturncentric(t + dt) - titan_saturncentric(t - dt)) / (2.0 * dt);
-    return PosVel{s.r + rt, s.v + vt};
+    const Vec3 vs = (satellite_parentcentric(*s, t + dt) -
+                     satellite_parentcentric(*s, t - dt)) / (2.0 * dt);
+    return PosVel{p.r + rs, p.v + vs};
   }
 
   const StdElem* E = table(b);

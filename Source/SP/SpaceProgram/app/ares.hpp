@@ -144,12 +144,17 @@ struct AresLayer {
     G.clock.restore(a.mois * ARES_MONTH_S);
     G.character.age_bio_s += delta_mois * ARES_MONTH_S;
 
-    // FINANCES v1.2 [GDD 13.2, 14.2] : un tick par mois écoulé. La pression
-    // d'inactivité érode la réserve si l'agence ne produit pas.
+    // FINANCES v1.2 [GDD 13.2, 14.2] : un tick par mois ENTIER FRANCHI. Compté
+    // par FRONTIÈRE, et non plus par `round(delta_mois)` : depuis que le temps
+    // COULE [GDD 14.2], cette couche est appelée avec des avances fractionnaires,
+    // et un arrondi rendait 0 tick à chaque frame — l'agence vivait gratuitement,
+    // exactement ce que l'invariant de pression d'inactivité interdit. Le résultat
+    // est IDENTIQUE à l'ancien pour les sauts d'un mois entier.
     {
       const double pa = program_activity(G), ca = commercial_activity(G);
-      int mois = static_cast<int>(std::round(delta_mois));
-      for (int i = 0; i < mois; ++i) G.finance.tick_month(pa, ca);
+      const long long b0 = static_cast<long long>(std::floor(dernier_mois));
+      const long long b1 = static_cast<long long>(std::floor(a.mois));
+      for (long long k = b0; k < b1; ++k) G.finance.tick_month(pa, ca);
     }
 
     // recherche : le labo Novellus accélère [GDD 11.6]

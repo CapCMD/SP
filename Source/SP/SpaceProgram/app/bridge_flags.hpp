@@ -72,6 +72,11 @@ struct RenderBridge {
     std::atomic<int>   near_post{-1};     // index du poste à portée, -1 sinon
     std::atomic<float> eye_m[3];          // position de l'œil (m, repère station)
     std::atomic<float> yaw{0.0f}, pitch{0.0f};
+    // Champ de vision HORIZONTAL de la caméra de bord (deg). Le plan système a le
+    // sien (45°, cadrage façon NASA Eyes) ; sans convergence des DEUX champs, la
+    // reprise du handoff change le grossissement d'un facteur tan(45°)/tan(22,5°)
+    // = 2,4 — la coupure reviendrait, en zoom.
+    std::atomic<float> fov_deg{90.0f};
   } station_out;
 
   // Postes de travail publiés par l'UI vers UE (position en mètres, repère
@@ -87,8 +92,29 @@ struct RenderBridge {
   // vol EST le temps de jeu ; sinon calendrier agence. Jamais autre chose.
   std::atomic<double> epoch_tdb{0.0};
 
-  // Options d'affichage (présentation pure).
-  std::atomic<bool> show_moons{false};
+  // CADENCE DU TEMPS [GDD 14.2] : `fen::game::TimeRate` (0 pause, 1 temps réel,
+  // 2 jour/s, 3 semaine/s, 4 mois/s). Publiée pour que la barre de temps l'AFFICHE.
+  // Elle ne se PILOTE pas ici : le réglage vit au poste AGENCE, avec ses coûts —
+  // jamais dans le curseur de la barre, qui reste un indicateur [GDD 14].
+  std::atomic<int> cadence{0};
+
+  // LE RYTHME IMPOSÉ PAR LA MISSION [GDD 14.3] : « toute manœuvre fine ramène le
+  // temps à un rythme lent ». Le plafond est DÉDUIT de la durée propre de la
+  // phase critique en cours (`fen::mission::tempo_limit`) — le HUD ne le
+  // recalcule pas, il le lit et grise ce qui est au-dessus. Sans lui, le joueur
+  // verrait ses crans refusés sans savoir pourquoi.
+  //   cadence_max   : `fen::game::TimeRate` le plus rapide autorisé (4 = libre) ;
+  //   tempo_phase   : `fen::mission::FlightPhase` qui l'impose (0 = aucune).
+  std::atomic<int>  cadence_max{4};
+  std::atomic<int>  tempo_phase{0};
+  std::atomic<bool> tempo_contraint{false};
+
+  // NB : `show_moons` a été SUPPRIMÉ (2026-07-27). C'était un booléen que RIEN
+  // n'écrivait : il valait false pour toujours, et éteignait la Lune et Titan,
+  // pourtant câblés au rendu. Un interrupteur que personne ne peut actionner est
+  // un mécanisme absent (pièges n°20b et n°40). Les lunes sont désormais régies
+  // par la SÉPARABILITÉ à l'écran, comme Novellus (piège n°41) : ce qui ne se
+  // distingue pas de son parent ne s'affiche pas et ne se désigne pas.
   std::atomic<int>  focus_body{-1};   // fen::ephem::Body ; -1 = vue système
   // Corps sous le curseur, publié par la couche d'entrée native
   // (SPPlayerController) à partir de la projection écran ci-dessous ; le HUD ne
@@ -111,7 +137,30 @@ struct RenderBridge {
     std::atomic<double> yaw{0.60};
     std::atomic<double> pitch{1.05};      // vu de dessus de l'écliptique
     std::atomic<double> fov_deg{45.0};
+    // HANDOFF VERS L'AMBULATION [GDD v1.2 17.4] : poids de mélange de
+    // l'ORIENTATION de la caméra entre « regarder le point visé » (0, le
+    // comportement de la carte) et « le regard du pawn à bord » (1, publié dans
+    // `station_out.yaw/pitch`). Le vol [M] l'amène à 1 pile au moment où l'œil
+    // atteint la position de l'œil du pawn : la reprise en 1re personne est alors
+    // pixel pour pixel la même image, donc INVISIBLE.
+    std::atomic<double> look_to_bord{0.0};
+    // VOL SCRIPTÉ EN COURS (`Session::vol_cam`). Le rendu possède son propre
+    // lissage de la pose (τ = 0,35 s) — indispensable quand la cible SAUTE (un
+    // clic sur un corps devient un vol), néfaste quand la cible est DÉJÀ une
+    // trajectoire lissée : le lissage la retarde, et le vol [M] n'arriverait pas
+    // sur l'œil du pawn (handoff manqué de plusieurs mètres). Sous ce drapeau, le
+    // rendu SUIT la pose publiée à l'identique.
+    std::atomic<bool> vol_camera{false};
   } cam;
+
+  // L'INTÉRIEUR COEXISTE avec le plan système [GDD v1.2 17.3, ch.18] : vrai
+  // quand l'œil est DANS l'enveloppe de la station alors que le plan système
+  // rend encore (fin du vol [M] d'entrée, début du vol de sortie). Le rendu
+  // montre alors la géométrie intérieure à la position RÉELLE de Novellus et
+  // cache le modèle extérieur — c'est la bascule de LOD, faite là où elle est le
+  // moins visible : au franchissement de la coque. La MAIN, elle, ne passe à la
+  // 1re personne qu'à la fin du vol (`Cadrage::Bord`).
+  std::atomic<bool> interieur_coexiste{false};
 
   // --- PROJECTION ÉCRAN publiée par UE --------------------------------------
   // À l'échelle vraie, une planète est sous-pixellique dès qu'on s'éloigne : le
@@ -119,7 +168,10 @@ struct RenderBridge {
   // picking (le clic ne peut pas descendre jusqu'au monde UE, cf. ci-dessus).
   // Coordonnées NORMALISÉES [0,1] : le HUD les multiplie par sa taille d'écran.
   struct ScreenBodies {
-    static constexpr int MAX = 32;
+    // 30 corps (12 planètes + 19 lunes... et le Soleil) + Novellus : 32 tenait
+    // tout juste, sans marge. Élargi pour que l'ajout d'un corps ne se traduise
+    // pas par une disparition silencieuse en fin de liste.
+    static constexpr int MAX = 48;
     std::atomic<int> n{0};
     struct Item {
       int    body{-1};      // fen::ephem::Body

@@ -155,6 +155,39 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// LE BANDEAU DU TEMPS — EN HAUT À DROITE, PARTOUT DANS LE MONDE.
+//
+// Le temps est la ressource la plus continue du jeu : il coule, il se PAIE
+// [GDD 13.2, 14.2], et il doit donc être lisible et pilotable de partout — au plan
+// système comme à bord, poste ouvert compris. Le réglage « officiel » reste au
+// poste AGENCE (avec son chiffrage), et la barre de temps de la carte reste
+// l'indicateur de la référence ; ce bandeau est la surface UNIVERSELLE.
+//
+// Ce n'est PAS le « curseur de temps » que [GDD 14] interdit : cinq CRANS discrets
+// (`fen::game::TimeRate`), les mêmes que le poste et que les touches [P]/[1-5],
+// qui passent par le système temporel de l'agence. Aucun accès à une date
+// arbitraire.
+//
+// INTERACTIF SANS VOLER LE MONDE (piège n°6) : le bandeau et ses conteneurs sont
+// `SelfHitTestInvisible` — seuls ses BOUTONS reçoivent la souris ; le reste de
+// l'écran continue d'aller au monde 3D (orbite, zoom, picking).
+class SSPTemps : public SCompoundWidget
+{
+public:
+	SLATE_BEGIN_ARGS(SSPTemps) : _Session(nullptr) {}
+		SLATE_ARGUMENT(fen::app::Session*, Session)
+	SLATE_END_ARGS()
+
+	void Construct(const FArguments& InArgs);
+	virtual void Tick(const FGeometry& AllottedGeometry, const double InCurrentTime,
+	                  const float InDeltaTime) override;
+
+private:
+	fen::app::Session* Session = nullptr;
+	float Echelle = 1.0f;                // hauteur allouée / 720 (piège n°19)
+};
+
+// ---------------------------------------------------------------------------
 // LA RACINE : empile la couche d'information et le menu, et n'en montre que ce
 // que la scène courante demande.
 class SSPHud : public SCompoundWidget
@@ -174,10 +207,12 @@ private:
 	EVisibility WorldVisibility() const;
 	EVisibility ModalVisibility() const;
 	EVisibility PosteVisibility() const;
+	EVisibility TempsVisibility() const;
 
 	fen::app::Session* Session = nullptr;
 	TSharedPtr<SSPMenu> Menu;
 	TSharedPtr<SSPWorldHud> WorldHud;
 	TSharedPtr<SSPModal> Modale;
 	TSharedPtr<SSPPoste> Poste;
+	TSharedPtr<SSPTemps> Temps;
 };

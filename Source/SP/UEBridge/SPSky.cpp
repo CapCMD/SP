@@ -89,7 +89,17 @@ void USPSkySubsystem::BuildSky()
 	if (!World) return;
 	bBuilt = true;                     // une seule tentative, réussie ou non
 
-	UStaticMesh* Sphere = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Sphere.Sphere"));
+	// ═══ LA VOÛTE PREND LA SPHÈRE DENSE DU PROJET ═══ (2026-07-27)
+	// Elle utilisait la sphère du MOTEUR : ~700 triangles. Sur une carte
+	// ÉQUIRECTANGULAIRE c'est ruineux — l'interpolation d'UV est linéaire par
+	// triangle alors que la projection ne l'est pas, si bien que les dérivées
+	// d'UV par pixel explosent et qu'UE choisit un mip grossier : le ciel sortait
+	// FLOU alors que la texture est bien en 8K, mip 0, jamais streamée (vérifié).
+	// `SM_SP_Body` (64 512 triangles, UV lat-long exactes) supprime la cause.
+	double RayonMesh = 50.0;                     // sphère du moteur
+	UStaticMesh* Sphere = LoadObject<UStaticMesh>(nullptr, TEXT("/Game/SP/SM_SP_Body.SM_SP_Body"));
+	if (Sphere) RayonMesh = 100.0;               // notre sphère : rayon 100
+	else Sphere = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Sphere.Sphere"));
 	if (!Sphere) return;
 
 	// Matériau : celui du projet s'il a été créé (deux faces, réglable), sinon
@@ -120,7 +130,7 @@ void USPSkySubsystem::BuildSky()
 	SkyActor->Dome->bVisibleInRayTracing = false;
 	// L'ÉCHELLE NÉGATIVE retourne la sphère : on en voit l'intérieur même avec
 	// un matériau à une seule face.
-	SkyActor->Dome->SetWorldScale3D(FVector(-SKY_RADIUS_UU / ENGINE_SPHERE_RADIUS));
+	SkyActor->Dome->SetWorldScale3D(FVector(-SKY_RADIUS_UU / RayonMesh));
 
 	if (UMaterialInstanceDynamic* M = UMaterialInstanceDynamic::Create(Base, SkyActor->Dome))
 	{
