@@ -64,12 +64,20 @@ public:
 
 private:
 	void BuildScene();                 // assemble les meshes + éclairage
+	// Les positions de postes viennent du C++ pur ; UE possède la vraie collision
+	// et les VÉRIFIE (un poste dans une cloison serait injoignable en silence).
+	void VerifierPostes();
+	// UN PAS D'IMPESANTEUR. La loi est en C++ pur et sous oracle
+	// (`app/impesanteur.hpp`) ; ce qui se passe ici est ce qu'UE seul peut faire :
+	// MESURER s'il y a une paroi à portée de bras, et POUSSER la capsule à travers
+	// la géométrie (balayage + glissement du moteur).
+	void AvancerEnImpesanteur(float DeltaTime, const FRotator& Look);
 	void SetStationVisible(bool bVisible);     // la géométrie rend-elle ?
 	void SetStationInControl(bool bControl);   // le joueur est-il aux commandes ?
 	// HANDOFF (incr. 3c-3) : hors du repère canonique, la station est rebasée sur
-	// la position de rendu de Novellus (que la carte publie), pour coexister avec
-	// le plan système pendant le vol [M].
-	void AppliquerDecalage(bool bCoexiste);
+	// la POSE de rendu de Novellus (position ET attitude, que la carte publie),
+	// pour coexister avec le plan système pendant le vol [M].
+	void AppliquerPose(bool bCoexiste);
 
 	UPROPERTY() TObjectPtr<ASPStationActor> StationActor;
 	UPROPERTY() TObjectPtr<ASPStationPawn> Pawn;
@@ -84,11 +92,22 @@ private:
 	bool bWasVisible = false;
 	bool bWasInControl = false;
 	double Yaw = 0.0, Pitch = 0.0;
+	// LA VITESSE DU JOUEUR (u/s, repère de la station). Elle vit ICI et non dans le
+	// composant de mouvement, parce que c'est nous qui l'intégrons : en impesanteur
+	// elle PERSISTE d'une frame à l'autre sans entrée — c'est toute la sensation, et
+	// c'est exactement ce que `UFloatingPawnMovement` annulait.
+	FVector Vitesse = FVector::ZeroVector;
 
-	// Repère CANONIQUE (celui où le pawn marche et où vit la collision) et
-	// décalage courant appliqué par-dessus. Nul en dehors de la coexistence.
+	// Repère CANONIQUE (celui où le pawn marche et où vit la collision) et pose
+	// courante appliquée par-dessus : un point p du modèle va en
+	// `Decalage + Attitude·p`. Identité en dehors de la coexistence — c'est le
+	// repère canonique lui-même.
 	FVector CanonStationLoc = FVector::ZeroVector;
 	FVector CanonLightsLoc = FVector::ZeroVector;
 	FVector CanonPawnLoc = FVector::ZeroVector;
 	FVector Decalage = FVector::ZeroVector;
+	// L'attitude LVLH de Novellus (cupola au nadir). Lue à la carte, jamais
+	// recalculée : le modèle extérieur et l'intérieur se relaient à la traversée
+	// de la coque et doivent porter la MÊME.
+	FQuat Attitude = FQuat::Identity;
 };

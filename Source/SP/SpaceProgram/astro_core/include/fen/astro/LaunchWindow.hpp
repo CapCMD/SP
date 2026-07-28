@@ -49,6 +49,12 @@ struct WindowResult {
   // (Transfers.hpp : injection_dv_from_circular / capture_dv_to_*).
   double vinf_dep{0.0};         // excès hyperbolique de départ, m/s (C3 = vinf_dep²)
   double vinf_arr{0.0};         // excès hyperbolique d'arrivée, m/s
+  // LA DURÉE DE TRANSIT — la fenêtre la CALCULAIT déjà (c'est l'axe des durées
+  // de la carte porkchop) sans jamais la publier : elle ne répondait qu'à
+  // « quand partir ? », pas à « quand arrive-t-on ? ». C'est cette seconde
+  // réponse qui DATE l'insertion et l'EDL d'une mission [GDD 9, 14.3].
+  double tof_days{0.0};         // durée de transit de l'OPTIMUM synodique (j)
+  double local_tof_days{0.0};   // ... du meilleur transfert disponible MAINTENANT
 };
 
 // Métrique de coût géométrique d'un point : la somme des excès hyperboliques.
@@ -71,23 +77,24 @@ inline WindowResult launch_window(const ephem::IEphemeris& eph,
   std::vector<double> col_t(static_cast<std::size_t>(p.n_dep), 0.0);
   double global_best = INF, local_best = INF, best_dep = t0;
   double best_vinf_dep = 0.0, best_vinf_arr = 0.0;
+  double best_tof = 0.0, local_tof = 0.0;
 
   for (int i = 0; i < p.n_dep; ++i) {
-    double bi = INF, bi_dep = 0.0, bi_arr = 0.0;
+    double bi = INF, bi_dep = 0.0, bi_arr = 0.0, bi_tof = 0.0;
     for (int j = 0; j < p.n_tof; ++j) {
       const PorkchopPoint& q = pc.at(i, j);
       if (!q.ok) continue;
       const double s = q.vinf_dep + q.vinf_arr;
-      if (s < bi) { bi = s; bi_dep = q.vinf_dep; bi_arr = q.vinf_arr; }
+      if (s < bi) { bi = s; bi_dep = q.vinf_dep; bi_arr = q.vinf_arr; bi_tof = q.tof; }
     }
     const double td = pc.at(i, 0).t_dep;   // identique pour tout j d'une colonne
     col_best[static_cast<std::size_t>(i)] = bi;
     col_t[static_cast<std::size_t>(i)] = td;
     if (bi < global_best) {
       global_best = bi; best_dep = td;
-      best_vinf_dep = bi_dep; best_vinf_arr = bi_arr;
+      best_vinf_dep = bi_dep; best_vinf_arr = bi_arr; best_tof = bi_tof;
     }
-    if (td <= slop_end && bi < local_best) local_best = bi;
+    if (td <= slop_end && bi < local_best) { local_best = bi; local_tof = bi_tof; }
   }
 
   if (!std::isfinite(global_best)) return w;   // aucune solution : ok reste false
@@ -98,6 +105,12 @@ inline WindowResult launch_window(const ephem::IEphemeris& eph,
   w.best_dep_tdb = best_dep;
   w.vinf_dep = best_vinf_dep;
   w.vinf_arr = best_vinf_arr;
+  w.tof_days = best_tof / cst::DAY;
+  // Le transfert qu'on prendrait EN PARTANT MAINTENANT n'est pas celui de
+  // l'optimum synodique : c'est le meilleur de la fenêtre courante. C'est donc
+  // lui qui donne la durée de croisière d'un vol qui décolle aujourd'hui.
+  // Même repli que `local_best` quand rien n'est calculable dans le slop.
+  w.local_tof_days = std::isfinite(local_best) ? local_tof / cst::DAY : w.tof_days;
 
   const double threshold = p.factor * global_best;
   w.open = std::isfinite(local_best) && local_best <= threshold;

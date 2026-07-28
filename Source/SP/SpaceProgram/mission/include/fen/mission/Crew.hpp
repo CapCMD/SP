@@ -93,6 +93,29 @@ inline bool ground_loop_realtime(double distance_m) {
   return comms_roundtrip_s(distance_m) < 60.0;
 }
 
+// ═══ LA BOUCLE SOL SE FERME-T-ELLE SUR CETTE PHASE ? ═══ [GDD 9.6, 15.3]
+// « Le logiciel de vol embarqué prépare l'autonomie QUAND LE SOL EST HORS DE
+// PORTÉE. » Ce prédicat dit quand. Pour agir sur une phase, le sol doit voir,
+// décider et commander DANS la fenêtre : il lui faut donc un aller-retour court
+// devant la durée propre de la phase. Aucun seuil libre ici — on compare deux
+// grandeurs physiques, le temps de la lumière et la durée de la manœuvre.
+//
+// Ce que ça donne, et ce sont les faits réels :
+//   . amarrage en orbite basse — 0,03 s d'aller-retour contre des heures : le
+//     sol est dans la boucle, et c'est ainsi que se conduisent les opérations
+//     LEO ;
+//   . EDL martienne — ~26 min contre 7 min de descente : la boucle NE SE FERME
+//     PAS. C'est la raison, non négociable, pour laquelle tout atterrisseur
+//     martien descend sous le contrôle de son propre logiciel, et pourquoi le
+//     sol de MSL a regardé « seven minutes of terror » sans pouvoir rien faire.
+// Une phase sans durée opposable (croisière) rend `false` : on ne « conduit »
+// pas une croisière, on y tient des rendez-vous datés, préparés à l'avance —
+// c'est justement pourquoi une TCM se commande très bien depuis le sol.
+inline bool ground_loop_closes(double distance_m, double phase_duration_s) {
+  if (phase_duration_s <= 0.0) return false;
+  return comms_roundtrip_s(distance_m) < phase_duration_s;
+}
+
 // --- Simultanéité [GDD 9.2] --------------------------------------------------
 struct CrewMissionSlot {
   bool active{false};

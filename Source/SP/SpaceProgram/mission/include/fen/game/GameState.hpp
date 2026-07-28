@@ -188,6 +188,96 @@ struct GameState {
       w2.str(m.subject); w2.str(m.body); w2.f64(m.date_days);
       w2.boolean(m.read); w2.str(m.contract_id); w2.boolean(m.answered);
     });
+    // ═══ LES MISSIONS EN COURS [GDD 4.1] ═══
+    // Elles ne se sauvegardaient PAS. Tant qu'un vol se déroulait entre deux
+    // clics, la fenêtre pour s'en apercevoir était nulle ; depuis que le vol
+    // DURE (FlightTimeline.hpp), une croisière vers Mars couvre 259 jours de
+    // jeu — quitter au menu (qui sauvegarde) effaçait la mission en silence.
+    // Ne sont écrits que les FAITS : l'identité du contrat (le catalogue est
+    // reconstruit par la graine, on réapparie par id), l'état FSM et sa date,
+    // la durée de transit figée au feu vert, et l'issue du vol. `phase` n'y est
+    // pas : elle se DÉRIVE de la chronologie à chaque frame.
+    w.vec(missions, [](save::Writer& w2, const mission::Mission& m) {
+      w2.str(m.contract.id);
+      w2.i32(static_cast<std::int32_t>(m.state));
+      w2.f64(m.state_entered_days);
+      w2.f64(m.tof_days);
+      w2.i32(static_cast<std::int32_t>(m.worst_severity));
+      w2.boolean(m.any_anomaly);
+      w2.boolean(m.flight_flown);
+      w2.boolean(m.flight_success);
+      w2.boolean(m.flight_has_anomaly);
+      // La navigation RÉELLEMENT obtenue est un fait du vol au même titre que
+      // l'issue : tirée une fois au feu vert, elle ne se retire pas.
+      w2.boolean(m.nav_evaluee);
+      w2.f64(m.nav_dv_required);
+      w2.f64(m.nav_miss_km);
+      // ═══ L'ÉTAT VRAI D'UN VOL EN COURS ═══ [GDD 7.4, 8.4]
+      // Il ne s'écrivait pas, et tant que la campagne de correction était
+      // conduite automatiquement au feu vert ça ne se voyait pas : l'issue était
+      // déjà décidée, les deux chiffres ci-dessus la portaient. Depuis que les
+      // rendez-vous se tiennent EN VOL, c'est cet état qui porte l'issue — une
+      // croisière rechargée perdrait sinon les corrections que le joueur a
+      // commandées de sa main, et quitter au menu (qui sauvegarde) les
+      // effacerait. Même piège que les missions en vol non sérialisées, qu'on ne
+      // repaiera pas une troisième fois.
+      w2.boolean(m.vol_vrai_valide);
+      w2.f64(m.vol_vrai_t_days);
+      for (int k = 0; k < 3; ++k) w2.f64(m.vol_vrai_r[k]);
+      for (int k = 0; k < 3; ++k) w2.f64(m.vol_vrai_v[k]);
+      for (int k = 0; k < 3; ++k) w2.f64(m.nav_connu_dv[k]);
+      w2.f64(m.nav_sigma_r);
+      w2.f64(m.nav_sigma_v);
+      w2.f64(m.tcm_dv_depense);
+      w2.i32(static_cast<std::int32_t>(m.tcm_faits));
+      // LE RYTHME DE MESURE CHOISI [GDD 8.6] : ce qui a été acheté en vol, et
+      // l'arc que la solution courante exploite. Sans eux, un vol rechargé
+      // rembourserait l'écoute déjà payée et repartirait plus aveugle.
+      w2.f64(m.poursuite_jours);
+      w2.f64(m.arc_poursuite_j);
+      // Le logiciel EMBARQUÉ est un fait du vol au même titre que la navigation :
+      // figé au feu vert, il décide de l'issue [GDD 15.5]. Ne pas l'écrire ferait
+      // qu'un vol rechargé volerait sans le code qu'il transporte.
+      w2.boolean(m.code_embarque);
+      w2.boolean(m.code_non_couvert);
+      w2.f64(m.code_couverture);
+      w2.i32(static_cast<std::int32_t>(m.vol_conduit_par));
+      save_anomaly(w2, m.flight_anomaly);
+    });
+  }
+  // L'anomalie EN ATTENTE DE DÉBRIEF est le seul événement dont les
+  // conséquences n'ont pas encore été appliquées : elle doit survivre, sinon un
+  // échec rechargé se conclurait sans dommage. Le JOURNAL des anomalies passées
+  // (`Mission::anomalies`) n'est pas écrit — DÉCLARÉ [GDD 6.8] : ses effets ont
+  // déjà été appliqués aux systèmes, et ceux-là persistent (débris, confiance,
+  // carrière). Ce qu'on perdrait est une trace d'affichage, pas un fait.
+  static void save_anomaly(save::Writer& w, const mission::AnomalyEvent& a) {
+    w.str(a.mission_id); w.str(a.what);
+    w.i32(static_cast<std::int32_t>(a.severity));
+    const mission::SeverityModifiers& x = a.modifiers;
+    w.boolean(x.human_lethal_exposure); w.boolean(x.primary_objective_lost);
+    w.boolean(x.unique_vehicle_lost);   w.boolean(x.massive_debris);
+    w.boolean(x.player_error_causal);   w.boolean(x.repeated_anomaly);
+    w.boolean(x.brilliant_recovery);
+    w.vec(a.tech_involved, [](save::Writer& w2, const std::string& s) { w2.str(s); });
+    w.f64(a.date_days);
+    w.f64(a.breakup_mass_kg); w.f64(a.breakup_alt_km);
+    w.boolean(a.breakup_is_collision);
+  }
+  static mission::AnomalyEvent load_anomaly(save::Reader& r) {
+    mission::AnomalyEvent a;
+    a.mission_id = r.str(); a.what = r.str();
+    a.severity = static_cast<mission::Severity>(r.i32());
+    mission::SeverityModifiers& x = a.modifiers;
+    x.human_lethal_exposure = r.boolean(); x.primary_objective_lost = r.boolean();
+    x.unique_vehicle_lost = r.boolean();   x.massive_debris = r.boolean();
+    x.player_error_causal = r.boolean();   x.repeated_anomaly = r.boolean();
+    x.brilliant_recovery = r.boolean();
+    a.tech_involved = r.vec<std::string>([](save::Reader& r2) { return r2.str(); });
+    a.date_days = r.f64();
+    a.breakup_mass_kg = r.f64(); a.breakup_alt_km = r.f64();
+    a.breakup_is_collision = r.boolean();
+    return a;
   }
   bool load(save::Reader& r) {
     if (!r.ok()) return false;
@@ -238,6 +328,80 @@ struct GameState {
       m.contract_id = r2.str(); m.answered = r2.boolean();
       return m;
     });
+    // LES MISSIONS EN COURS. Le CONTRAT n'est pas relu : il est RÉAPPARIÉ depuis
+    // le catalogue par son id — le catalogue est reconstruit par la graine avant
+    // le chargement, et c'est déjà la doctrine employée pour son état
+    // (`suspended`/`available_after_days`). Une mission dont le contrat n'existe
+    // plus dans le catalogue est ABANDONNÉE plutôt que ressuscitée à moitié :
+    // une mission sans contrat n'a ni objectif, ni budget, ni prérequis.
+    struct MissionSave {
+      std::string id; std::int32_t state; double entered, tof;
+      std::int32_t worst; bool any, flown, success, has_anom;
+      bool nav_eval; double nav_dv, nav_miss;
+      bool vrai_ok; double vrai_t, vrai_r[3], vrai_v[3], connu_dv[3];
+      double sig_r, sig_v, tcm_dv; std::int32_t tcm_n;
+      double poursuite_j, arc_j;
+      bool code_bord, code_non_couvert; double code_cov; std::int32_t conduite;
+      mission::AnomalyEvent anom;
+    };
+    const auto sauves = r.vec<MissionSave>([](save::Reader& r2) {
+      MissionSave s;
+      s.id = r2.str(); s.state = r2.i32(); s.entered = r2.f64(); s.tof = r2.f64();
+      s.worst = r2.i32(); s.any = r2.boolean(); s.flown = r2.boolean();
+      s.success = r2.boolean(); s.has_anom = r2.boolean();
+      s.nav_eval = r2.boolean(); s.nav_dv = r2.f64(); s.nav_miss = r2.f64();
+      s.vrai_ok = r2.boolean(); s.vrai_t = r2.f64();
+      for (int k = 0; k < 3; ++k) s.vrai_r[k] = r2.f64();
+      for (int k = 0; k < 3; ++k) s.vrai_v[k] = r2.f64();
+      for (int k = 0; k < 3; ++k) s.connu_dv[k] = r2.f64();
+      s.sig_r = r2.f64(); s.sig_v = r2.f64();
+      s.tcm_dv = r2.f64(); s.tcm_n = r2.i32();
+      s.poursuite_j = r2.f64(); s.arc_j = r2.f64();
+      s.code_bord = r2.boolean(); s.code_non_couvert = r2.boolean();
+      s.code_cov = r2.f64(); s.conduite = r2.i32();
+      s.anom = load_anomaly(r2);
+      return s;
+    });
+    missions.clear();
+    for (const auto& s : sauves) {
+      const mission::CatalogEntry* src = nullptr;
+      for (const auto& e : catalog.entries())
+        if (e.contract.id == s.id) { src = &e; break; }
+      if (!src) continue;
+      mission::Mission m;
+      m.contract = src->contract;
+      m.state = static_cast<mission::MissionState>(s.state);
+      m.state_entered_days = s.entered;
+      m.tof_days = s.tof;
+      m.worst_severity = static_cast<mission::Severity>(s.worst);
+      m.any_anomaly = s.any;
+      m.flight_flown = s.flown;
+      m.flight_success = s.success;
+      m.flight_has_anomaly = s.has_anom;
+      m.nav_evaluee = s.nav_eval;
+      m.nav_dv_required = s.nav_dv;
+      m.nav_miss_km = s.nav_miss;
+      m.vol_vrai_valide = s.vrai_ok;
+      m.vol_vrai_t_days = s.vrai_t;
+      for (int k = 0; k < 3; ++k) {
+        m.vol_vrai_r[k] = s.vrai_r[k];
+        m.vol_vrai_v[k] = s.vrai_v[k];
+        m.nav_connu_dv[k] = s.connu_dv[k];
+      }
+      m.nav_sigma_r = s.sig_r;
+      m.nav_sigma_v = s.sig_v;
+      m.tcm_dv_depense = s.tcm_dv;
+      m.tcm_faits = static_cast<int>(s.tcm_n);
+      m.poursuite_jours = s.poursuite_j;
+      m.arc_poursuite_j = s.arc_j;
+      m.code_embarque = s.code_bord;
+      m.code_non_couvert = s.code_non_couvert;
+      m.code_couverture = s.code_cov;
+      m.vol_conduit_par = static_cast<int>(s.conduite);
+      m.flight_anomaly = s.anom;
+      // `phase` reste dérivée : elle sera recalculée dès le premier tick.
+      missions.push_back(std::move(m));
+    }
     return r.ok();
   }
   std::uint64_t hash() const {

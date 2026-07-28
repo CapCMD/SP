@@ -136,4 +136,53 @@ inline Vec3 satellite_parentcentric(const SatelliteDef& s, Epoch t) {
   return (u * std::cos(theta) + w * std::sin(theta)) * s.sma_m;
 }
 
+// Normale du plan orbital (unitaire, sens du moment cinétique). FORME FERMÉE :
+// h ∝ r × v ∝ u × w = pole·cos i − v·sin i, constante dans ce modèle. Pour i > 90°
+// elle bascule côté sud du pôle du parent : Triton en sort rétrograde tout seul.
+inline Vec3 satellite_orbit_normal(const SatelliteDef& s) {
+  const double i = s.incl_eq_deg * cst::DEG;
+  const Vec3 pole = spin_axis_ecliptic(s.parent);
+  Vec3 u = cross(Vec3{0.0, 0.0, 1.0}, pole);
+  u = (norm2(u) > 1e-12) ? unit(u) : Vec3{1.0, 0.0, 0.0};
+  const Vec3 v = unit(cross(pole, u));
+  return unit(pole * std::cos(i) - v * std::sin(i));
+}
+
+// ═══ ROTATION SYNCHRONE : UN FAIT, PAS UN RÉGLAGE ═══ (2026-07-27)
+//
+// Les dix-neuf lunes de cette table sont TOUTES verrouillées par la marée : elles
+// présentent en permanence la même face à leur primaire. C'était déjà écrit dans
+// le rendu (« c'est un FAIT physique, pas un réglage ») mais ce n'était pas FAIT :
+// `has_orientation` est faux pour dix-huit d'entre elles, si bien que le rendu
+// retombait sur un axe = normale écliptique et une phase arbitraire. Elles
+// tournaient donc sur elles-mêmes en montrant n'importe quelle face à leur
+// planète — le même défaut que celui qui a été vu sur la Lune, en pire.
+//
+// Le verrou se construit à partir de la GÉOMÉTRIE, ce qui supprime toute phase à
+// deviner : la longitude 0 EST le point sous-parent, et le pôle EST la normale
+// orbitale. La sortie ne peut donc pas dériver de sa planète, quelle que soit
+// l'époque.
+//
+// POURQUOI PAS LES ÉLÉMENTS IAU POUR TITAN (le seul de la table qui en a) : sa
+// POSITION vient de ce fichier, dont la phase orbitale est explicitement
+// arbitraire (voir l'en-tête). Appliquer son vrai W à une position dont la phase
+// est fausse donnerait un point sous-Saturne QUI SE PROMÈNE — un verrou qui ne
+// verrouille rien. Entre « le bon méridien à la mauvaise place » et « la même face
+// à son primaire », c'est la seconde qui est vraie à l'écran. Elle redeviendra le
+// vrai W le jour où une éphéméride satellitaire (SAT441/JUP365) donnera la phase.
+//
+// APPROXIMATION DÉCLARÉE [GDD 6.8] : obliquité propre nulle (le pôle est pris
+// normal à l'orbite). C'est vrai à moins d'un degré pour ces lunes ; la Lune, qui
+// s'en écarte de 6,7°, n'est pas ici — elle a son modèle IAU, et sa position
+// réelle pour l'honorer.
+inline BodyFrame satellite_frame_ecliptic(const SatelliteDef& s, Epoch t) {
+  BodyFrame f;
+  const Vec3 r = satellite_parentcentric(s, t);          // parent -> lune
+  f.z = satellite_orbit_normal(s);
+  f.x = unit(-r);                                        // lune -> parent = longitude 0
+  f.y = unit(cross(f.z, f.x));
+  f.x = unit(cross(f.y, f.z));                           // re-orthogonalisation
+  return f;
+}
+
 } // namespace fen::ephem

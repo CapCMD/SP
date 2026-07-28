@@ -14,3 +14,17 @@ Space Program/assets/3D models/
 *.pch
 *.obj
 *.pdb
+
+# Oracles standalone (cl.exe) : binaires et journaux de la boucle de verification
+build_oracles/
+
+# SDK du mode PRO : ARTEFACT de Tools/stage_sdk.py, pas une source. La verite
+# vit dans Source/SP/SpaceProgram/astro_core/ ; en versionner une copie en
+# ferait deux, dont une perimerait en silence. [GDD 18]
+Content/SP/Sdk/
+
+# La toolchain EMBARQUEE (MSVC Build Tools) : plusieurs centaines de Mo, et elle
+# a sa propre licence de redistribution — elle se depose, elle ne se versionne
+# pas. Voir Content/SP/Toolchain/LISEZMOI.txt.
+Content/SP/Toolchain/*
+!Content/SP/Toolchain/LISEZMOI.txt

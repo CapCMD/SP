@@ -22,7 +22,11 @@
 #include <filesystem>
 #include <string>
 
+#include "app/impesanteur.hpp"
 #include "app/session.hpp"
+#include "fen/mission/Graphe.hpp"
+#include "fen/mission/Manoeuvre.hpp"
+#include "fen/mission/NavSolution.hpp"
 
 using namespace fen;
 using namespace fen::app;
@@ -34,7 +38,7 @@ static int g_ok = 0, g_ko = 0;
     else { ++g_ko; std::printf("ECHEC : %s (ligne %d)\n", nom, __LINE__); }  \
   } while (0)
 
-int main() {
+int main(int argc, char** argv) {
   const std::string tmp = std::string(std::getenv("TEMP") ? std::getenv("TEMP") : ".");
 
   // ---- 1. slug d'agence : un nom -> un fichier, toujours utilisable --------
@@ -74,6 +78,70 @@ int main() {
     CHECK(!g_render_bridge.carte3d_active.load(), "pont : cadrage systeme inactif a bord");
     CHECK(!g_render_bridge.menu_backdrop.load(), "pont : pas de decor de menu a bord");
     CHECK(g_render_bridge.posts.n.load() == 8, "pont : les 8 postes publies a bord");
+    // ---- LES POSTES SONT DANS LEUR MODULE, PAS ALIGNES DANS UN COULOIR -------
+    // Ils etaient poses a 1,7 m d'intervalle a partir du point d'apparition : la
+    // station etait un decor. Le sous-titre de chaque poste NOMME son module
+    // [GDD 11], et les positions le suivent maintenant (mesurees sur le modele par
+    // Tools/diag_iss_modules.py). Ce qui est verifie ici est le CONTRAT, pas les
+    // chiffres : la table est la seule source, et l'oracle mordrait si on
+    // revenait a un alignement.
+    {
+      int np = 0;
+      const PosteDef* P = postes_def(np);
+      CHECK(np == 8, "postes : la table en porte 8");
+      // 1. LA PUBLICATION EST FIDELE A LA TABLE (aucun calcul entre les deux).
+      bool fidele = true;
+      for (int i = 0; i < np; ++i) {
+        const auto& it = g_render_bridge.posts.items[i];
+        if (std::fabs(it.x - P[i].x) > 1e-4 || std::fabs(it.y - P[i].y) > 1e-4 ||
+            std::fabs(it.z - P[i].z) > 1e-4) fidele = false;
+        if (std::fabs(it.radius_m - POSTE_PORTEE_M) > 1e-6) fidele = false;
+      }
+      CHECK(fidele, "postes : publies EXACTEMENT a la position de la table");
+      // 2. ILS SONT DISPERSES DANS LA STATION. Un couloir alignerait tout sur un
+      // seul axe ; ici les trois axes doivent porter de l'ecart, et l'ecart total
+      // doit etre de l'ordre de la station (55 m), pas de 12 m de couloir.
+      double lo[3] = {1e30, 1e30, 1e30}, hi[3] = {-1e30, -1e30, -1e30};
+      for (int i = 0; i < np; ++i) {
+        const double p[3] = {P[i].x, P[i].y, P[i].z};
+        for (int k = 0; k < 3; ++k) {
+          lo[k] = std::min(lo[k], p[k]); hi[k] = std::max(hi[k], p[k]);
+        }
+      }
+      CHECK(hi[0] - lo[0] > 30.0, "postes : etales sur l axe des modules (> 30 m)");
+      CHECK(hi[1] - lo[1] > 15.0, "postes : ... et de babord a tribord (> 15 m)");
+      CHECK(hi[2] - lo[2] > 3.0,  "postes : ... et du zenith au nadir (la cupola)");
+      // 3. AUCUN RECOUVREMENT. `near_post` prend le PLUS PROCHE, donc rien n'est
+      // ambigu au sens strict — mais deux postes qui se disputent le meme metre
+      // cube sont un defaut de PLACEMENT, pas d'affichage : on ne peut plus se
+      // tenir « au poste » sans etre aussi au voisin. C'est cet oracle qui a
+      // attrape les trois postes entasses dans NOVELLUS.
+      bool disjoints = true;
+      for (int i = 0; i < np; ++i)
+        for (int j = i + 1; j < np; ++j) {
+          const double dx = P[i].x - P[j].x, dy = P[i].y - P[j].y, dz = P[i].z - P[j].z;
+          if (std::sqrt(dx * dx + dy * dy + dz * dz) <= 2.0 * POSTE_PORTEE_M)
+            disjoints = false;
+        }
+      CHECK(disjoints, "postes : leurs portees ne se recouvrent pas");
+      // 4. LA COUPOLE EST SOUS LE NADIR DE NODE 3 — c'est ce qui en fait le seul
+      // poste d'ou l'on voit la Terre (la cupola regarde le nadir en permanence).
+      // -Z = nadir dans ce modele (mesure : Tools/diag_iss_modules.py).
+      const PosteDef& coupole = P[6];
+      CHECK(std::string(coupole.id) == "observation", "postes : le 7e est la COUPOLE");
+      CHECK(coupole.z < -4.0, "postes : la COUPOLE est sous le hub, du cote NADIR");
+      bool plus_bas = true;
+      for (int i = 0; i < np; ++i)
+        if (i != 6 && P[i].z <= coupole.z) plus_bas = false;
+      CHECK(plus_bas, "postes : ... et c est le poste le plus bas de la station");
+      // 5. VIGIE est AU point d'apparition : une partie qui commence doit avoir un
+      // poste a portee, sinon le joueur arrive devant rien.
+      const PosteDef& vigie = P[7];
+      const double dvx = vigie.x - NOVELLUS_OEIL_M[0], dvy = vigie.y - NOVELLUS_OEIL_M[1],
+                   dvz = vigie.z - NOVELLUS_OEIL_M[2];
+      CHECK(std::sqrt(dvx * dvx + dvy * dvy + dvz * dvz) < POSTE_PORTEE_M,
+            "postes : VIGIE est a portee du point d apparition");
+    }
 
     // [M] = signet de caméra : on tire la vue au plan système SANS changer de scène.
     s.cadrage = Cadrage::Systeme;
@@ -341,14 +409,21 @@ int main() {
 
     // (a) la pose d'amarrage RECONSTRUIT l'offset de l'œil. C'est l'invariant
     // central : orbite (dist, yaw, pitch) -> offset cartesien == offset de l'oeil
-    // en axes de rendu (miroir en y sur le repere station).
+    // en axes de rendu (miroir en y sur le repere station), TOURNE PAR L'ATTITUDE
+    // de la station (elle vole cupola au nadir : son flanc change au fil de
+    // l'orbite, et la camera doit en sortir du bon cote). La rotation est
+    // verifiee a part, en 11b (f) — ici on la compose telle qu'elle est publiee.
     const Session::PoseBord pb = s.pose_bord();
     const double ox = pb.dist_km * std::cos(pb.pitch) * std::cos(pb.yaw);
     const double oy = pb.dist_km * std::cos(pb.pitch) * std::sin(pb.yaw);
     const double oz = pb.dist_km * std::sin(pb.pitch);
-    CHECK(std::fabs(ox - NOVELLUS_OEIL_M[0] / 1000.0) < 1e-9 &&
-          std::fabs(oy + NOVELLUS_OEIL_M[1] / 1000.0) < 1e-9 &&
-          std::fabs(oz - NOVELLUS_OEIL_M[2] / 1000.0) < 1e-9,
+    const Vec3 oeil_attendu = appliquer_attitude(
+        Session::attitude_publiee(), Vec3{ NOVELLUS_OEIL_M[0] / 1000.0,
+                                          -NOVELLUS_OEIL_M[1] / 1000.0,
+                                           NOVELLUS_OEIL_M[2] / 1000.0});
+    CHECK(std::fabs(ox - oeil_attendu.x) < 1e-9 &&
+          std::fabs(oy - oeil_attendu.y) < 1e-9 &&
+          std::fabs(oz - oeil_attendu.z) < 1e-9,
           "handoff : (dist,yaw,pitch) reconstruit exactement l offset de l oeil");
     const double r_attendu = std::sqrt(NOVELLUS_OEIL_M[0] * NOVELLUS_OEIL_M[0] +
                                        NOVELLUS_OEIL_M[1] * NOVELLUS_OEIL_M[1] +
@@ -400,10 +475,13 @@ int main() {
     CHECK(!main_avant_coque, "handoff : la main ne passe pas avant la fin du vol");
     CHECK(s.cadrage == Cadrage::Bord, "handoff : a la fin du vol, on est a bord");
     // ... et la camera est EXACTEMENT sur la pose d'amarrage : c'est ce qui rend
-    // la reprise invisible.
-    CHECK(std::fabs(g_render_bridge.cam.dist_km.load() - pb.dist_km) < 1e-9 &&
-          std::fabs(g_render_bridge.cam.yaw.load() - pb.yaw) < 1e-9 &&
-          std::fabs(g_render_bridge.cam.pitch.load() - pb.pitch) < 1e-9,
+    // la reprise invisible. La pose est relue MAINTENANT, pas celle d'avant le
+    // vol : la station tourne (cupola au nadir), donc l'amarrage suit son flanc.
+    // C'est precisement ce que `publier_camera_vol` resynchronise a chaque frame.
+    const Session::PoseBord pb_arrivee = s.pose_bord();
+    CHECK(std::fabs(g_render_bridge.cam.dist_km.load() - pb_arrivee.dist_km) < 1e-9 &&
+          std::fabs(g_render_bridge.cam.yaw.load() - pb_arrivee.yaw) < 1e-9 &&
+          std::fabs(g_render_bridge.cam.pitch.load() - pb_arrivee.pitch) < 1e-9,
           "handoff : le vol finit pile sur la pose de l oeil du pawn");
 
     // (e) SYMÉTRIE : le vol de sortie part de la coexistence (on est encore dans
@@ -424,10 +502,20 @@ int main() {
     g_render_bridge.station_out.eye_m[2] = 0.5f;
     g_render_bridge.station_out.ready = true;
     const Session::PoseBord pv = s.pose_bord();
+    // La DISTANCE est invariante par rotation : elle contraint l'oeil vivant seul.
     CHECK(std::fabs(pv.dist_km - std::sqrt(12.0 * 12.0 + 4.0 + 0.25) / 1000.0) < 1e-12,
           "handoff : la pose suit l oeil VIVANT du pawn");
-    CHECK(std::fabs(pv.dist_km * std::cos(pv.pitch) * std::sin(pv.yaw) + 0.002) < 1e-9,
-          "handoff : miroir en y applique a l oeil vivant");
+    // La DIRECTION, elle, est celle de l'oeil vivant MIROITE EN Y puis tourne par
+    // l'attitude — les deux conventions composees, sur la valeur vivante.
+    {
+      const Vec3 attendu = appliquer_attitude(Session::attitude_publiee(),
+                                              Vec3{-0.012, -0.002, 0.0005});
+      const Vec3 obtenu{pv.dist_km * std::cos(pv.pitch) * std::cos(pv.yaw),
+                        pv.dist_km * std::cos(pv.pitch) * std::sin(pv.yaw),
+                        pv.dist_km * std::sin(pv.pitch)};
+      CHECK(norm(obtenu - attendu) < 1e-12,
+            "handoff : miroir en y ET attitude appliques a l oeil vivant");
+    }
     g_render_bridge.station_out.ready = false;
   }
 
@@ -445,7 +533,27 @@ int main() {
     const double rterre = ephem::body_radius(ephem::Body::EarthBary);
     CHECK(std::fabs(r - (rterre + 418000.0)) < 1.0, "novellus : rayon = R_Terre + 418 km");
     CHECK(std::fabs((r - rterre) / 1000.0 - 418.0) < 1e-3, "novellus : altitude coherente");
-    CHECK(std::fabs(st.rel_m[2]) < 1.0, "novellus : cercle dans le plan ecliptique (declare)");
+    // ---- LA VITESSE PUBLIEE : ce qui donne son ATTITUDE a la station ----------
+    // Le rendu s'en sert pour poser l'axe de vol (cupola au nadir, vol « XVV »
+    // reel). Elle est publiee ICI et pas derivee la-bas, parce qu'a mois/s une
+    // frame avance de ~8 orbites LEO : une difference de positions cote rendu ne
+    // dirait plus rien de la tangente. Deux oracles, qui la contraignent
+    // completement sans jamais recopier le calcul :
+    {
+      const double v = std::sqrt(st.vel_ms[0] * st.vel_ms[0] + st.vel_ms[1] * st.vel_ms[1] +
+                                 st.vel_ms[2] * st.vel_ms[2]);
+      // 1. MODULE : la vitesse circulaire sqrt(mu/r) — ~7,66 km/s a 418 km. C'est
+      // la 3e loi de Kepler qui relit le modele, pas une valeur recopiee.
+      const double v_circ = std::sqrt(ephem::body_mu(ephem::Body::EarthBary) / r);
+      CHECK(std::fabs(v / v_circ - 1.0) < 1e-9, "novellus : |v| = vitesse circulaire a 418 km");
+      CHECK(v > 7500.0 && v < 7800.0, "novellus : ...soit ~7,66 km/s (ancre chiffree LEO)");
+      // 2. DIRECTION : perpendiculaire au rayon (orbite circulaire). C'est ce qui
+      // rend l'attitude bien definie — une composante radiale ferait tanguer la
+      // station.
+      const double rdotv = (st.rel_m[0] * st.vel_ms[0] + st.rel_m[1] * st.vel_ms[1] +
+                            st.rel_m[2] * st.vel_ms[2]) / (r * v);
+      CHECK(std::fabs(rdotv) < 1e-12, "novellus : v perpendiculaire a r (cercle)");
+    }
     // la position AVANCE avec le temps de jeu (etat au temps courant [GDD 14]).
     const double x0 = st.rel_m[0], y0 = st.rel_m[1];
     s.jeu.passer_mois();
@@ -457,6 +565,212 @@ int main() {
           "novellus : le focus le cadre de pres (km)");
     CHECK(distance_cadrage(FOCUS_STATION) < distance_cadrage((int)ephem::Body::Moon),
           "novellus : cadre plus pres que le plus petit corps");
+  }
+
+  // ---- 11b. L'ORBITE REELLE DE NOVELLUS : LE PLAN ET LA PERIODE -------------
+  // La station passait par le helper de la FLOTTE : un cercle dans le plan
+  // ECLIPTIQUE. Le rayon etait bon (donc la periode aussi), mais le PLAN etait
+  // faux de 51,6° — et un plan faux, c'est une Terre qui defile n'importe ou sous
+  // la cupola. Ce qui est verifie ici : l'inclinaison se mesure bien sur
+  // l'EQUATEUR TERRESTRE (pas sur l'ecliptique), la periode sort de Kepler, et le
+  // noeud regresse comme J2 l'impose.
+  {
+    using namespace fen::app;
+    const double a = novellus_sma_m();
+
+    // (a) LA PERIODE — 92,9 min. Elle n'est pas saisie : elle SORT de la 3e loi.
+    const double T = novellus_periode_s();
+    CHECK(std::fabs(T - 5576.0) < 5.0, "orbite : periode = 92,9 min (5576 s)");
+    CHECK(std::fabs(T / 60.0 - 92.9) < 0.1, "orbite : ...soit 92,9 min, la valeur reelle de l ISS");
+    // relecture independante : T^2 = 4 pi^2 a^3 / mu.
+    const double T_kepler = cst::TWO_PI * std::sqrt(a * a * a / ephem::body_mu(ephem::Body::EarthBary));
+    CHECK(std::fabs(T - T_kepler) < 1e-6, "orbite : la periode EST celle de Kepler");
+
+    // (b) L'INCLINAISON, mesuree sur l'EQUATEUR TERRESTRE. Le moment cinetique
+    // r x v est normal au plan orbital ; l'angle qu'il fait avec le POLE de la
+    // Terre EST l'inclinaison. On la mesure sur l'etat publie, sans jamais relire
+    // la constante saisie autrement que pour la comparaison finale.
+    const NovellusEtat s0 = novellus_etat(0.0);
+    const Vec3 pole = ephem::spin_axis_ecliptic(ephem::Body::EarthBary);
+    const Vec3 h = unit(cross(s0.r, s0.v));
+    const double inc_deg = std::acos(std::clamp(dot(h, pole), -1.0, 1.0)) / cst::DEG;
+    CHECK(std::fabs(inc_deg - 51.64) < 1e-9, "orbite : inclinaison 51,64° sur l EQUATEUR terrestre");
+    // ... et ce n'est PAS l'inclinaison sur l'ecliptique : le plan de l'equateur
+    // est lui-meme a 23,44°, donc les deux ne peuvent pas coincider. C'est
+    // exactement le defaut que ce modele corrige.
+    const double inc_ecl_deg = std::acos(std::clamp(h.z, -1.0, 1.0)) / cst::DEG;
+    CHECK(std::fabs(inc_ecl_deg - 51.64) > 1.0,
+          "orbite : l inclinaison sur l ECLIPTIQUE en differe (l equateur est a 23,44°)");
+    // ... et la station QUITTE le plan de l'ecliptique, ou l'ancien modele la
+    // clouait. Mesure au quart d'orbite : c'est la que l'ecart au plan est maximal
+    // (a l'epoque de reference elle est AU NŒUD, donc dans les deux plans a la fois
+    // — voir la convention de phase declaree dans novellus_orbite.hpp).
+    const NovellusEtat sq = novellus_etat(T * 0.25);
+    CHECK(std::fabs(sq.r.z) > 1.0e6,
+          "orbite : la station QUITTE le plan de l ecliptique (l ancien modele l y clouait)");
+
+    // (c) UNE PERIODE PLUS TARD, ON EST REVENU AU MEME POINT — a la regression du
+    // noeud pres. Et cet ecart residuel n'est pas « du bruit tolere » : il VAUT le
+    // deplacement que J2 impose sur une orbite, a·|dOmega/dt|·T = 38 km. L'oracle
+    // lie donc la periode, le demi-grand axe et J2 d'un seul trait.
+    const double derive_j2 = a * std::fabs(novellus_raan_rate_rad_s()) * T;
+    const NovellusEtat s1 = novellus_etat(T);
+    CHECK(std::fabs(norm(s1.r - s0.r) / derive_j2 - 1.0) < 0.02,
+          "orbite : apres une periode, la station est revenue (a la regression du noeud pres)");
+    CHECK(norm(s1.r - s0.r) < 0.01 * a,
+          "orbite : ... soit 38 km sur 6 796, un demi-millieme de tour");
+    const NovellusEtat sd = novellus_etat(T * 0.5);
+    CHECK(norm(sd.r + s0.r) < 0.01 * a, "orbite : a la demi-periode, elle est a l oppose");
+
+    // (d) LA REGRESSION DU NŒUD (J2) : ~ -4,95°/jour, un tour en 73 jours. C'est
+    // ce qui commande le cycle beta et l'heure locale des survols ; sans elle le
+    // plan serait fige dans l'inertiel, faux des la premiere journee de jeu.
+    const double raan_deg_jour = novellus_raan_rate_rad_s() * cst::DAY / cst::DEG;
+    CHECK(raan_deg_jour < 0.0, "J2 : le noeud RECULE (orbite prograde)");
+    CHECK(std::fabs(raan_deg_jour + 4.95) < 0.05, "J2 : -4,95°/jour, la valeur reelle de l ISS");
+    // mesuree sur l'etat publie : l'angle entre les deux normales au plan, a un
+    // jour d'intervalle, vaut la rotation du noeud (le plan pivote autour du pole).
+    const NovellusEtat sj = novellus_etat(cst::DAY);
+    const Vec3 hj = unit(cross(sj.r, sj.v));
+    // la composante du basculement le long du pole est nulle : c'est un pivotement
+    // AUTOUR du pole, donc l'inclinaison est CONSERVEE.
+    const double inc_j = std::acos(std::clamp(dot(hj, pole), -1.0, 1.0)) / cst::DEG;
+    CHECK(std::fabs(inc_j - inc_deg) < 1e-9, "J2 : le noeud regresse SANS changer l inclinaison");
+    CHECK(norm(hj - h) > 1.0e-3, "J2 : ... mais le plan a bel et bien tourne en un jour");
+
+    // (e) L'ATTITUDE : cupola au nadir, axe de vol dans la vitesse.
+    const AttitudeRendu att = novellus_attitude_rendu(s0.r, s0.v);
+    // repere ORTHONORME et DIRECT (det = +1) : sans quoi le modele serait rendu
+    // en miroir — une station dont la poutre part du mauvais bord.
+    CHECK(std::fabs(norm(att.avant) - 1.0) < 1e-12 &&
+          std::fabs(norm(att.tribord) - 1.0) < 1e-12 &&
+          std::fabs(norm(att.zenith) - 1.0) < 1e-12, "attitude : axes unitaires");
+    CHECK(std::fabs(dot(att.avant, att.tribord)) < 1e-12 &&
+          std::fabs(dot(att.avant, att.zenith)) < 1e-12 &&
+          std::fabs(dot(att.tribord, att.zenith)) < 1e-12, "attitude : axes orthogonaux");
+    CHECK(std::fabs(dot(att.avant, cross(att.tribord, att.zenith)) - 1.0) < 1e-12,
+          "attitude : repere DIRECT (det = +1), pas un miroir");
+    // LE NADIR REGARDE LA TERRE : -Z du modele (ou est la cupola) doit pointer
+    // vers le centre de la Terre, c'est-a-dire a l'oppose du radial.
+    const Vec3 vers_terre = unit(ecl_vers_rendu(-s0.r));
+    CHECK(dot(-att.zenith, vers_terre) > 1.0 - 1e-12,
+          "attitude : la CUPOLA (-Z) regarde le centre de la Terre");
+    CHECK(dot(att.avant, unit(ecl_vers_rendu(s0.v))) > 1.0 - 1e-12,
+          "attitude : l axe de vol (+X) est dans la vitesse");
+
+    // ... ET ELLE Y RESTE TOUT LE TOUR. C'est la propriete demandee (« cupola face
+    // Terre tout le temps ») : on echantillonne une orbite entiere, le nadir ne
+    // doit jamais s'ecarter d'un iota. Au passage, la station fait bien UN TOUR sur
+    // elle-meme par orbite dans l'inertiel — l'avant a change de sens a mi-course.
+    {
+      bool nadir_tenu = true;
+      for (int i = 0; i <= 64; ++i) {
+        const NovellusEtat sk = novellus_etat(T * (i / 64.0));
+        const AttitudeRendu ak = novellus_attitude_rendu(sk.r, sk.v);
+        if (dot(-ak.zenith, unit(ecl_vers_rendu(-sk.r))) < 1.0 - 1e-12) nadir_tenu = false;
+      }
+      CHECK(nadir_tenu, "attitude : la cupola regarde la Terre a TOUT instant de l orbite");
+      const AttitudeRendu a_demi = novellus_attitude_rendu(sd.r, sd.v);
+      CHECK(dot(att.avant, a_demi.avant) < -0.99,
+            "attitude : un tour complet par orbite (l avant s est inverse a mi-course)");
+    }
+
+    // (f) LA POSE DE BORD PORTE L'ATTITUDE. C'est le troisieme consommateur, et
+    // celui qui rendrait le handoff visible s'il divergeait : la camera doit
+    // sortir de la station DU BON COTE, donc suivre sa rotation.
+    {
+      Session s2;
+      s2.nouvelle_partie("Oracle", ModeAide::Normal);
+      s2.tick(0.016);                      // publie Novellus, donc l attitude
+      const Session::PoseBord pb2 = s2.pose_bord();
+      const Vec3 local{ NOVELLUS_OEIL_M[0] / 1000.0,
+                       -NOVELLUS_OEIL_M[1] / 1000.0,
+                        NOVELLUS_OEIL_M[2] / 1000.0};
+      const Vec3 attendu = appliquer_attitude(Session::attitude_publiee(), local);
+      const Vec3 obtenu{pb2.dist_km * std::cos(pb2.pitch) * std::cos(pb2.yaw),
+                        pb2.dist_km * std::cos(pb2.pitch) * std::sin(pb2.yaw),
+                        pb2.dist_km * std::sin(pb2.pitch)};
+      CHECK(norm(obtenu - attendu) < 1e-12,
+            "handoff : la pose de bord est l oeil TOURNE PAR L ATTITUDE");
+      // une rotation conserve la norme : la DISTANCE d amarrage, elle, ne bouge pas
+      // — donc les deux seuils du handoff (enveloppe, amarrage) sont intacts.
+      CHECK(std::fabs(pb2.dist_km - norm(local)) < 1e-12,
+            "handoff : ... et la distance d amarrage est inchangee (rotation)");
+      // et l attitude publiee n est PAS l identite : le test ci-dessus mordrait.
+      CHECK(norm(Session::attitude_publiee().zenith - Vec3{0, 0, 1}) > 1e-3,
+            "handoff : l attitude publiee est bien vivante (pas l identite)");
+    }
+  }
+
+  // ---- 11c. SE DEPLACER EN IMPESANTEUR (app/impesanteur.hpp) ---------------
+  // Le pawn utilisait `UFloatingPawnMovement`, qui (1) ne bouge pas sans
+  // possession — et le pawn n'est jamais possede, l'entree vient du HUD par le
+  // pont — et (2) ANNULE la vitesse des qu'on lache la touche. On ne pouvait donc
+  // ni se deplacer, ni deriver. La loi vit maintenant ici, et ce qu'elle promet
+  // est verifie : on derive, on ne pousse qu'en appui, on ne s'arrete qu'en
+  // s'agrippant.
+  {
+    using namespace fen::app;
+    const Vec3 nulle{0, 0, 0};
+    const Vec3 av{1, 0, 0};                       // une direction quelconque
+    const Vec3 v0{0.5, -0.2, 0.1};                // ~0,55 m/s, en pleine derive
+    const double dt = 1.0 / 60.0;
+
+    // (a) L'INVARIANT CENTRAL : sans entree, la vitesse est RENDUE TELLE QUELLE.
+    // Aucun amortissement, dans AUCUNE des quatre combinaisons appui/agrippe —
+    // sauf celle qui veut dire « je tiens la main courante ».
+    CHECK(norm(avancer_vitesse(v0, nulle, false, false, dt) - v0) == 0.0,
+          "impesanteur : sans entree, on DERIVE (volume libre)");
+    CHECK(norm(avancer_vitesse(v0, nulle, true, false, dt) - v0) == 0.0,
+          "impesanteur : ... et on derive AUSSI le long d une paroi qu on ne tient pas");
+    CHECK(norm(avancer_vitesse(v0, nulle, false, true, dt) - v0) == 0.0,
+          "impesanteur : s agripper au VIDE ne freine pas");
+    CHECK(norm(avancer_vitesse(v0, nulle, true, true, dt)) < norm(v0),
+          "impesanteur : s agripper EN APPUI, si");
+    // ... et sur une seconde entiere de derive, pas un iota perdu (un
+    // amortissement, meme faible, se verrait ici).
+    {
+      Vec3 v = v0;
+      for (int i = 0; i < 60; ++i) v = avancer_vitesse(v, nulle, true, false, dt);
+      CHECK(norm(v - v0) == 0.0, "impesanteur : une seconde de derive, vitesse INTACTE");
+    }
+
+    // (b) ON N'ACCELERE QU'EN POUSSANT SUR QUELQUE CHOSE. La brasse dans l'air
+    // existe (jamais bloque au milieu d'un module) mais elle est derisoire — c'est
+    // le RAPPORT qui porte la sensation, et il est de vingt.
+    const double d_appui = norm(avancer_vitesse(nulle, av, true, false, dt));
+    const double d_libre = norm(avancer_vitesse(nulle, av, false, false, dt));
+    CHECK(std::fabs(d_appui - IMPESANTEUR.poussee_ms2 * dt) < 1e-12,
+          "impesanteur : en appui, dv = poussee x dt");
+    CHECK(d_libre > 0.0, "impesanteur : en volume libre on avance encore (pas de blocage)");
+    CHECK(d_appui / d_libre > 15.0, "impesanteur : ... mais quinze fois moins vite au moins");
+
+    // (c) LA DIRECTION EST NORMALISEE : une diagonale ne doit pas pousser plus
+    // fort qu'un axe (le defaut classique des deplacements en croix).
+    const Vec3 diag{1, 1, 1};
+    CHECK(std::fabs(norm(avancer_vitesse(nulle, diag, true, false, dt)) - d_appui) < 1e-12,
+          "impesanteur : la diagonale ne pousse pas plus fort qu un axe");
+
+    // (d) LE FREINAGE S ARRETE A ZERO — jamais d inversion, meme sur un grand pas.
+    const Vec3 lent{0.01, 0, 0};
+    CHECK(norm(avancer_vitesse(lent, nulle, true, true, 1.0)) == 0.0,
+          "impesanteur : la prise amene a l arret, sans repartir en arriere");
+
+    // (e) LE PLAFOND. Il est atteint, et il n est jamais depasse.
+    {
+      Vec3 v = nulle;
+      for (int i = 0; i < 600; ++i) v = avancer_vitesse(v, av, true, false, dt);
+      CHECK(std::fabs(norm(v) - IMPESANTEUR.v_max_ms) < 1e-12,
+            "impesanteur : le plafond de vitesse est atteint");
+      CHECK(IMPESANTEUR.v_max_ms < 1.5,
+            "impesanteur : ... et il reste celui d un equipage, pas d un vol (< 1,5 m/s)");
+    }
+
+    // (f) LE CHOC n'est PAS teste ici, et ce n'est pas un oubli : il n'est pas
+    // dans la loi. L'absorption se lit sur le DEPLACEMENT OBTENU du balayage
+    // moteur, pas sur une normale rapportee (voir impesanteur.hpp et
+    // `AvancerEnImpesanteur`) — c'est une mesure, pas une equation, et elle se
+    // verifie en jeu, pas ici.
   }
 
   // ---- 12. LE TEMPS QUI COULE [GDD 14.2] ----------------------------------
@@ -677,11 +991,15 @@ int main() {
     const double asc_j = fen::mission::phase_duration_s(FlightPhase::Launch) / cst::DAY;
     CHECK(fen::mission::flight_phase_of(m, 100.0 + asc_j * 0.99) == FlightPhase::Launch,
           "tempo : l ascension dure sa duree propre");
-    CHECK(fen::mission::flight_phase_of(m, 100.0 + asc_j * 1.01) == FlightPhase::TransferCruise,
-          "tempo : passee l ascension, une mission lointaine croise");
+    // Passee l'ascension on ne croise pas : on est en ORBITE DE PARKING, et on y
+    // reste une revolution avant l'injection. L'oracle disait « croisiere » du
+    // temps ou la phase etait devinee ; la chronologie, elle, suit le vol reel.
+    CHECK(fen::mission::flight_phase_of(m, 100.0 + asc_j * 1.01) == FlightPhase::LeoOps,
+          "tempo : passee l ascension, on attend en orbite de parking");
     m.contract.family = "sat";
     CHECK(fen::mission::flight_phase_of(m, 100.0 + asc_j * 1.01) == FlightPhase::LeoOps,
           "tempo : passee l ascension, une mission proche opere en LEO");
+    m.contract.family = "mars";
 
     // (d) LA MISSION LA PLUS CONTRAIGNANTE COMMANDE : deux vols ne s'annulent pas.
     std::vector<fen::mission::Mission> vols;
@@ -764,6 +1082,1537 @@ int main() {
     // personne ne renseignait porte enfin une valeur vivante (Events.hpp la lit).
     CHECK(G.missions.back().phase == FlightPhase::Launch,
           "tempo : Mission::phase est derivee, plus jamais un drapeau mort");
+  }
+
+  // ---- 14. LA CHRONOLOGIE DE VOL [GDD 4.1, 9, 14.3] ----------------------
+  // Ce qui manquait au rythme en mission : une DATE. L'insertion et l'EDL
+  // etaient des phases critiques que rien ne declenchait, donc un plafond qui ne
+  // mordait qu'a l'ascension. On verifie ici que les durees sont DERIVEES (pas
+  // saisies), que la chronologie est jointive, que le vol DURE, et que les
+  // phases critiques d'arrivee contraignent enfin le temps.
+  {
+    using fen::mission::FlightPhase;
+    using fen::mission::MissionState;
+    using game::TimeRate;
+
+    // (a) LES DUREES SONT DERIVEES DE KEPLER, jamais ecrites a la main. Chaque
+    // valeur se verifie contre une grandeur connue du metier.
+    const double t_park = fen::mission::parking_period_s();
+    CHECK(std::fabs(t_park - 5310.0) < 60.0,
+          "chrono : une revolution en parking a 200 km dure ~88,5 min");
+    // L'ORBITE GEOSTATIONNAIRE N'EST PAS UN CHIFFRE : c'est la solution de
+    // « periode orbitale == jour sideral ». On retrouve 42 164 km sans l'ecrire.
+    CHECK(std::fabs(fen::mission::geo_radius_m() - 42164.0e3) < 20.0e3,
+          "chrono : le rayon geostationnaire se DEDUIT de la rotation sidérale");
+    // Transit sur l'ellipse parking -> GEO : une demi-periode, ~5 h 15.
+    const double t_gto = fen::mission::gto_coast_s();
+    CHECK(std::fabs(t_gto - 5.26 * 3600.0) < 0.15 * 3600.0,
+          "chrono : le transit GTO dure une demi-periode d ellipse (~5 h 15)");
+    CHECK(std::fabs(fen::mission::rendezvous_phasing_s() - 4.0 * t_park) < 1.0,
+          "chrono : le phasage de rendez-vous est le profil a 4 orbites");
+    // L'orbite de parking de la chronologie est CELLE dont l'injection est payee
+    // (MissionLoop) : un chiffre, une source.
+    CHECK(std::fabs(fen::mission::parking_radius_m() - (cst::R_EARTH + 200.0e3)) < 1.0,
+          "chrono : le parking de la chronologie est celui du bilan de dv");
+
+    // (b) LA CHRONOLOGIE EST JOINTIVE ET ORDONNEE : pas de trou entre deux
+    // phases, pas de retour en arriere. Un vol dont les segments se chevauchent
+    // rendrait la phase ambigue, donc le plafond arbitraire.
+    fen::mission::Mission mm;
+    mm.contract.id = "T-CHRONO";
+    mm.contract.family = "mars";
+    mm.state = MissionState::Launched;
+    mm.state_entered_days = 500.0;
+    mm.tof_days = 259.0;                       // duree de transit d une vraie fenetre
+    const fen::mission::FlightTimeline tl = fen::mission::build_flight_timeline(mm);
+    bool jointive = tl.n > 0;
+    for (int i = 1; i < tl.n; ++i)
+      if (std::fabs(tl.seg[i].t0_days - tl.seg[i - 1].t1_days) > 1e-12) jointive = false;
+    CHECK(jointive, "chrono : les segments sont jointifs, sans trou ni chevauchement");
+    CHECK(tl.seg[0].phase == FlightPhase::Launch,
+          "chrono : tout vol commence par l ascension");
+
+    // (c) L'INSERTION EST DATEE — le manque que ce chantier comble. Elle tombe a
+    // la FIN de la croisiere, et elle est critique.
+    const double t_go = mm.state_entered_days;
+    const double t_arr = t_go + tl.duree_jours;
+    CHECK(tl.dated, "chrono : une cible nommee donne une date d arrivee");
+    CHECK(std::fabs(tl.duree_jours - 259.0) < 1.0,
+          "chrono : la croisiere dure la duree de transit de la fenetre visee");
+    CHECK(fen::mission::flight_phase_of(mm, t_go + 100.0) == FlightPhase::TransferCruise,
+          "chrono : a mi-parcours, la mission croise");
+    CHECK(fen::mission::flight_phase_of(mm, t_arr - 1e-4) == FlightPhase::CriticalManeuver,
+          "chrono : a l arrivee, la mission INSERE — et c est date");
+    CHECK(fen::mission::flight_phase_of(mm, t_arr + 1.0) == FlightPhase::LeoOps,
+          "chrono : passee l insertion, la mission opere en orbite");
+
+    // (d) LE PLAFOND MORD ENFIN AILLEURS QU A L ASCENSION. C'est la raison
+    // d'etre de la chronologie : la loi de MissionTempo ne changeait pas, il lui
+    // manquait un evenement date auquel s'appliquer.
+    std::vector<fen::mission::Mission> vols_arr{mm};
+    CHECK(!fen::mission::tempo_limit(vols_arr, t_go + 100.0).constrained,
+          "chrono : en croisiere, le temps reste libre");
+    const fen::mission::TempoLimit lim_ins =
+        fen::mission::tempo_limit(vols_arr, t_arr - 1e-4);
+    CHECK(lim_ins.constrained && lim_ins.max_rate == TimeRate::Realtime,
+          "chrono : l INSERTION ramene le temps au rythme reel [GDD 14.3]");
+    CHECK(lim_ins.phase == FlightPhase::CriticalManeuver,
+          "chrono : le plafond NOMME l insertion");
+
+    // ... et l'EDL pour une mission de surface, par le meme chemin.
+    fen::mission::Mission ms = mm;
+    ms.contract.id = "T-EDL";
+    ms.contract.family = "surface";
+    const fen::mission::FlightTimeline tls = fen::mission::build_flight_timeline(ms);
+    const double t_edl = ms.state_entered_days + tls.duree_jours;
+    CHECK(fen::mission::flight_phase_of(ms, t_edl - 1e-4) == FlightPhase::Edl,
+          "chrono : une mission de surface finit par un EDL, date");
+    CHECK(fen::mission::flight_phase_of(ms, t_edl + 1.0) == FlightPhase::SurfaceOps,
+          "chrono : apres l EDL, on opere en surface");
+    const fen::mission::TempoLimit lim_edl =
+        fen::mission::tempo_limit(std::vector<fen::mission::Mission>{ms}, t_edl - 1e-4);
+    CHECK(lim_edl.constrained && lim_edl.phase == FlightPhase::Edl,
+          "chrono : l EDL contraint le temps, et se nomme");
+
+    // (e) LE PROFIL SUIT LA PHYSIQUE DE LA FAMILLE, pas un genre litteraire.
+    fen::mission::Mission mg = mm;
+    mg.contract.family = "sat";                 // charge geostationnaire
+    const fen::mission::FlightTimeline tlg = fen::mission::build_flight_timeline(mg);
+    CHECK(tlg.dated && std::fabs(tlg.duree_jours * cst::DAY -
+              (fen::mission::phase_duration_s(FlightPhase::Launch) + t_park +
+               2.0 * fen::mission::phase_duration_s(FlightPhase::CriticalManeuver) +
+               t_gto)) < 1.0,
+          "chrono : une mise a poste GEO = ascension + parking + injection + transit + circularisation");
+    fen::mission::Mission mr = mm;
+    mr.contract.family = "logistique";
+    const fen::mission::FlightTimeline tlr = fen::mission::build_flight_timeline(mr);
+    CHECK(tlr.dated && tlr.duree_jours * cst::DAY < 8.0 * 3600.0,
+          "chrono : un rendez-vous LEO se conclut en quelques heures, pas en mois");
+
+    // (f) CE QU ON NE SAIT PAS CALCULER, ON LE DECLARE. Une famille dont le
+    // contrat ne nomme pas de cible n'a pas de date d'arrivee — et le modele le
+    // DIT au lieu d'inventer une duree. Un vol non date ne bloque donc rien.
+    fen::mission::Mission mn = mm;
+    mn.contract.family = "science";
+    mn.tof_days = 0.0;
+    CHECK(!fen::mission::build_flight_timeline(mn).dated,
+          "chrono : sans cible nommee, l arrivee n est pas datee [GDD 6.8]");
+    CHECK(fen::mission::arrival_gate(mn, mn.state_entered_days + 1.0).allowed,
+          "chrono : on n oppose jamais une date qu on ne sait pas calculer");
+    fen::mission::Mission mnep = mm;
+    mnep.contract.family = "nep";
+    CHECK(!fen::mission::build_flight_timeline(mnep).dated,
+          "chrono : une spirale a poussee continue n a pas d insertion breve");
+
+    // (g) LE VOL DURE : on ne debriefe pas une sonde encore en croisiere, et le
+    // refus CHIFFRE l'attente (comme le gate de fenetre).
+    const fen::mission::GateResult g_tot = fen::mission::arrival_gate(mm, t_go + 10.0);
+    CHECK(!g_tot.allowed, "chrono : en croisiere, le debrief est refuse");
+    CHECK(g_tot.reason.find("249") != std::string::npos,
+          "chrono : le refus CHIFFRE les jours restants");
+    CHECK(fen::mission::arrival_gate(mm, t_arr + 0.5).allowed,
+          "chrono : arrivee, la mission peut etre debriefee");
+
+    // (h) LE MODELE POSSEDE L'ISSUE DU VOL. Elle vivait sur la session d'UI, qui
+    // ne se sauvegarde pas : un vol reussi puis recharge se concluait en echec.
+    // Et une mission en cours ne se sauvegardait PAS DU TOUT — invisible tant
+    // qu'un vol durait zero seconde, fatal des qu'il dure 259 jours.
+    Session sv; sv.nouvelle_partie("Chrono", ModeAide::Normal);
+    sv.tick(0.016);
+    auto& Gs = *sv.jeu.ares.etat;
+    // On vise une mission A FENETRE SYNODIQUE : ce sont les seules dont la
+    // croisiere est datee par une vraie geometrie, donc les seules qui mettent
+    // la restitution a l'epreuve sur des centaines de jours. Le critere est le
+    // MEME predicat que celui du modele (`window_target_for_family`), pas une
+    // liste de familles recopiee ici. Le contrat est REAPPARIE par son id au
+    // chargement : sa famille vient du catalogue, pas de la sauvegarde.
+    std::size_t idx_vol = 0;
+    bool trouve_fenetre = false;
+    for (std::size_t i = 0; i < Gs.catalog.entries().size(); ++i)
+      if (fen::mission::window_target_for_family(
+              Gs.catalog.entries()[i].contract.family).impose) {
+        idx_vol = i; trouve_fenetre = true; break;
+      }
+    const std::string id_vol = Gs.catalog.entries().empty()
+                                 ? std::string()
+                                 : Gs.catalog.entries()[idx_vol].contract.id;
+    CHECK(!id_vol.empty(), "chrono : le catalogue porte au moins un contrat");
+    CHECK(trouve_fenetre,
+          "chrono : le catalogue porte une mission a fenetre synodique [GDD 10.1]");
+    fen::mission::Mission mv;
+    mv.contract = Gs.catalog.entries()[idx_vol].contract;
+    mv.state = MissionState::Launched;
+    mv.state_entered_days = Gs.clock.now_days();
+    mv.tof_days = 259.0;
+    mv.flight_flown = true;
+    mv.flight_success = true;
+    // LE LOGICIEL EMBARQUE EST UN FAIT DU VOL, donc il se sauvegarde : un vol
+    // recharge doit voler avec le code qu'il transporte, et avec la meme
+    // couverture [GDD 15.5]. Sans cela, quitter au menu absoudrait un logiciel
+    // embarque hors de son domaine — l'issue changerait au rechargement.
+    mv.code_embarque = true;
+    mv.code_non_couvert = true;
+    Gs.missions.push_back(mv);
+    const std::string chemin_v = tmp + "/oracle_chrono.sav";
+    sv.chemin_sauvegarde = chemin_v;
+    sv.sauvegarder_partie();
+    Session sv2;
+    CHECK(sv2.charger_partie(chemin_v), "chrono : la partie se recharge");
+    auto& G2 = *sv2.jeu.ares.etat;
+    CHECK(G2.missions.size() == 1, "chrono : la mission EN VOL survit a la sauvegarde");
+    if (G2.missions.size() == 1) {
+      const fen::mission::Mission& r = G2.missions[0];
+      CHECK(r.contract.id == id_vol,
+            "chrono : le contrat est reapparie depuis le catalogue, par son id");
+      CHECK(r.state == MissionState::Launched, "chrono : l etat FSM est restitue");
+      CHECK(std::fabs(r.state_entered_days - mv.state_entered_days) < 1e-9,
+            "chrono : la date du feu vert est restituee, donc la chronologie aussi");
+      CHECK(std::fabs(r.tof_days - 259.0) < 1e-9,
+            "chrono : la duree de transit figee au feu vert survit");
+      CHECK(r.flight_flown && r.flight_success,
+            "chrono : l issue du vol appartient au modele, pas a l ecran");
+      CHECK(r.code_embarque && r.code_non_couvert,
+            "chrono : le logiciel embarque et son domaine survivent a la sauvegarde");
+      CHECK(r.contract.terms.budget_musd == mv.contract.terms.budget_musd,
+            "chrono : le contrat restitue porte ses termes physiques");
+      // L'INVARIANT QUI COMPTE : la chronologie RECONSTRUITE est la meme. C'est
+      // pour cela qu'on sauvegarde la date du feu vert et la duree de transit,
+      // et rien d'autre — la chronologie n'est pas un etat, c'est un calcul.
+      const double t_ref = Gs.clock.now_days();
+      const fen::mission::ArrivalStatus a0 = fen::mission::flight_arrival(mv, t_ref);
+      const fen::mission::ArrivalStatus a1 = fen::mission::flight_arrival(r, t_ref);
+      CHECK(a0.dated && a1.dated && std::fabs(a0.reste_jours - a1.reste_jours) < 1e-9,
+            "chrono : la date d arrivee est identique avant et apres rechargement");
+      CHECK(a1.reste_jours > 250.0,
+            "chrono : une croisiere martienne rechargee dure encore des mois");
+    }
+
+    // (i) LE VOL EST PUBLIE SUR LE PONT : phase et jours restants. Sans eux, une
+    // mission lancee parait figee pendant des mois de temps de jeu. On compare
+    // au MODELE, jamais a un nombre suppose : le pont ne calcule rien.
+    sv.tick(0.016);
+    CHECK(g_render_bridge.vol_actif.load(), "chrono : le vol en cours est publie");
+    CHECK(g_render_bridge.vol_arrivee_datee.load(),
+          "chrono : le pont dit si l arrivee est datee");
+    CHECK(g_render_bridge.vol_phase.load() ==
+              (int)fen::mission::flight_phase_of(Gs.missions[0], Gs.clock.now_days()),
+          "chrono : la phase publiee est celle du modele");
+    CHECK(std::fabs(g_render_bridge.vol_reste_jours.load() -
+                    fen::mission::flight_arrival(Gs.missions[0], Gs.clock.now_days()).reste_jours) < 1e-9,
+          "chrono : les jours restants publies sont ceux du modele");
+  }
+
+  // ---- 15. LA TRACE DU VOL DANS LE MONDE [GDD 8.1, 8.3, 17.3] ------------
+  // La chronologie dit QUAND, la trace dit OU. Le tracé du pont existait et
+  // DORMAIT : le rendu savait dessiner trajectoire, corridor et nœuds, plus
+  // personne ne les publiait. On vérifie que l'arc est un VRAI arc (Lambert sur
+  // l'éphéméride, propagé par Kepler), qu'il RELIE les deux corps aux dates de
+  // la chronologie, et que la position du vaisseau est un point DE cet arc.
+  {
+    using fen::mission::MissionState;
+    Session tv; tv.nouvelle_partie("Trace", ModeAide::Normal);
+    tv.tick(0.016);
+    auto& Gt = *tv.jeu.ares.etat;
+    const double now_days = Gt.clock.now_days();
+    const double now_tdb = tv.jeu.epoch_courant();
+
+    // ON PART DANS LA FENETRE, comme le gate l'impose au joueur. Ce n'est pas un
+    // detail de confort : hors fenetre, Lambert repond quand meme, par un arc
+    // valide mais qu'aucune mission ne volerait (piege n°63). L'oracle doit donc
+    // tester le vol que le JEU autorise.
+    fen::mission::Mission mt;
+    mt.contract.id = "T-TRACE";
+    mt.contract.family = "mars_habite";
+    mt.state = MissionState::Launched;
+    const auto W0 = fen::astro::launch_window(
+        tv.jeu.eph, fen::ephem::Body::EarthBary, fen::ephem::Body::Mars,
+        fen::Epoch{now_tdb});
+    const double attente = (W0.ok && !W0.open && W0.next_open_days > 0.0)
+                               ? W0.next_open_days : 0.0;
+    mt.state_entered_days = now_days + attente;
+    mt.tof_days = fen::mission::transfer_tof_days(
+        mt, fen::Epoch{now_tdb + attente * cst::DAY}, tv.jeu.eph);
+    CHECK(mt.tof_days > 100.0 && mt.tof_days < 500.0,
+          "trace : la duree de transit vient de la vraie fenetre");
+
+    const fen::mission::FlightTrace T =
+        fen::mission::build_flight_trace(mt, now_days, now_tdb, tv.jeu.eph);
+    CHECK(T.ok && T.n >= 2, "trace : l arc heliocentrique est resolu");
+
+    // (a) L'ARC RELIE LES DEUX CORPS, AUX DATES DE LA CHRONOLOGIE. C'est
+    // l'oracle qui compte : si le depart ne tombe pas sur la Terre a la date
+    // d'injection, l'arc est un dessin, pas une trajectoire.
+    const double t_dep = T.nodes[0].t_days, t_arr = T.nodes[1].t_days;
+    const auto pos_de = [&](fen::ephem::Body b, double jours) {
+      return tv.jeu.eph.state(b, fen::ephem::Body::Sun,
+                              fen::Epoch{now_tdb + (jours - now_days) * cst::DAY}).r;
+    };
+    const fen::Vec3 rTerre = pos_de(fen::ephem::Body::EarthBary, t_dep);
+    const fen::Vec3 rMars  = pos_de(fen::ephem::Body::Mars, t_arr);
+    // UN SEUIL ABSOLU SUR UNE GRANDEUR RELATIVE FINIT PAR MENTIR. Ces deux
+    // residus valaient « < 1 m » — un chiffre choisi sur les dates du jour ou
+    // l'oracle a ete ecrit. Or la geometrie de l'arc BOUGE avec la date reelle
+    // (la fenetre synodique est cherchee depuis l'epoque courante), et 512
+    // propagations de Kepler sur 2,3e11 m accumulent quelques 1e-12 relatifs :
+    // l'arrivee est passee a 1,359 m un beau matin, sans que rien n'ait change
+    // dans le modele. Meme famille que le piege n°67.
+    //
+    // Ce que la propriete affirme, c'est que l'arc TOUCHE les deux corps. On le
+    // mesure donc RELATIVEMENT a l'arc, avec une borne qui reste des ordres de
+    // grandeur sous le rayon d'une planete (1e-10 x 2,3e11 m ~ 23 m, contre
+    // 3,4e6 m de rayon martien) : la preuve est intacte, la fragilite est partie.
+    const double taille_arc = fen::norm(rMars - rTerre);
+    const double borne_extremite = 1.0e-10 * taille_arc;
+    std::printf("     trace : residu aux extremites — depart %.3f m, arrivee %.3f m "
+                "(borne %.1f m sur un arc de %.3f UA)\n",
+                fen::norm(T.traj[0] - rTerre), fen::norm(T.traj[T.n - 1] - rMars),
+                borne_extremite, taille_arc / cst::AU);
+    CHECK(fen::norm(T.traj[0] - rTerre) < borne_extremite,
+          "trace : l arc PART de la Terre a la date d injection");
+    CHECK(fen::norm(T.traj[T.n - 1] - rMars) < borne_extremite,
+          "trace : l arc ARRIVE sur Mars a la date d insertion");
+    CHECK(t_arr - t_dep > 100.0,
+          "trace : l arc dure la croisiere, pas un instant");
+
+    // (b) C'EST UNE TRAJECTOIRE, PAS UNE INTERPOLATION. Un segment droit entre
+    // les deux corps passerait bien plus pres du Soleil que l'arc reel : le
+    // point median de l'arc doit s'en ecarter nettement.
+    const fen::Vec3 milieu_arc = T.traj[T.n / 2];
+    const fen::Vec3 milieu_corde = (rTerre + rMars) * 0.5;
+    CHECK(fen::norm(milieu_arc - milieu_corde) > 1.0e10,
+          "trace : le milieu de l arc n est PAS le milieu de la corde (>0,07 UA)");
+    // ... et surtout : L'ARC EST UNE CONIQUE. C'est l'invariant qui distingue
+    // une trajectoire d'un dessin — l'energie specifique et le moment cinetique
+    // sont CONSTANTS le long d'une propagation keplerienne, et ne le seraient
+    // pour aucune courbe interpolee. On les mesure sur la polyligne elle-meme,
+    // via la vitesse reconstruite par propagation.
+    // ON BALAIE TOUS LES POINTS, pas un sur seize : un echantillonnage lache
+    // laisse passer exactement ce qu'on cherche — une poignee de points aberrants
+    // au milieu d'une courbe saine (piege n°62).
+    int n_aberrants = 0;
+    double r_poly_max = 0.0;
+    for (int k = 0; k < T.n; ++k) {
+      const double r = fen::norm(T.traj[k]);
+      if (!std::isfinite(r) || r <= 0.0) { ++n_aberrants; continue; }
+      r_poly_max = std::max(r_poly_max, r / 1.495978707e11);
+    }
+    std::printf("     polyligne : %d points, %d aberrants, rayon max %.3f UA\n",
+                T.n, n_aberrants, r_poly_max);
+    CHECK(n_aberrants == 0, "trace : aucun point de la polyligne n est aberrant");
+    CHECK(r_poly_max < 3.0, "trace : AUCUN point ne part a l infini");
+
+    double h_min = 1e300, h_max = -1e300, e_min = 1e300, e_max = -1e300;
+    double r_min_ua = 1e300, r_max_ua = -1e300;
+    const double TOF_S = (t_arr - t_dep) * cst::DAY;
+    for (int k = 0; k < T.n; k += 16) {
+      const double dt = TOF_S * (double)k / (double)(T.n - 1);
+      const auto K = fen::astro::kepler_propagate(T.r_dep, T.v_dep, dt, cst::MU_SUN);
+      const double h = fen::norm(fen::cross(K.r, K.v));
+      const double r = fen::norm(K.r);
+      const double en = 0.5 * fen::norm2(K.v) - cst::MU_SUN / r;
+      h_min = std::min(h_min, h); h_max = std::max(h_max, h);
+      e_min = std::min(e_min, en); e_max = std::max(e_max, en);
+      r_min_ua = std::min(r_min_ua, r / 1.495978707e11);
+      r_max_ua = std::max(r_max_ua, r / 1.495978707e11);
+    }
+    std::printf("     arc : perihelie %.3f UA, aphelie %.3f UA, transit %.0f j\n",
+                r_min_ua, r_max_ua, t_arr - t_dep);
+    CHECK(std::fabs(h_max - h_min) / h_max < 1e-9,
+          "trace : le moment cinetique est CONSTANT le long de l arc (c est une conique)");
+    CHECK(std::fabs(e_max - e_min) / std::fabs(e_max) < 1e-9,
+          "trace : l energie specifique est CONSTANTE le long de l arc");
+    // ═══ CE QUE LA FENETRE ACHETE, VU SUR L'ARC ═══
+    // Un transfert PRIS DANS SA FENETRE reste ENTRE les deux orbites : il ne
+    // plonge pas vers le Soleil pour aller chercher Mars. C'est l'oracle qui
+    // aurait attrape le piege n°63 tout seul — et il vaut mieux que « l arc
+    // reste dans le systeme interne », qui laissait passer un plongeon a
+    // 0,26 UA. Marge de 5 % sous le perihelie terrestre (0,983 UA).
+    CHECK(r_min_ua > 0.93, "trace : un transfert EN FENETRE ne plonge pas vers le Soleil");
+    CHECK(r_max_ua < 1.75, "trace : ... et ne depasse pas l aphelie martien (1,666 UA)");
+
+    // (c) LA POSITION EST UN POINT DE L'ARC, et elle AVANCE avec le temps. On
+    // propage a mi-croisiere : le vaisseau doit s'y trouver, et pres du point
+    // d'echantillon correspondant.
+    fen::mission::FlightTrace T2 = T;
+    const double t_mid = 0.5 * (t_dep + t_arr);
+    fen::mission::trace_avancer(T2, t_mid);
+    CHECK(T2.sur_arc, "trace : a mi-croisiere, le vaisseau est SUR l arc");
+    // LA POSITION EST UN POINT DE LA COURBE TRACEE, exactement : on avance a la
+    // date de l'echantillon k et on doit retomber sur traj[k] au metre pres.
+    // (Comparer au « milieu » de l'index serait faux d'un demi-echantillon —
+    // 0,3 jour, soit 700 000 km : la discretisation aurait masque le test.)
+    const int k_test = 137;
+    fen::mission::FlightTrace T3 = T;
+    fen::mission::trace_avancer(
+        T3, t_dep + (t_arr - t_dep) * (double)k_test / (double)(T.n - 1));
+    CHECK(fen::norm(T3.pos - T.traj[k_test]) < 1.0,
+          "trace : a la date d un echantillon, la position EST cet echantillon");
+    CHECK(fen::norm(T2.pos - T.pos) > 1.0e10,
+          "trace : la position AVANCE avec le temps de jeu");
+    // Aux bornes, le vaisseau est dans le pixel de son corps — declare.
+    fen::mission::trace_avancer(T2, t_dep - 1.0);
+    CHECK(!T2.sur_arc && fen::norm(T2.pos - T.traj[0]) < 1.0,
+          "trace : avant l injection, le vaisseau est encore a la Terre");
+    fen::mission::trace_avancer(T2, t_arr + 1.0);
+    CHECK(!T2.sur_arc && fen::norm(T2.pos - T.traj[T.n - 1]) < 1.0,
+          "trace : apres l arrivee, le vaisseau est a destination");
+
+    // (d) LES NŒUDS SONT LES MANŒUVRES DE LA CHRONOLOGIE, et « fait » se LIT de
+    // la date au lieu de se cocher (piege n°20b).
+    fen::mission::trace_avancer(T2, t_dep + 1.0);
+    CHECK(T2.nodes[0].done && !T2.nodes[1].done,
+          "trace : en croisiere, l injection est faite et l arrivee ne l est pas");
+
+    // (e) L'ARC EST FIGE AU FEU VERT : sa signature ne depend que de la date, de
+    // la duree de transit et de la destination. Sans cela on resoudrait Lambert
+    // et 512 propagations a chaque frame.
+    const double sig = fen::mission::flight_trace_signature(mt);
+    CHECK(fen::mission::flight_has_arc(mt), "trace : un vol datable a un arc");
+    fen::mission::Mission mt2 = mt;
+    mt2.state_entered_days += 1.0;
+    CHECK(fen::mission::flight_trace_signature(mt2) != sig,
+          "trace : changer la date du feu vert change l arc");
+    fen::mission::Mission mt3 = mt;
+    mt3.contract.family = "sat";
+    CHECK(!fen::mission::flight_has_arc(mt3),
+          "trace : une mise a poste GEO n a pas d arc heliocentrique [piege n°41]");
+    fen::mission::Mission mt4 = mt;
+    mt4.tof_days = 0.0;
+    CHECK(!fen::mission::flight_has_arc(mt4),
+          "trace : sans duree de transit, pas d arc — et rien n est invente");
+    // LE SENTINELLE NE VIT PAS DANS LE DOMAINE DE LA VALEUR (piege n°61) : un
+    // feu vert ANTERIEUR a l'origine du calendrier donne une signature negative,
+    // et c'est un vol parfaitement valide — toute capture epinglant une
+    // croisiere en est un.
+    fen::mission::Mission mt5 = mt;
+    mt5.state_entered_days = -165.0;
+    CHECK(fen::mission::flight_trace_signature(mt5) < 0.0 &&
+          fen::mission::flight_has_arc(mt5),
+          "trace : une signature negative n est pas une absence d arc");
+
+    // (f) LA TRACE EST PUBLIEE SUR LE PONT, et le rendu n y recalcule rien.
+    Gt.missions.push_back(mt);
+    tv.tick(0.016);
+    CHECK(g_render_bridge.vehicle.valid.load(), "trace : le pont porte la trace du vol");
+    CHECK(g_render_bridge.vehicle.n >= 2, "trace : la polyligne est publiee");
+    CHECK(std::fabs(g_render_bridge.vehicle.traj_m[0][0] - T.traj[0].x) < 1.0,
+          "trace : la polyligne publiee est celle du modele");
+    CHECK(g_render_bridge.vehicle.n_nodes == 2, "trace : les deux nœuds sont publies");
+    CHECK(g_render_bridge.vehicle.corridor_3s_m == 0.0,
+          "trace : le corridor est NUL tant que rien ne fait diverger le vol [GDD 6.8]");
+    // L'ARC NE SE RECALCULE PAS SANS RAISON : deux frames de suite, la generation
+    // ne bouge plus.
+    const int gen1 = g_render_bridge.vehicle.gen.load();
+    tv.tick(0.016);
+    tv.tick(0.016);
+    CHECK(g_render_bridge.vehicle.gen.load() == gen1,
+          "trace : l arc est fige — aucune reconstruction par frame");
+
+    // ---- 16. LA DISPERSION DE NAVIGATION [GDD 7.5, 8.1-8.5] --------------
+    // `p_physics` valait 0,985 : un quart de la probabilite de succes ne
+    // dependait de RIEN. On verifie ici que la chaine entiere est calculee —
+    // Gates, Oberth, matrice de transition, Δv de correction, loi de Maxwell —
+    // et que chaque maillon repond a une variation comme la physique l'exige.
+    {
+      const fen::Vec3 v_terre = tv.jeu.eph.state(
+          fen::ephem::Body::EarthBary, fen::ephem::Body::Sun,
+          fen::Epoch{now_tdb + (t_dep - now_days) * cst::DAY}).v;
+      const double MARGE = 50.0;   // m/s provisionnes
+      const fen::mission::NavDispersion D =
+          fen::mission::nav_dispersion(T, v_terre, MARGE);
+      CHECK(D.ok, "nav : la dispersion se calcule sur l arc reel");
+      std::printf("     nav : dv_inj %.0f m/s, sigma %.2f m/s, Oberth x%.2f,\n"
+                  "           manque au but 1s %.0f km, correction 1s %.2f m/s,\n"
+                  "           p99 %.1f m/s, P(marge %.0f m/s) = %.3f\n",
+                  D.dv_injection, D.sigma_dv_inj, D.oberth_gain, D.sigma_r_arr_km,
+                  D.sigma_corr, D.dv_corr_p99, MARGE, D.p_marge);
+
+      // (a) L'INJECTION EST CELLE DU BILAN Δv. Une injection martienne depuis une
+      // orbite de parking a 200 km coute ~3,6 km/s (Oberth), pas le v∞ nu.
+      CHECK(D.dv_injection > 3000.0 && D.dv_injection < 4500.0,
+            "nav : l injection martienne depuis LEO coute 3-4,5 km/s");
+      // (b) L'ERREUR EST AMPLIFIEE, et le facteur est celui de la physique :
+      // v∞ δv∞ = v_p δv_p, donc le gain est v_p/v∞ — entre 3 et 4 pour Mars.
+      CHECK(D.oberth_gain > 2.5 && D.oberth_gain < 5.0,
+            "nav : l erreur au perigee est amplifiee par v_p/v_inf (effet Oberth)");
+      CHECK(D.sigma_vinf > D.sigma_dv_inj,
+            "nav : l erreur heliocentrique est PLUS GRANDE que l erreur du moteur");
+      // (c) SANS CORRECTION, ON RATE LA PLANETE. C'est le fait qui justifie tout
+      // le chapitre 8 du GDD : le manque au but se compte en millions de km.
+      CHECK(D.sigma_r_arr_km > 1.0e5,
+            "nav : sans correction, le manque au but depasse 100 000 km");
+      // (d) LA CORRECTION EST BIEN PLUS PETITE QUE L ERREUR QU ELLE ANNULE —
+      // c'est tout l'interet de corriger TOT, et ca sort du calcul, pas d'un
+      // reglage : corriger a J+14 sur un transit de 329 j coute quelques m/s.
+      CHECK(D.sigma_corr > 0.0 && D.sigma_corr < D.sigma_vinf,
+            "nav : corriger tot coute MOINS que l erreur d injection elle-meme");
+      CHECK(std::fabs(D.dv_corr_p99 - 3.3682 * D.sigma_corr) < 1e-6,
+            "nav : le 99e centile est celui de la loi de Maxwell");
+      CHECK(std::fabs(D.t_tcm_days - 14.0) < 1e-9,
+            "nav : la correction a lieu a TCM-1, valeur SOURCEE (MSL L+15 j)");
+
+      // (e) LA LOI DE MAXWELL EST UNE VRAIE LOI : croissante, bornee, et ses
+      // valeurs remarquables tombent juste.
+      CHECK(fen::mission::maxwell_cdf(0.0, 1.0) == 0.0, "nav : Maxwell(0) = 0");
+      CHECK(fen::mission::maxwell_cdf(1e6, 1.0) > 0.999999, "nav : Maxwell(inf) = 1");
+      CHECK(std::fabs(fen::mission::maxwell_cdf(3.3682, 1.0) - 0.99) < 1e-3,
+            "nav : le 99e centile de Maxwell vaut bien 3,3682 sigma");
+      bool croissante = true;
+      double p_prec = -1.0;
+      for (double x = 0.0; x <= 6.0; x += 0.25) {
+        const double p = fen::mission::maxwell_cdf(x, 1.0);
+        if (p < p_prec) croissante = false;
+        p_prec = p;
+      }
+      CHECK(croissante, "nav : P(succes) croit avec la marge provisionnee");
+
+      // (f) LA MARGE ACHETE VRAIMENT QUELQUE CHOSE — c'est le point du chantier.
+      // Un plan sans marge echoue en navigation ; un plan genereux passe. Avant,
+      // les deux valaient 0,985.
+      const fen::mission::NavDispersion D0 = fen::mission::nav_dispersion(T, v_terre, 0.0);
+      const fen::mission::NavDispersion D9 = fen::mission::nav_dispersion(T, v_terre, 500.0);
+      CHECK(D0.p_marge < 0.01, "nav : sans marge de correction, la navigation echoue");
+      CHECK(D9.p_marge > 0.99, "nav : une marge genereuse rend la navigation sure");
+      CHECK(D0.sigma_corr == D.sigma_corr && D9.sigma_corr == D.sigma_corr,
+            "nav : la marge ne change pas la physique, seulement la couverture");
+
+      // (g) UN MOTEUR PLUS PRECIS ACHETE DE LA PROBABILITE. Gates est le seul
+      // parametre de qualite d'execution : le diviser par deux doit se voir.
+      fen::nav::GatesParams fin;
+      fin.sigma_mag_prop = 0.001; fin.sigma_point_prop = 0.00075;
+      const fen::mission::NavDispersion Df = fen::mission::nav_dispersion(T, v_terre, MARGE, fin);
+      CHECK(Df.sigma_corr < D.sigma_corr && Df.p_marge > D.p_marge,
+            "nav : un moteur deux fois plus precis double la couverture de marge");
+
+      // (h) LE CORRIDOR CROIT AVEC LE TEMPS DE VOL, et il est NUL avant le
+      // depart : on ne disperse pas ce qui n'est pas encore parti.
+      const double c0 = fen::mission::corridor_3sigma_m(T, D, t_dep - 1.0);
+      const double c1 = fen::mission::corridor_3sigma_m(T, D, t_dep + 10.0);
+      const double c2 = fen::mission::corridor_3sigma_m(T, D, t_dep + 100.0);
+      CHECK(c0 == 0.0, "nav : avant l injection, aucun corridor");
+      CHECK(c1 > 0.0 && c2 > c1, "nav : le corridor CROIT tant que rien ne le retrecit");
+      const double c_mid = fen::mission::corridor_3sigma_m(
+          T, D, 0.5 * (t_dep + t_arr));
+      std::printf("     nav : corridor 3s a J+10 %.0f km, J+100 %.0f km, "
+                  "mi-croisiere %.0f km\n",
+                  c1 / 1000.0, c2 / 1000.0, c_mid / 1000.0);
+      // POURQUOI LE CORRIDOR SE LIT AU TERMINAL ET PAS SEULEMENT SUR LA CARTE
+      // [GDD 8.3] : rapporte a la distance Terre-Soleil, il vaut quelques
+      // millieme — donc quelques PIXELS au plan systeme. Ce qui n'est pas
+      // separable a l'ecran doit etre CHIFFRE ailleurs (meme doctrine que
+      // Novellus, piege n°41). L'oracle fixe l'ordre de grandeur pour que la
+      // regle ne se perde pas.
+      CHECK(c_mid / 1.495978707e11 < 0.05,
+            "nav : a mi-croisiere le corridor fait moins de 5 % d une UA — sous-pixel en vue systeme");
+
+      // (i) LE PLAN LE LIT : `p_physics` n'est plus une constante.
+      Session sp; sp.nouvelle_partie("Nav", ModeAide::Normal);
+      sp.tick(0.016);
+      auto& Gp = *sp.jeu.ares.etat;
+      // Une mission a fenetre synodique : c'est la seule dont la navigation se
+      // calcule (meme predicat que le modele, jamais une liste recopiee).
+      std::size_t ip = 0;
+      for (std::size_t i = 0; i < Gp.catalog.entries().size(); ++i)
+        if (fen::mission::window_target_for_family(
+                Gp.catalog.entries()[i].contract.family).impose) { ip = i; break; }
+      fen::mission::Mission mp;
+      mp.contract = Gp.catalog.entries()[ip].contract;
+      mp.state = MissionState::Design;
+      mp.state_entered_days = Gp.clock.now_days();
+      Gp.missions.push_back(mp);
+      sp.piloter_premiere_mission();
+      sp.mission_plan.program.dv_margin = 0.0;
+      sp.evaluer_plan();
+      const double p_sans = sp.mission_plan.p_physics;
+      sp.mission_plan.program.dv_margin = 400.0;
+      sp.evaluer_plan();
+      const double p_avec = sp.mission_plan.p_physics;
+      std::printf("     nav : P(navigation) sans marge %.3f, avec 400 m/s %.3f\n",
+                  p_sans, p_avec);
+      CHECK(p_avec > p_sans,
+            "nav : provisionner de la marge AUGMENTE le P(succes) du plan");
+      CHECK(p_sans != 0.985 && p_avec != 0.985,
+            "nav : p_physics n est plus la constante 0,985");
+
+      // (j) L'ERREUR EST RÉELLEMENT COMMISE, et elle est REJOUABLE. Jusqu'ici la
+      // dispersion etait statistique : on savait ce qui POUVAIT arriver, rien
+      // n'arrivait. `apply_gates` tire l'ecart sur un sous-flux dedie.
+      const fen::mission::NavRealisation R1 =
+          fen::mission::nav_realisation(T, D, 4242);
+      const fen::mission::NavRealisation R2 =
+          fen::mission::nav_realisation(T, D, 4242);
+      const fen::mission::NavRealisation R3 =
+          fen::mission::nav_realisation(T, D, 9999);
+      CHECK(R1.ok, "nav : l injection s execute pour de bon");
+      CHECK(R1.dv_inj_erreur == R2.dv_inj_erreur &&
+            R1.dv_correction == R2.dv_correction,
+            "nav : la meme graine rejoue le MEME vol");
+      CHECK(R1.dv_correction != R3.dv_correction,
+            "nav : une autre mission tire un autre ecart");
+      std::printf("     nav : erreur commise %.2f m/s -> manque au but %.0f km "
+                  "-> correction %.1f m/s\n",
+                  R1.dv_inj_erreur, R1.miss_arr_km, R1.dv_correction);
+      // L'ecart tire doit VIVRE dans la loi qui le decrit : quelques sigmas au
+      // plus, jamais dix. C'est l'oracle qui attraperait un sous-flux mal cable.
+      CHECK(R1.dv_inj_erreur > 0.0 && R1.dv_inj_erreur < 6.0 * D.sigma_dv_inj,
+            "nav : l ecart commis tient dans la loi qui le decrit");
+      CHECK(R1.miss_arr_km > 1000.0,
+            "nav : un ecart de quelques m/s se paie en milliers de km au but");
+      // ... et la correction reelle est du meme ordre que sa statistique : c'est
+      // le controle croise entre la loi et son tirage.
+      CHECK(R1.dv_correction < 6.0 * D.sigma_corr,
+            "nav : la correction requise tient dans la dispersion calculee");
+
+      // (k) L'ISSUE DE NAVIGATION EST UN FAIT, PLUS UN DE. Deux plans
+      // identiques, marges differentes : celui qui a sous-provisionne echoue, et
+      // pour un motif NOMME — le meme vol, deux issues, sans aucun alea.
+      fen::mission::Mission mv2;
+      mv2.contract.id = "T-NAV";
+      mv2.contract.family = "mars_habite";
+      mv2.state = MissionState::Launched;
+      mv2.nav_evaluee = true;
+      mv2.nav_dv_required = 120.0;
+      fen::mission::MissionPlan pl;
+      pl.assessment.p_success = 0.95; pl.assessment.p_physics = 0.985;
+      pl.assessment.p_launcher = 0.98; pl.assessment.p_engine = 0.99;
+      pl.program.dv_margin = 50.0;              // insuffisante
+      const auto o_court = fen::mission::fly_mission(mv2, pl, 7);
+      CHECK(!o_court.success, "nav : une marge trop courte fait ECHOUER le vol");
+      CHECK(o_court.cause.find("navigation") != std::string::npos,
+            "nav : et le motif d echec NOMME la navigation");
+      CHECK(o_court.anomaly.modifiers.player_error_causal,
+            "nav : sous-provisionner est une cause racine du joueur [GDD 10.3]");
+      pl.program.dv_margin = 200.0;             // suffisante
+      const auto o_large = fen::mission::fly_mission(mv2, pl, 7);
+      CHECK(o_large.success || o_large.cause.find("navigation") == std::string::npos,
+            "nav : marge suffisante, la navigation n est plus le probleme");
+      // Le RISQUE N EST PAS COMPTE DEUX FOIS : navigation resolue, son facteur
+      // sort du tirage.
+      fen::mission::Mission mv3 = mv2;
+      mv3.nav_evaluee = false;
+      int n_ok_avec = 0, n_ok_sans = 0;
+      for (std::uint64_t s = 0; s < 400; ++s) {
+        if (fen::mission::fly_mission(mv2, pl, s).success) ++n_ok_avec;
+        if (fen::mission::fly_mission(mv3, pl, s).success) ++n_ok_sans;
+      }
+      CHECK(n_ok_avec > n_ok_sans,
+            "nav : une navigation RESOLUE ne pese plus dans le tirage");
+
+      // (l) LE FAIT SE SAUVEGARDE : un vol rechargé garde l'erreur qu'il a faite.
+      Session sn; sn.nouvelle_partie("NavSave", ModeAide::Normal);
+      sn.tick(0.016);
+      auto& Gn = *sn.jeu.ares.etat;
+      fen::mission::Mission mn;
+      mn.contract = Gn.catalog.entries()[ip].contract;
+      mn.state = MissionState::Launched;
+      mn.state_entered_days = Gn.clock.now_days();
+      mn.tof_days = 300.0;
+      mn.nav_evaluee = true;
+      mn.nav_dv_required = 87.5;
+      mn.nav_miss_km = 1234567.0;
+      Gn.missions.push_back(mn);
+      const std::string chemin_n = tmp + "/oracle_nav.sav";
+      sn.chemin_sauvegarde = chemin_n;
+      sn.sauvegarder_partie();
+      Session sn2;
+      CHECK(sn2.charger_partie(chemin_n), "nav : la partie se recharge");
+      auto& Gn2 = *sn2.jeu.ares.etat;
+      CHECK(Gn2.missions.size() == 1 && Gn2.missions[0].nav_evaluee &&
+            std::fabs(Gn2.missions[0].nav_dv_required - 87.5) < 1e-9 &&
+            std::fabs(Gn2.missions[0].nav_miss_km - 1234567.0) < 1e-6,
+            "nav : l erreur commise survit a la sauvegarde — on ne la retire pas");
+
+      // ---- 17. LA POURSUITE [GDD 7.5, 8.6] ------------------------------
+      // « Sans poursuite, le joueur ne SAIT PAS que son erreur d'execution a eu
+      // lieu » (en-tete de nav/Tracking.hpp). On verifie que cette phrase est
+      // devenue VRAIE : sans mesures il croit son vol nominal, et chaque jour
+      // d'arc achete rapproche son estime de la verite.
+      const double t_dep_tdb = now_tdb + (t_dep - now_days) * cst::DAY;
+      const auto sol = [&](double jours) {
+        return fen::mission::nav_solution(T, D, R1, jours, t_dep_tdb, tv.jeu.eph, 4242);
+      };
+      const fen::mission::NavSolution S0 = sol(0.0);
+      const fen::mission::NavSolution S3 = sol(3.0);
+      const fen::mission::NavSolution S14 = sol(14.0);
+      std::printf("     poursuite : 0 j -> %d mesures, sigma_v %.3f m/s, erreur estime %.3f m/s\n"
+                  "                 3 j -> %d mesures, sigma_v %.3f m/s, erreur estime %.3f m/s\n"
+                  "                14 j -> %d mesures, sigma_v %.3f m/s, erreur estime %.3f m/s\n"
+                  "                (erreur VRAIE a estimer : %.3f m/s)\n",
+                  S0.n_mesures, S0.sigma_v, S0.erreur_estime,
+                  S3.n_mesures, S3.sigma_v, S3.erreur_estime,
+                  S14.n_mesures, S14.sigma_v, S14.erreur_estime, S14.dv_vrai);
+
+      CHECK(S0.ok && S14.ok, "poursuite : la solution se calcule");
+      // (a) SANS POURSUITE, IL CROIT SON VOL NOMINAL — l'estime ne bouge pas de
+      // l'a priori, et l'incertitude vaut la dispersion d'injection.
+      CHECK(S0.n_mesures == 0, "poursuite : sans arc achete, aucune mesure");
+      CHECK(fen::norm(S0.dv_estime) < 1e-9,
+            "poursuite : sans mesure, l ecart estime est NUL — il croit son vol nominal");
+      CHECK(std::fabs(S0.sigma_v - D.sigma_vinf) / D.sigma_vinf < 0.05,
+            "poursuite : sans mesure, l incertitude EST la dispersion d injection");
+      // (b) ACHETER DE LA POURSUITE ACHETE DE LA CONNAISSANCE. C'est le point :
+      // `Program::tracking_days` etait facture depuis toujours sans rien faire.
+      CHECK(S14.n_mesures > S3.n_mesures && S3.n_mesures > 0,
+            "poursuite : un arc plus long fournit plus de mesures");
+      CHECK(S14.sigma_v < S3.sigma_v && S3.sigma_v < S0.sigma_v,
+            "poursuite : l incertitude DECROIT avec l arc achete");
+      CHECK(S14.erreur_estime < S0.erreur_estime,
+            "poursuite : l estime se rapproche de la VERITE quand on mesure");
+      // (c) L ESTIME EST COHERENT AVEC SA PROPRE COVARIANCE : l'erreur restante
+      // doit tenir dans quelques sigmas. Un filtre qui se croit plus precis
+      // qu'il ne l'est serait pire qu'un filtre imprecis.
+      CHECK(S14.erreur_estime < 5.0 * S14.sigma_v,
+            "poursuite : l erreur restante tient dans l incertitude annoncee");
+      // (d) LA VERITE N ENTRE QUE PAR LES MESURES : deux graines de bruit
+      // differentes donnent deux solutions differentes, mais toutes deux
+      // proches de la meme verite.
+      const fen::mission::NavSolution Sb = fen::mission::nav_solution(
+          T, D, R1, 14.0, t_dep_tdb, tv.jeu.eph, 777);
+      CHECK(fen::norm(Sb.dv_estime - S14.dv_estime) > 0.0,
+            "poursuite : un autre bruit de mesure donne une autre solution");
+      CHECK(Sb.erreur_estime < S0.erreur_estime,
+            "poursuite : ... mais elle vise la meme verite");
+      // (e) LA SOLUTION EST REJOUABLE : meme graine, meme resultat.
+      const fen::mission::NavSolution Sc = sol(14.0);
+      CHECK(fen::norm(Sc.dv_estime - S14.dv_estime) == 0.0,
+            "poursuite : meme graine, meme solution de navigation");
+
+      // ---- 18. LA CAMPAGNE DE CORRECTION [GDD 8.4] ---------------------
+      // LE POINT DE TOUT CE QUI PRECEDE : on corrige sur ce qu'on CROIT, pas sur
+      // ce qui EST. C'est ici que l'achat de poursuite devient DECISIF.
+      const auto camp = [&](const fen::mission::NavSolution& S) {
+        return fen::mission::nav_campagne(T, D, R1, S, 4242);
+      };
+      const fen::mission::NavCampagne C0 = camp(S0);    // aveugle
+      const fen::mission::NavCampagne C14 = camp(S14);  // 14 j de poursuite
+      std::printf("     campagne : sans poursuite -> TCM1 %.1f + TCM2 %.1f = %.1f m/s, "
+                  "manque final %.0f km\n"
+                  "                avec 14 j     -> TCM1 %.1f + TCM2 %.1f = %.1f m/s, "
+                  "manque final %.0f km\n",
+                  C0.dv_tcm1, C0.dv_tcm2, C0.dv_total, C0.miss_final_km,
+                  C14.dv_tcm1, C14.dv_tcm2, C14.dv_total, C14.miss_final_km);
+      CHECK(C0.ok && C14.ok, "campagne : les deux campagnes se calculent");
+      // (a) LA POURSUITE EST DECISIVE — c'est la phrase de nav/Tracking.hpp
+      // devenue vraie : sans mesures, la correction est calculee sur un etat
+      // faux, donc elle rate.
+      CHECK(C14.miss_final_km < C0.miss_final_km,
+            "campagne : poursuivre AMELIORE le manque au but final");
+      CHECK(C14.miss_final_km < 0.05 * C0.miss_final_km,
+            "campagne : ... et l ameliore d au moins un ordre de grandeur");
+      // (b) CORRIGER COUTE : le Δv depense est du meme ordre que la statistique
+      // qui l'avait annonce (dv_corr_p99), jamais gratuit ni delirant.
+      CHECK(C14.dv_total > 0.0 && C14.dv_total < 3.0 * D.dv_corr_p99,
+            "campagne : le Δv depense tient dans la marge que le bureau d etudes a chiffree");
+      // (c) LA SECONDE MANŒUVRE RATTRAPE LA PREMIERE : elle est bien plus
+      // petite, et c'est pour cela qu'une campagne reelle en enchaine plusieurs.
+      CHECK(C14.dv_tcm2 < C14.dv_tcm1,
+            "campagne : TCM-2 ne rattrape que le residu de TCM-1");
+      // (d) REJOUABLE, comme tout le reste de la chaine.
+      CHECK(camp(S14).dv_total == C14.dv_total,
+            "campagne : meme graine, meme campagne");
+
+      // ---- 19. LA MANŒUVRE EST UN ACTE DU JOUEUR [GDD 7.4, 2.2] --------
+      // Tout ce qui precede calculait la correction A SA PLACE. Ici il commande
+      // trois composantes en repere RSW, et le modele applique LITTERALEMENT ce
+      // qu'il demande — Gates compris, aucun rattrapage silencieux.
+      {
+        const auto Kcible = fen::astro::kepler_propagate(
+            T.r_dep, T.v_dep, (t_arr - t_dep) * cst::DAY, cst::MU_SUN);
+        const fen::Vec3 cible = Kcible.r;
+        const double t_tcm = t_dep + fen::mission::TCM1_APRES_INJECTION_J;
+
+        // L'etat VRAI du vol, avance jusqu'a la date de correction.
+        auto etat_a_tcm = [&]() {
+          fen::mission::EtatVol e;
+          e.valide = true; e.t_days = t_dep; e.r = T.r_dep; e.v = R1.v_dep_vraie;
+          fen::mission::avancer_etat_vol(e, t_tcm);
+          return e;
+        };
+
+        // (a) CE QU IL VOIT DEPEND DE CE QU IL A ACHETE. Sans poursuite, son
+        // estime EST le nominal : le manque au but projete est NUL et il croit
+        // tout aller bien. C'est la phrase de nav/Tracking.hpp, vue de l'ecran.
+        const auto vue_aveugle = fen::mission::vue_navigation(
+            T.r_dep, T.v_dep, S0.dv_estime, cible, t_dep, t_tcm, t_arr,
+            S0.sigma_r, S0.sigma_v);
+        const auto vue_poursuivie = fen::mission::vue_navigation(
+            T.r_dep, T.v_dep, S14.dv_estime, cible, t_dep, t_tcm, t_arr,
+            S14.sigma_r, S14.sigma_v);
+        CHECK(vue_aveugle.ok && vue_poursuivie.ok, "manoeuvre : la vue se calcule");
+        CHECK(vue_aveugle.manque_km < 1.0,
+              "manoeuvre : SANS poursuite, le joueur ne voit AUCUN ecart a corriger");
+        CHECK(vue_poursuivie.manque_km > 1.0e5,
+              "manoeuvre : AVEC poursuite, il voit un manque au but de centaines de milliers de km");
+
+        // (b) LE SOLVEUR EST UNE ASSISTANCE DE MODE, pas une automatisation : il
+        // repond a la question posee, il ne decide ni du moment ni du geste.
+        fen::Vec3 dv_rsw{};
+        CHECK(fen::mission::solveur_correction(vue_poursuivie, dv_rsw),
+              "manoeuvre : le solveur rend un Δv en repere RSW");
+        const double dv_solveur = fen::norm(dv_rsw);
+        std::printf("     manoeuvre : solveur -> R %.2f  S %.2f  W %.2f  (|dv| %.1f m/s)\n",
+                    dv_rsw.x, dv_rsw.y, dv_rsw.z, dv_solveur);
+        CHECK(dv_solveur > 1.0 && dv_solveur < 500.0,
+              "manoeuvre : le Δv propose est du bon ordre de grandeur");
+
+        // (c) EXECUTER LE Δv DU SOLVEUR AMENE AU BUT. C'est le bouclage complet :
+        // mesurer -> calculer -> executer -> verifier [GDD 8.4].
+        fen::mission::EtatVol e_bon = etat_a_tcm();
+        const double manque_avant = fen::mission::manque_reel_km(e_bon, cible, t_arr);
+        const auto r_bon = fen::mission::executer_correction(e_bon, vue_poursuivie, dv_rsw, 11);
+        const double manque_apres = fen::mission::manque_reel_km(e_bon, cible, t_arr);
+        std::printf("     manoeuvre : manque au but %.0f km -> %.0f km apres correction "
+                    "(%.1f m/s depenses)\n",
+                    manque_avant, manque_apres, r_bon.dv_depense);
+        CHECK(r_bon.ok && r_bon.dv_depense > 0.0, "manoeuvre : le Δv est reellement depense");
+        CHECK(manque_apres < 0.01 * manque_avant,
+              "manoeuvre : une correction JUSTE divise le manque au but par cent");
+
+        // (d) NE RIEN FAIRE EST UN CHOIX, ET IL COUTE. Le modele ne corrige
+        // jamais en douce a la place du joueur.
+        fen::mission::EtatVol e_rien = etat_a_tcm();
+        const auto r_rien = fen::mission::executer_correction(e_rien, vue_poursuivie, {}, 11);
+        CHECK(r_rien.ok && r_rien.dv_depense == 0.0, "manoeuvre : ne rien commander ne coute rien");
+        CHECK(std::fabs(fen::mission::manque_reel_km(e_rien, cible, t_arr) - manque_avant) < 1.0,
+              "manoeuvre : ... et ne corrige rien — le vol continue tel quel");
+
+        // (e) UN Δv MAL ORIENTE EMPIRE LA TRAJECTOIRE. Le modele applique ce
+        // qu'on lui donne : c'est la sanction du calcul faux [GDD 7.4].
+        fen::mission::EtatVol e_faux = etat_a_tcm();
+        fen::mission::executer_correction(e_faux, vue_poursuivie,
+                                          {dv_rsw.x, -dv_rsw.y, dv_rsw.z}, 11);
+        CHECK(fen::mission::manque_reel_km(e_faux, cible, t_arr) > manque_avant,
+              "manoeuvre : un Δv mal oriente AGGRAVE le manque au but");
+
+        // (f) CORRIGER SUR UN ETAT FAUX NE CORRIGE RIEN — le coeur du chapitre 8.
+        // Le joueur aveugle ne voit aucun ecart, son solveur lui rend donc un Δv
+        // quasi nul : il ne depense rien et rate tout.
+        fen::Vec3 dv_aveugle{};
+        fen::mission::solveur_correction(vue_aveugle, dv_aveugle);
+        fen::mission::EtatVol e_aveugle = etat_a_tcm();
+        fen::mission::executer_correction(e_aveugle, vue_aveugle, dv_aveugle, 11);
+        CHECK(fen::mission::manque_reel_km(e_aveugle, cible, t_arr) > 0.5 * manque_avant,
+              "manoeuvre : sans poursuite, corriger ne sert a rien [nav/Tracking.hpp]");
+
+        // (g) LA CHRONOLOGIE DATE LES CORRECTIONS, donc le plafond de cadence
+        // les IMPOSE : le joueur SERA la au moment d'agir [GDD 14.3].
+        fen::mission::Mission mtcm = mt;
+        const auto tl = fen::mission::build_flight_timeline(mtcm);
+        int n_crit = 0;
+        for (int i = 0; i < tl.n; ++i)
+          if (tl.seg[i].phase == fen::mission::FlightPhase::CriticalManeuver) ++n_crit;
+        CHECK(n_crit == 4,
+              "manoeuvre : la chronologie date injection + DEUX corrections + insertion");
+        const double t_tcm_abs = mtcm.state_entered_days +
+            (tl.seg[0].t1_days + 0.0);   // repere : apres l'ascension
+        (void)t_tcm_abs;
+        CHECK(fen::mission::flight_phase_of(mtcm, t_dep + fen::mission::TCM1_APRES_INJECTION_J
+                                            + 0.003) ==
+              fen::mission::FlightPhase::CriticalManeuver,
+              "manoeuvre : a la date de TCM-1, la phase est CRITIQUE");
+        CHECK(fen::mission::tempo_limit(
+                  std::vector<fen::mission::Mission>{mtcm},
+                  t_dep + fen::mission::TCM1_APRES_INJECTION_J + 0.003).max_rate ==
+              game::TimeRate::Realtime,
+              "manoeuvre : ... et le monde retombe au TEMPS REEL pour qu il agisse");
+
+        // ---- 20. LE GRAPHE DE NŒUDS [GDD 2.2, 15.1] -------------------
+        // Le joueur ne COMMANDE plus seulement son Δv : il le CALCULE, en
+        // assemblant des primitives typees qui SONT les fonctions de l'API.
+        using fen::mission::TypeNoeud;
+        const auto G = fen::mission::graphe_correction_reference();
+        const auto r_graphe = fen::mission::evaluer_graphe(G, vue_poursuivie);
+        CHECK(r_graphe.valide && r_graphe.evalue, "graphe : le graphe de reference s evalue");
+        std::printf("     graphe : %zu noeuds -> R %.2f  S %.2f  W %.2f\n",
+                    G.size(), r_graphe.dv_rsw.x, r_graphe.dv_rsw.y, r_graphe.dv_rsw.z);
+        // (a) L EQUIVALENCE EST STRICTE [GDD 2.2] : le graphe assemble a la main
+        // rend EXACTEMENT ce que le solveur du mode Normal rend. Si les deux
+        // divergeaient, l'un des deux mentirait sur ce que fait l'autre.
+        CHECK(fen::norm(r_graphe.dv_rsw - dv_rsw) < 1e-6,
+              "graphe : le graphe assemble rend le MEME Dv que le solveur");
+        // (b) LE TYPAGE REFUSE, ET IL DIT POURQUOI — c'est l'assistance que le
+        // mode Normal accorde, l'exact equivalent du compilateur en mode Pro.
+        const auto faux = fen::mission::evaluer_graphe(
+            {TypeNoeud::SolutionNav, TypeNoeud::EcartCible, TypeNoeud::Propager,
+             TypeNoeud::Commande}, vue_poursuivie);
+        CHECK(!faux.valide, "graphe : un branchement mal type est REFUSE");
+        CHECK(faux.noeud_fautif == 2 && faux.motif.find("DUREE") != std::string::npos,
+              "graphe : ... et le refus NOMME le noeud et le type attendu");
+        std::printf("     graphe : refus type -> noeud %d : %s\n",
+                    faux.noeud_fautif, faux.motif.c_str());
+        // (c) UN NŒUD EXIGE CE DONT IL A BESOIN : resoudre sans transition, ou
+        // propager sans etat, sont des fautes de raisonnement, pas des plantages.
+        const auto sans_stm = fen::mission::evaluer_graphe(
+            {TypeNoeud::SolutionNav, TypeNoeud::EcartCible, TypeNoeud::ResoudreDv,
+             TypeNoeud::VersRsw, TypeNoeud::Commande}, vue_poursuivie);
+        CHECK(!sans_stm.valide && sans_stm.motif.find("TRANSITION") != std::string::npos,
+              "graphe : resoudre sans TRANSITION est refuse, et le motif l explique");
+        const auto sans_etat = fen::mission::evaluer_graphe(
+            {TypeNoeud::TempsRestant, TypeNoeud::Propager, TypeNoeud::Commande},
+            vue_poursuivie);
+        CHECK(!sans_etat.valide && sans_etat.motif.find("ETAT") != std::string::npos,
+              "graphe : propager sans ETAT en amont est refuse");
+        // (d) LE GRAPHE DOIT ABOUTIR A UNE COMMANDE : un raisonnement qui ne
+        // commande rien n'est pas une manoeuvre.
+        const auto sans_fin = fen::mission::evaluer_graphe(
+            {TypeNoeud::SolutionNav, TypeNoeud::TempsRestant}, vue_poursuivie);
+        CHECK(!sans_fin.valide && sans_fin.motif.find("COMMANDE") != std::string::npos,
+              "graphe : un graphe qui ne commande rien est refuse");
+        // (e) CHAQUE NŒUD EST UNE FONCTION D API, et le declare — c'est ce qui
+        // rend l'equivalence Normal/Pro verifiable et non promise.
+        bool tous_nommes = true;
+        for (const auto& d : fen::mission::noeuds_disponibles())
+          if (!d.nom || !d.appel || d.appel[0] == '\0') tous_nommes = false;
+        CHECK(tous_nommes, "graphe : chaque noeud NOMME la fonction d API qu il est");
+        // (f) EXECUTER CE QUE LE GRAPHE COMMANDE FAIT LE MEME VOL que le solveur.
+        fen::mission::EtatVol e_graphe = etat_a_tcm();
+        fen::mission::executer_correction(e_graphe, vue_poursuivie, r_graphe.dv_rsw, 11);
+        CHECK(std::fabs(fen::mission::manque_reel_km(e_graphe, cible, t_arr) - manque_apres) < 1.0,
+              "graphe : le vol obtenu est celui du calcul assemble, au metre pres");
+
+        // ---- 21. LE LOGICIEL DE VOL DU MODE PRO [GDD 15.1, 15.5, 18] ---
+        // En PRO il n'y a plus de graphe : le joueur ECRIT le code qui decidera
+        // a sa place. Ce bloc prouve le CABLAGE COMPLET — ce qu'aucune capture
+        // ne peut montrer : la chaine compiler -> banc -> televerser -> executer,
+        // et le fait que le Dv rendu par SON code fait vraiment voler le vaisseau.
+        {
+          // On pose l'etat de vol sur la session, comme `tirer_navigation` le
+          // fait au feu vert, puis on avance l'horloge jusqu'a TCM-1.
+          fen::mission::Mission mv = mt;
+          mv.vol_vrai_valide = true;
+          mv.vol_vrai_t_days = t_dep;
+          for (int k = 0; k < 3; ++k) {
+            mv.vol_vrai_r[k] = T.r_dep[k];
+            mv.vol_vrai_v[k] = R1.v_dep_vraie[k];
+            mv.nav_connu_dv[k] = S14.dv_estime[k];
+          }
+          mv.nav_sigma_r = S14.sigma_r;
+          mv.nav_sigma_v = S14.sigma_v;
+          tv.trace_vol = T;
+          tv.mission_plan.program.dv_margin = 600.0;   // mission bien provisionnee
+          // ON AVANCE PAR LE CALENDRIER DE L'AGENCE, pas en forcant l'horloge :
+          // `agence.mois` est autoritaire et `ares.avancer` en DERIVE l'horloge
+          // de mission (app/ares.hpp). Poser `clock` a la main marcherait une
+          // frame, puis la synchronisation l'effacerait — et l'oracle aurait
+          // teste un etat que le jeu n'atteint jamais.
+          tv.jeu.avancer_temps(t_tcm - Gt.clock.now_days());
+          tv.tick(0.016);
+          CHECK(std::fabs(Gt.clock.now_days() - t_tcm) < 0.5,
+                "code de vol : le monde est bien a la date de la correction");
+
+          const fen::mission::VueNavigation VS = tv.vue_vol(mv);
+          CHECK(VS.ok, "code de vol : la session rend la vue de navigation du moment");
+          CHECK(std::fabs(VS.manque_km - vue_poursuivie.manque_km) < 1.0,
+                "code de vol : ... et c est bien celle que le joueur lit a l ecran");
+
+          // (a) CE QUE LE CODE RECOIT : rien de plus que ce que le joueur voit.
+          const fen::code::EntreesVol E = tv.entrees_vol(mv);
+          CHECK(E.sigma3_m == 3.0 * S14.sigma_r,
+                "code de vol : le code recoit l incertitude 3s de la SOLUTION, jamais la verite");
+          CHECK(std::fabs(E.tau_s - (t_arr - Gt.clock.now_days()) * cst::DAY) < 1.0,
+                "code de vol : l horizon de manoeuvre est le temps qui RESTE");
+          CHECK(fen::norm((E.pos - E.cible) - VS.manque_projete) < 1.0,
+                "code de vol : la cible ramenee a maintenant rend l ecart projete exact");
+          CHECK(E.tolerance_m == fen::mission::ARRIVEE_TOLERANCE_KM * 1000.0,
+                "code de vol : la tolerance est CELLE de la boucle de mission, pas une copie");
+          std::printf("     code de vol : 3s = %.0f km, horizon %.0f j, ecart projete %.0f km\n",
+                      E.sigma3_m / 1000.0, E.tau_s / cst::DAY, VS.manque_km);
+
+          // (b) L ORDRE DES ETAPES EST TENU [GDD 15.5] : on ne qualifie pas un
+          // texte qui n'a pas compile, on ne televerse pas un texte non qualifie,
+          // et rien ne s'execute a bord qui n'y soit monte.
+          CHECK(!tv.banc_essai_vol(mv), "code de vol : pas de banc avant compilation [15.5]");
+          CHECK(!tv.televerser_vol(), "code de vol : pas de televersement sans qualification");
+          CHECK(!tv.executer_code_vol(mv), "code de vol : rien ne s execute qui ne soit a bord");
+
+          // LES CHEMINS SONT FOURNIS, jamais devines : c'est la couche
+          // plateforme qui sait ou vit le projet (ici, l'argument de l'oracle ;
+          // dans le jeu, `FPaths` cote UEBridge).
+          {
+            const std::string racine = argc > 1 ? argv[1] : ".";
+            const std::string tmpc =
+                (std::filesystem::temp_directory_path() / "sp_session_code").string();
+            std::error_code ec2;
+            std::filesystem::create_directories(tmpc, ec2);
+            tv.toolchain.dossier_travail = tmpc;
+            tv.toolchain.includes = {racine + "/Source/SP/SpaceProgram/astro_core/include",
+                                     racine + "/Source/SP/SpaceProgram/mission/include",
+                                     racine + "/Source/SP/SpaceProgram"};
+            tv.toolchain.sources = {racine +
+                "/Source/SP/SpaceProgram/astro_core/src/Kepler.cpp"};
+            tv.toolchain.vcvars = "C:\\Program Files\\Microsoft Visual Studio\\2022"
+                                  "\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat";
+          }
+
+          // (c) LA COMPILATION. Sans compilateur sur la machine, la chaine le DIT
+          // au lieu de faire passer le code du joueur pour faux (piege n°69).
+          const bool bChaine = tv.compiler_vol(&mv);
+          if (tv.resultat_vol.issue == fen::code::IssueCode::Indisponible) {
+            std::printf("     code de vol : compilateur absent — reste des oracles ignores\n");
+          } else {
+            CHECK(bChaine && tv.resultat_vol.ok(),
+                  "code de vol : le squelette de [GDD 15.3] compile et s execute");
+            CHECK(tv.source_vol_compilee(), "code de vol : ce TEXTE-ci est celui qui a compile");
+
+            // (d) LE BANC COUTE, ET SA FICHE APPARTIENT AU TEXTE. Editer une
+            // ligne apres coup PERIME la qualification : sinon la fiche
+            // porterait sur un code que personne n'a jamais exerce.
+            const double tresor_avant = Gt.finance.treasury_me;
+            const double date_avant = Gt.clock.now_days();
+            tv.banc_heures = 400.0;
+            CHECK(tv.banc_essai_vol(mv), "code de vol : le banc qualifie un code compile");
+            CHECK(tv.cert_vol.certified && tv.source_vol_certifiee(),
+                  "code de vol : ... et rend une fiche VALIDE pour ce texte");
+            CHECK(Gt.finance.treasury_me < tresor_avant,
+                  "code de vol : le banc CONSOMME du budget [15.5]");
+            tv.tick(0.016);   // la meme synchronisation qu'une frame de jeu
+            CHECK(Gt.clock.now_days() > date_avant,
+                  "code de vol : ... et RETARDE la fenetre");
+            CHECK(tv.cert_vol.coverage > 0.0 && tv.cert_vol.coverage < 1.0,
+                  "code de vol : le banc rassure sans garantir");
+            std::printf("     code de vol : banc %.0f h -> couverture %.0f %%, %.1f M EUR, +%.1f j\n",
+                        tv.banc_heures, tv.cert_vol.coverage * 100.0,
+                        tv.cert_vol.budget_spent_me,
+                        fen::code::bench_delay_days(tv.cert_vol));
+
+            const std::string garde = tv.source_vol;
+            tv.source_vol += "\n// une ligne de plus\n";
+            CHECK(!tv.source_vol_certifiee(),
+                  "code de vol : editer une ligne PERIME la fiche de qualification");
+            CHECK(!tv.televerser_vol(), "code de vol : ... et interdit le televersement");
+            tv.source_vol = garde;
+            CHECK(tv.source_vol_certifiee(), "code de vol : le texte qualifie redevient valide tel quel");
+
+            // (e) TELEVERSER, puis LAISSER LE CODE DECIDER. C'est [GDD 9.6] :
+            // « le joueur n'est pas aux commandes, il a ecrit a l'avance la
+            // logique qui decidera a sa place. »
+            CHECK(tv.televerser_vol(), "code de vol : un code qualifie monte a bord");
+            CHECK(tv.source_vol_a_bord(), "code de vol : ... et c est bien CE texte qui y est");
+            CHECK(tv.executer_code_vol(mv), "code de vol : le logiciel embarque s execute en vol");
+
+            const fen::code::DecisionsVol& Dec = tv.resultat_vol.decisions;
+            const fen::code::EntreesVol E2 = tv.entrees_vol(mv);
+            const double dv_cmd = std::sqrt(tv.tcm_commande[0] * tv.tcm_commande[0] +
+                                            tv.tcm_commande[1] * tv.tcm_commande[1] +
+                                            tv.tcm_commande[2] * tv.tcm_commande[2]);
+            std::printf("     code de vol : decision = %s, |Dv| = %.2f m/s "
+                        "(R %.1f  S %.1f  W %.1f)\n",
+                        Dec.execute ? "EXECUTER" : "ne rien executer", dv_cmd,
+                        tv.tcm_commande[0], tv.tcm_commande[1], tv.tcm_commande[2]);
+
+            // LE GARDE-FOU DU JOUEUR GOUVERNE VRAIMENT. Le squelette refuse
+            // d'agir au-dela de 12 km d'incertitude 3s : sa decision doit suivre
+            // SA regle, pas une regle du moteur.
+            if (E2.sigma3_m > 12000.0) {
+              CHECK(!Dec.execute && Dec.replan_s > 0.0,
+                    "code de vol : sur solution degradee, SON garde-fou reporte la manoeuvre");
+              CHECK(!Dec.alertes.empty(), "code de vol : ... et il alerte");
+            } else {
+              CHECK(Dec.execute && dv_cmd > 0.0,
+                    "code de vol : sur solution saine, SON code commande une correction");
+              // (f) ET CE Dv FAIT VOLER LE VAISSEAU. Le bouclage complet du
+              // mode Pro : son C++ -> un processus -> un Dv en RSW -> l'etat
+              // VRAI du vol, erreur de Gates comprise.
+              fen::mission::EtatVol e_code;
+              e_code.valide = true; e_code.t_days = mv.vol_vrai_t_days;
+              e_code.r = {mv.vol_vrai_r[0], mv.vol_vrai_r[1], mv.vol_vrai_r[2]};
+              e_code.v = {mv.vol_vrai_v[0], mv.vol_vrai_v[1], mv.vol_vrai_v[2]};
+              fen::mission::avancer_etat_vol(e_code, Gt.clock.now_days());
+              const double avant = fen::mission::manque_reel_km(e_code, cible, t_arr);
+              const double depense = tv.executer_tcm(
+                  mv, fen::Vec3{tv.tcm_commande[0], tv.tcm_commande[1], tv.tcm_commande[2]});
+              const double apres = mv.nav_miss_km;
+              std::printf("     code de vol : manque %.0f km -> %.0f km "
+                          "(%.1f m/s reellement depenses)\n", avant, apres, depense);
+              CHECK(depense > 0.0, "code de vol : la manoeuvre de SON code est reellement depensee");
+              CHECK(apres < 0.01 * avant,
+                    "code de vol : le Dv calcule par SON code divise le manque au but par cent");
+              CHECK(mv.tcm_faits == 1 && mv.tcm_dv_depense > 0.0,
+                    "code de vol : ... et la mission garde trace de la correction");
+              // L EQUIVALENCE DES DEUX MODES [GDD 2.2] : le code du mode PRO et
+              // le graphe du mode NORMAL resolvent le MEME probleme. Ils ne
+              // rendent pas le meme chiffre — le banc a fait passer huit jours,
+              // et la correction se calcule depuis l'endroit ou l'on est — mais
+              // ils sont du meme ordre. Si l'un valait le double de l'autre,
+              // l'un des deux mentirait sur ce que fait l'autre.
+              CHECK(depense > 0.5 * dv_solveur && depense < 2.0 * dv_solveur,
+                    "code de vol : PRO et NORMAL commandent la meme manoeuvre, au meme ordre");
+            }
+
+            // (f bis) LE GARDE-FOU DU JOUEUR DECIDE, SUR LE MEME CODE. On rejoue
+            // le logiciel televerse sur une solution DEGRADEE : il doit refuser
+            // d'agir et replanifier, parce que SA regle le dit — pas parce que le
+            // moteur l'en empeche. C'est [GDD 9.6] : la logique qu'il a ecrite
+            // decide a sa place, y compris quand elle decide de ne rien faire.
+            {
+              fen::mission::Mission m_degrade = mv;
+              m_degrade.nav_sigma_r = 20000.0;      // 3s = 60 km >> 12 km
+              CHECK(tv.executer_code_vol(m_degrade),
+                    "code de vol : le meme logiciel se rejoue sur une solution degradee");
+              const fen::code::DecisionsVol& Dg = tv.resultat_vol.decisions;
+              CHECK(!Dg.execute,
+                    "code de vol : sur solution degradee, SON garde-fou refuse d agir");
+              CHECK(Dg.replan_s == 48.0 * 3600.0,
+                    "code de vol : ... il replanifie a 48 h, la valeur de SON code");
+              CHECK(!Dg.alertes.empty(), "code de vol : ... et il alerte");
+              CHECK(tv.tcm_commande[0] == 0.0 && tv.tcm_commande[1] == 0.0 &&
+                    tv.tcm_commande[2] == 0.0,
+                    "code de vol : ne rien executer EST une decision, et elle vide la commande");
+              std::printf("     code de vol : solution degradee -> \"%s\", replan %.0f h\n",
+                          Dg.alertes.empty() ? "-" : Dg.alertes[0].c_str(),
+                          Dg.replan_s / 3600.0);
+            }
+
+            // (g) LE DOMAINE DE VALIDITE MORD [GDD 15.5]. Un code qualifie
+            // jusqu'a 12 km d'incertitude n'est PAS qualifie a 40 : executer
+            // hors domaine est un comportement non couvert, donc une cause
+            // d'anomalie legitime — et le poste le dit au lieu de l'ignorer.
+            CHECK(!tv.code_hors_domaine(mv) || E2.sigma3_m > tv.banc_borne_sigma3_m,
+                  "code de vol : dans sa plage, le code est couvert");
+            fen::mission::Mission m_flou = mv;
+            m_flou.nav_sigma_r = tv.banc_borne_sigma3_m;   // 3s = 3x la borne
+            CHECK(tv.code_hors_domaine(m_flou),
+                  "code de vol : au-dela de la plage exercee, le comportement n est PAS couvert");
+            // ... et un code qualifie pour la croisiere ne l'est pas pour une
+            // rentree : « un code qualifie en orbite basse n'est pas qualifie
+            // pour Mars » [GDD 15.5], vu depuis le profil de la mission.
+            fen::mission::Mission m_autre = mv;
+            m_autre.contract.family = "sat";
+            CHECK(std::string(fen::app::Session::env_vol(m_autre)) !=
+                  std::string(fen::app::Session::env_vol(mv)),
+                  "code de vol : un autre profil de vol est un autre environnement");
+            CHECK(tv.code_hors_domaine(m_autre),
+                  "code de vol : ... et la fiche d un environnement ne couvre pas l autre");
+
+            // (h) LE FEU VERT EMBARQUE CE QUI EST A BORD [GDD 15.5]. Un drapeau
+            // que rien ne remplit est un piege (n°20b) : on verifie que la PORTE
+            // du feu vert consigne le logiciel SUR LA MISSION — c'est de la que
+            // `fly_mission` le lira, longtemps apres, y compris apres une
+            // sauvegarde.
+            {
+              fen::mission::Mission m_go = mt;
+              tv.tirer_navigation(m_go);
+              CHECK(m_go.nav_evaluee, "feu vert : la navigation est tiree");
+              CHECK(m_go.code_embarque,
+                    "feu vert : le logiciel televerse part AVEC le vehicule");
+              CHECK(!m_go.code_non_couvert,
+                    "feu vert : ... et il est COUVERT — la poursuite tient le 3s dans la plage exercee");
+
+              // Et sans rien a bord, rien ne part : le drapeau n'est pas un decor.
+              const bool garde_bord = tv.code_a_bord;
+              tv.code_a_bord = false;
+              fen::mission::Mission m_nu = mt;
+              tv.tirer_navigation(m_nu);
+              CHECK(!m_nu.code_embarque,
+                    "feu vert : sans code a bord, la mission part sans logiciel");
+              CHECK(!m_nu.code_non_couvert,
+                    "feu vert : ... et un vol sans code ne peut pas etre hors du domaine d un code absent");
+              tv.code_a_bord = garde_bord;
+            }
+
+            // ---- 22. CE QUE COUTE DE NE RIEN EMBARQUER --------------------
+            //                                  [GDD 7.4, 8.4, 9.3, 15.3, 15.5]
+            // LE FILET EST RETIRE. La campagne de correction n'est plus
+            // conduite automatiquement au feu vert : une correction est un
+            // RENDEZ-VOUS DATE, et il n'a lieu que si quelqu'un est la pour le
+            // commander. Avant, ne rien embarquer et ne rien piloter ne coutait
+            // RIEN — le vol arrivait corrige tout seul, et « toutes les
+            // manoeuvres sont calculees PAR LE JOUEUR » [GDD 7.4] restait un
+            // voeu. Ce bloc prouve les issues d'un MEME vol selon qui a tenu
+            // ses rendez-vous, toutes calculees par la meme loi de campagne et
+            // sans qu'aucun malus soit applique nulle part.
+            {
+              const double garde_track = tv.mission_plan.program.tracking_days;
+              const bool   garde_susp  = Gt.finance.suspended;
+              tv.mission_plan.program.tracking_days = 14.0;  // il SAIT ou il est
+              Gt.finance.suspended = false;                  // ... et il est a son poste
+
+              // (a) AU FEU VERT, RIEN N EST ENCORE JOUE. Ces deux chiffres
+              // portaient l'issue d'une campagne deja conduite ; ils portent
+              // maintenant l'etat du vol tel qu'il vient d'etre injecte.
+              fen::mission::Mission m0 = mt;
+              tv.tirer_navigation(m0);
+              m0.code_embarque = false;      // reference : rien a bord
+              m0.code_non_couvert = false;
+              m0.code_couverture = 0.0;
+              CHECK(m0.nav_evaluee, "prix : la navigation est tiree au feu vert");
+              CHECK(m0.nav_dv_required == 0.0,
+                    "prix : au feu vert, PAS UN m/s n a encore ete depense en correction");
+              CHECK(m0.tcm_faits == 0,
+                    "prix : ... et aucun rendez-vous n a encore ete tenu");
+              CHECK(m0.nav_miss_km > 1.0e6,
+                    "prix : le manque d un vol que PERSONNE ne corrige se compte en millions de km");
+
+              // (b) PERSONNE N Y VA. Le vol garde l'ecart qu'il traine. Ce
+              // n'est pas une penalite : c'est le manque au but MESURE sur la
+              // trajectoire reellement volee.
+              fen::mission::Mission m_rien = m0;
+              tv.resoudre_vol(m_rien);
+              CHECK(m_rien.nav_dv_required == 0.0,
+                    "prix : personne n a rien commande, donc rien n a ete depense");
+              CHECK(m_rien.nav_miss_km > fen::mission::ARRIVEE_TOLERANCE_KM,
+                    "prix : ... et un vol que personne ne conduit MANQUE sa cible [GDD 8.4]");
+              CHECK(m_rien.vol_conduit_par == 0,
+                    "prix : le debrief pourra DIRE que personne n a tenu les rendez-vous");
+
+              // (c) LE LOGICIEL EMBARQUE TIENT LES RENDEZ-VOUS — sa raison
+              // d'etre [GDD 9.6] : il agit a bord, a la date, sans le sol.
+              fen::mission::Mission m_code = m0;
+              m_code.code_embarque = true;
+              m_code.code_non_couvert = false;
+              m_code.code_couverture = 1.0;      // un banc qui a tout exerce
+              tv.resoudre_vol(m_code);
+              CHECK(m_code.nav_dv_required > 0.0,
+                    "prix : le logiciel de bord a depense du Dv pour corriger");
+              CHECK(m_code.nav_miss_km < 0.01 * m_rien.nav_miss_km,
+                    "prix : ... et il divise le manque au but par cent [GDD 15.3]");
+              CHECK(m_code.nav_miss_km < fen::mission::ARRIVEE_TOLERANCE_KM,
+                    "prix : embarquer un logiciel COUVERT amene la mission au but");
+              CHECK(m_code.vol_conduit_par == 2,
+                    "prix : ... et le debrief credite LE LOGICIEL DE BORD");
+
+              // (d) « LE BANC RASSURE SANS GARANTIR » [GDD 15.5]. A couverture
+              // nulle le tirage tombe et le code ne tient RIEN : acheter des
+              // heures d'essai cesse d'etre decoratif, et c'est le premier
+              // endroit du moteur ou `code_success_prob` mord vraiment.
+              fen::mission::Mission m_nul = m0;
+              m_nul.code_embarque = true;
+              m_nul.code_non_couvert = false;
+              m_nul.code_couverture = 0.0;
+              tv.resoudre_vol(m_nul);
+              CHECK(m_nul.nav_miss_km == m_rien.nav_miss_km,
+                    "prix : couverture nulle -> le code ne tient AUCUN rendez-vous");
+
+              // (e) L ADJOINT, ET SEULEMENT EN L ABSENCE DU JOUEUR [GDD 9.3].
+              // « ARES fonctionne normalement sous un adjoint, ni penalite ni
+              // degradation punitive » : l'agence ne laisse pas tomber un vol
+              // pendant que l'architecte est en route. Present, elle ne pilote
+              // pas a sa place.
+              fen::mission::Mission m_abs = m0;
+              Gt.finance.suspended = true;
+              tv.resoudre_vol(m_abs);
+              Gt.finance.suspended = false;
+              CHECK(m_abs.nav_miss_km < fen::mission::ARRIVEE_TOLERANCE_KM,
+                    "prix : en ABSENCE, l adjoint conduit la campagne et amene le vol au but [9.3]");
+              CHECK(m_rien.nav_miss_km > m_abs.nav_miss_km,
+                    "prix : ... alors que le meme vol, joueur PRESENT et inactif, manque sa cible");
+              CHECK(m_abs.vol_conduit_par == 3,
+                    "prix : ... et le debrief nomme L ADJOINT, pas le joueur");
+
+              // ... et un joueur qui a TOUT tenu de sa main est credite, LUI :
+              // l'agent ne prend que ce qui reste, et il ne reste rien.
+              fen::mission::Mission m_lui = m0;
+              m_lui.code_embarque = true;      // il a POURTANT du code a bord
+              m_lui.code_non_couvert = false;
+              m_lui.code_couverture = 1.0;
+              m_lui.tcm_faits = 2;
+              {   // son etat vrai est deja au-dela du second rendez-vous
+                fen::mission::EtatVol e_lui;
+                e_lui.valide = true; e_lui.t_days = m0.vol_vrai_t_days;
+                e_lui.r = {m0.vol_vrai_r[0], m0.vol_vrai_r[1], m0.vol_vrai_r[2]};
+                e_lui.v = {m0.vol_vrai_v[0], m0.vol_vrai_v[1], m0.vol_vrai_v[2]};
+                fen::mission::avancer_etat_vol(
+                    e_lui, t_arr - fen::mission::TCM2_AVANT_ARRIVEE_J + 1.0);
+                m_lui.vol_vrai_t_days = e_lui.t_days;
+                for (int k = 0; k < 3; ++k) {
+                  m_lui.vol_vrai_r[k] = e_lui.r[k];
+                  m_lui.vol_vrai_v[k] = e_lui.v[k];
+                }
+              }
+              tv.resoudre_vol(m_lui);
+              CHECK(m_lui.vol_conduit_par == 1,
+                    "prix : un joueur qui a tout tenu est credite, MEME avec du code a bord");
+              CHECK(m_lui.nav_dv_required == 0.0,
+                    "prix : ... et le logiciel de bord ne redepense rien par-dessus lui");
+
+              // (f) UNE CAMPAGNE SE REPREND LA OU LE VOL EN EST : un
+              // rendez-vous deja franchi n'est pas a prendre. C'est ce qui fait
+              // que l'agent COMPLETE le joueur au lieu de le doubler.
+              {
+                fen::mission::EtatVol e_rep;
+                e_rep.valide = true; e_rep.t_days = t_dep;
+                e_rep.r = T.r_dep; e_rep.v = R1.v_dep_vraie;
+                CHECK(fen::mission::avancer_etat_vol(
+                          e_rep, t_dep + fen::mission::TCM1_APRES_INJECTION_J + 1.0),
+                      "prix : l etat vrai s avance au-dela de TCM-1");
+                fen::Vec3 rr = e_rep.r, vv = e_rep.v;
+                double tt = e_rep.t_days;
+                const auto C_rep =
+                    fen::mission::nav_campagne_depuis(T, D, S14, S14, rr, vv, tt, 4242);
+                CHECK(C_rep.ok && C_rep.dv_tcm1 == 0.0,
+                      "prix : un rendez-vous deja franchi n est PAS repris");
+                CHECK(C_rep.dv_tcm2 > 0.0,
+                      "prix : ... mais celui qui reste est bien tenu");
+                CHECK(tt > t_dep + fen::mission::TCM1_APRES_INJECTION_J,
+                      "prix : la campagne rend l etat vrai la ou elle l a laisse");
+              }
+
+              // (g) L ETAT VRAI D UN VOL EN COURS SURVIT A LA SAUVEGARDE.
+              // Il ne s'ecrivait pas : tant que l'issue etait decidee au feu
+              // vert ca ne se voyait pas, mais depuis que les rendez-vous se
+              // tiennent EN VOL, c'est cet etat qui la porte. Quitter au menu
+              // (qui sauvegarde) effacerait sinon les corrections commandees a
+              // la main — meme piege que les missions en vol non serialisees.
+              {
+                fen::game::GameState& Gs = *tv.jeu.ares.etat;
+                const auto garde_missions = Gs.missions;
+                fen::mission::Mission m_sav = m0;
+                // Le contrat doit exister DANS LE CATALOGUE : une mission est
+                // reappariee par son id au chargement, et le catalogue est
+                // reconstruit par la graine. `mt` porte un id d'oracle.
+                CHECK(!Gs.catalog.entries().empty(), "sauvegarde : le catalogue existe");
+                m_sav.contract = Gs.catalog.entries().front().contract;
+                m_sav.tcm_dv_depense = 37.5;    // il a corrige de sa main
+                m_sav.tcm_faits = 1;
+                Gs.missions.clear();
+                Gs.missions.push_back(m_sav);
+                fen::save::Writer w;
+                Gs.save(w);
+                fen::save::Reader rd(w.bytes().data(), w.bytes().size());
+                // « Le catalogue est reconstruit par la graine AVANT le
+                // chargement » : la copie modele exactement cette precondition.
+                fen::game::GameState G2 = Gs;
+                G2.missions.clear();
+                const bool relu = G2.load(rd);
+                CHECK(relu && G2.missions.size() == 1,
+                      "sauvegarde : la mission en vol se relit");
+                if (relu && G2.missions.size() == 1) {
+                  const fen::mission::Mission& mr = G2.missions[0];
+                  CHECK(mr.vol_vrai_valide, "sauvegarde : l etat VRAI du vol survit");
+                  CHECK(mr.vol_vrai_t_days == m_sav.vol_vrai_t_days &&
+                            mr.vol_vrai_r[0] == m_sav.vol_vrai_r[0] &&
+                            mr.vol_vrai_v[2] == m_sav.vol_vrai_v[2],
+                        "sauvegarde : ... au bit pres, position ET vitesse");
+                  CHECK(mr.tcm_dv_depense == 37.5 && mr.tcm_faits == 1,
+                        "sauvegarde : les corrections commandees a la main ne s effacent pas");
+                  CHECK(mr.nav_sigma_r == m_sav.nav_sigma_r &&
+                            mr.nav_connu_dv[1] == m_sav.nav_connu_dv[1],
+                        "sauvegarde : ce que la poursuite a revele survit aussi");
+                  CHECK(mr.code_couverture == m_sav.code_couverture,
+                        "sauvegarde : la couverture figee au feu vert part avec le vol");
+                }
+                Gs.missions = garde_missions;
+              }
+
+              std::printf("     prix de l inaction : personne %.0f km | logiciel couvert %.0f km"
+                          " (%.1f m/s) | adjoint absent %.0f km | banc a vide %.0f km\n",
+                          m_rien.nav_miss_km, m_code.nav_miss_km, m_code.nav_dv_required,
+                          m_abs.nav_miss_km, m_nul.nav_miss_km);
+
+              // ---- 23. LE DELAI DE COMMUNICATION [GDD 8.3, 9.6] ----------
+              // `comms_delay_s` existait depuis le premier jour et PERSONNE ne
+              // l'appelait ; [GDD 8.3] liste pourtant « delai de communication »
+              // parmi ce que le plan terminal doit afficher. Ce bloc le branche
+              // et MESURE ce qu'il coute — sans le gonfler : sur une croisiere
+              // il est petit devant le bras de levier, et c'est un resultat.
+              {
+                tv.trace_vol = T;   // la vue lit la trace publiee
+                const fen::mission::VueNavigation VD = tv.vue_vol(m0);
+                CHECK(VD.ok, "delai : la vue de navigation se calcule");
+                // (a) IL EST REEL ET IL EST GRAND. Terre-vaisseau se compte en
+                // dizaines de millions de km des les premieres semaines.
+                CHECK(VD.delai_com_s > 1.0,
+                      "delai : le plan terminal porte enfin un delai de communication");
+                CHECK(VD.delai_com_s < 25.0 * 60.0,
+                      "delai : ... et il reste sous les 25 min-lumiere du systeme interne");
+                // (b) IL EST CELUI DE LA DISTANCE, pas un forfait : c'est
+                // `comms_delay_s` de la distance Terre-vaisseau, et rien d'autre.
+                const fen::Vec3 r_terre = tv.jeu.eph.state(
+                    fen::ephem::Body::EarthBary, fen::ephem::Body::Sun,
+                    fen::Epoch{tv.jeu.epoch_courant()}).r;
+                CHECK(std::fabs(VD.delai_com_s -
+                                fen::mission::comms_delay_s(
+                                    fen::norm(VD.r_estime - r_terre))) < 1e-9,
+                      "delai : c est comms_delay_s de la distance, une seule source");
+                // (c) CE QU IL COMMANDE ARRIVE PLUS TARD. La manoeuvre s'applique
+                // a `now + d/c` : l'etat vrai avance donc AU-DELA de l'instant de
+                // la commande. C'est la que le vol autonome prend son sens.
+                fen::mission::Mission m_d = m0;
+                const double t_avant = m_d.vol_vrai_t_days;
+                fen::Vec3 dv_d{};
+                CHECK(fen::mission::solveur_correction(VD, dv_d),
+                      "delai : le solveur rend un Dv a commander");
+                const double depense = tv.executer_tcm(m_d, dv_d);
+                CHECK(depense > 0.0, "delai : la correction est bien executee");
+                const double now_j = Gt.clock.now_days();
+                CHECK(m_d.vol_vrai_t_days > now_j,
+                      "delai : la manoeuvre s applique APRES l instant de la commande");
+                CHECK(std::fabs((m_d.vol_vrai_t_days - now_j) * cst::DAY - VD.delai_com_s) < 1e-6,
+                      "delai : ... exactement d/c plus tard, pas un forfait");
+                CHECK(m_d.vol_vrai_t_days > t_avant,
+                      "delai : l etat vrai a bien avance");
+                // (d) CE QUE LE DELAI COUTE, MESURE et non suppose. Meme Dv,
+                // meme graine, meme etat de depart : applique a l'instant de la
+                // commande, puis d/c plus tard. L'ecart est l'effet PUR du delai.
+                auto miss_si_retard = [&](double retard_s) {
+                  fen::mission::EtatVol e;
+                  e.valide = true; e.t_days = m0.vol_vrai_t_days;
+                  e.r = {m0.vol_vrai_r[0], m0.vol_vrai_r[1], m0.vol_vrai_r[2]};
+                  e.v = {m0.vol_vrai_v[0], m0.vol_vrai_v[1], m0.vol_vrai_v[2]};
+                  fen::mission::avancer_etat_vol(e, now_j + retard_s / cst::DAY);
+                  fen::mission::executer_correction(e, VD, dv_d, 4242);
+                  return fen::mission::manque_reel_km(e, cible, t_arr);
+                };
+                const double miss_immediat = miss_si_retard(0.0);
+                const double miss_retarde  = miss_si_retard(VD.delai_com_s);
+                CHECK(miss_retarde != miss_immediat,
+                      "delai : le retard CHANGE le vol — ce n est pas un affichage");
+                // ET ON DECLARE SA TAILLE [GDD 6.8] : en croisiere, d/c est
+                // minuscule devant le bras de levier restant, donc son cout en
+                // manque au but l'est aussi. Le delai n'est PAS ce qui rend le
+                // vol autonome necessaire en croisiere — il le devient aux
+                // phases courtes, ou d/c depasse la duree de la manoeuvre.
+                CHECK(std::fabs(miss_retarde - miss_immediat) <
+                          fen::mission::ARRIVEE_TOLERANCE_KM,
+                      "delai : ... mais en croisiere son cout reste sous la tolerance d arrivee");
+                // (e) LE VAISSEAU S ELOIGNE, DONC LE DELAI CROIT. A TCM-2 il
+                // vaut des ordres de grandeur de plus qu a TCM-1 : le meme
+                // modele, deux moments, deux realites operationnelles.
+                const double t_tcm2 = t_arr - fen::mission::TCM2_AVANT_ARRIVEE_J;
+                const auto K2 = fen::astro::kepler_propagate(
+                    T.r_dep, T.v_dep, (t_tcm2 - t_dep) * cst::DAY, cst::MU_SUN);
+                const fen::Vec3 r_terre2 = tv.jeu.eph.state(
+                    fen::ephem::Body::EarthBary, fen::ephem::Body::Sun,
+                    fen::Epoch{now_tdb + (t_tcm2 - now_days) * cst::DAY}).r;
+                const double delai2 =
+                    fen::mission::comms_delay_s(fen::norm(K2.r - r_terre2));
+                CHECK(K2.converged && delai2 > 5.0 * VD.delai_com_s,
+                      "delai : a TCM-2 le vaisseau est bien plus loin, le delai bien plus long");
+                std::printf("     delai de communication : TCM-1 %.1f min -> TCM-2 %.1f min ;"
+                            " cout du retard sur le manque au but : %.0f km\n",
+                            VD.delai_com_s / 60.0, delai2 / 60.0,
+                            std::fabs(miss_retarde - miss_immediat));
+
+                // ---- 24. LA BOUCLE SOL [GDD 9.6, 15.3] -------------------
+                // « Le logiciel de vol embarque prepare l'autonomie QUAND LE
+                // SOL EST HORS DE PORTEE. » Ce bloc dit QUAND, en comparant
+                // deux grandeurs physiques : l'aller-retour de la lumiere et la
+                // duree PROPRE de la manoeuvre. Aucun seuil de confort.
+                {
+                  const double d_edl = fen::mission::phase_duration_s(
+                      fen::mission::FlightPhase::Edl);
+                  CHECK(std::fabs(d_edl - 7.0 * 60.0) < 1e-9,
+                        "boucle : la duree de l EDL est celle de MSL, 7 min");
+
+                  // (a) L EDL MARTIENNE : la boucle NE SE FERME PAS. C'est le
+                  // fait historique — le sol de MSL a regarde « seven minutes
+                  // of terror » sans pouvoir rien faire.
+                  const double d_mars = fen::norm(K2.r - r_terre2);
+                  CHECK(!fen::mission::ground_loop_closes(d_mars, d_edl),
+                        "boucle : a distance martienne, une descente de 7 min ECHAPPE au sol");
+                  CHECK(fen::mission::comms_roundtrip_s(d_mars) > d_edl,
+                        "boucle : ... parce que l aller-retour depasse la duree de la descente");
+
+                  // (b) L AMARRAGE EN ORBITE BASSE : la boucle SE FERME. Le sol
+                  // est dans la boucle, et c'est ainsi que se conduisent les
+                  // operations LEO. Meme predicat, autre distance.
+                  const double d_leo = 418.0e3;
+                  CHECK(fen::mission::ground_loop_closes(d_leo, d_edl),
+                        "boucle : en orbite basse, le sol est LARGEMENT dans la boucle");
+
+                  // (c) UNE CROISIERE NE SE « CONDUIT » PAS : pas de duree
+                  // opposable, donc pas de boucle a fermer. C'est pourquoi une
+                  // TCM, elle, se commande tres bien depuis le sol — elle est
+                  // PREPAREE a l'avance, pas subie en temps reel.
+                  CHECK(fen::mission::phase_duration_s(
+                            fen::mission::FlightPhase::TransferCruise) == 0.0 &&
+                        !fen::mission::ground_loop_closes(d_mars, 0.0),
+                        "boucle : une phase sans duree opposable n a pas de boucle a fermer");
+
+                  // (d) LA SESSION LE PUBLIE, avec ses deux chiffres — sans
+                  // quoi l'ecran devrait les recalculer, donc les redefinir.
+                  const fen::app::Session::BoucleSol B = tv.boucle_sol(m0);
+                  CHECK(B.valide, "boucle : la session publie l etat de la boucle sol");
+                  CHECK(std::fabs(B.aller_retour_s - 2.0 * VD.delai_com_s) < 1e-9,
+                        "boucle : l aller-retour publie est DEUX fois le delai de la vue");
+                  std::printf("     boucle sol : EDL a Mars %.0f min aller-retour contre "
+                              "%.0f min de descente -> OUVERTE ; LEO %.2f s -> FERMEE\n",
+                              fen::mission::comms_roundtrip_s(d_mars) / 60.0, d_edl / 60.0,
+                              fen::mission::comms_roundtrip_s(d_leo));
+                }
+
+                // ---- 25. LE RYTHME DE MESURE [GDD 8.6] --------------------
+                // « Le joueur choisit son rythme de mesure ; trop rare laisse
+                // deriver, trop frequent coute des ressources et du temps. » Il
+                // n'y avait rien a choisir : la poursuite s'achetait UNE FOIS a
+                // la conception et la connaissance restait figee tout le vol.
+                {
+                  const double t_inj = T.nodes[0].t_days;
+                  const double garde_prog = tv.mission_plan.program.tracking_days;
+
+                  // (a) ON NE MESURE PAS LE FUTUR. Rien ne bornait l'arc : un
+                  // `tracking_days` genereux donnait AU FEU VERT une solution que
+                  // seules deux semaines d'ecoute peuvent produire.
+                  tv.mission_plan.program.tracking_days = 300.0;
+                  fen::mission::Mission m_arc = m0;
+                  m_arc.poursuite_jours = 0.0;
+                  CHECK(tv.arc_poursuite_disponible(m_arc, t_inj, t_inj) == 0.0,
+                        "rythme : a l injection l arc est NUL, quelle que soit la somme engagee");
+                  CHECK(std::fabs(tv.arc_poursuite_disponible(m_arc, t_inj, t_inj + 10.0)
+                                  - 10.0) < 1e-12,
+                        "rythme : apres 10 jours on dispose de 10 jours d arc, pas de 300");
+                  // ... et acheter n'accelere rien : le temps ecoule commande.
+                  m_arc.poursuite_jours = 500.0;
+                  CHECK(std::fabs(tv.arc_poursuite_disponible(m_arc, t_inj, t_inj + 10.0)
+                                  - 10.0) < 1e-12,
+                        "rythme : acheter plus n avance pas les horloges");
+
+                  // (b) TROP RARE LAISSE DERIVER. A budget d'ecoute borne, la
+                  // solution est moins bonne — c'est la phrase du GDD, mesuree.
+                  tv.mission_plan.program.tracking_days = 2.0;
+                  const fen::app::Session::ContexteVol c_peu =
+                      tv.contexte_vol(m0, t_inj + 14.0);
+                  tv.mission_plan.program.tracking_days = 14.0;
+                  const fen::app::Session::ContexteVol c_beaucoup =
+                      tv.contexte_vol(m0, t_inj + 14.0);
+                  CHECK(c_peu.ok && c_beaucoup.ok, "rythme : les deux solutions se calculent");
+                  CHECK(std::fabs(c_peu.arc_jours - 2.0) < 1e-12 &&
+                            std::fabs(c_beaucoup.arc_jours - 14.0) < 1e-12,
+                        "rythme : l arc exploite est bien celui qu on a paye, borne par l ecoule");
+                  CHECK(c_beaucoup.sol.n_mesures > c_peu.sol.n_mesures,
+                        "rythme : ecouter plus longtemps donne PLUS de mesures");
+                  CHECK(c_beaucoup.sol.sigma_v < c_peu.sol.sigma_v,
+                        "rythme : ... et une solution MEILLEURE [GDD 8.6]");
+
+                  // (c) TROP FREQUENT COUTE. Le tarif derive de la passe de 8 h
+                  // deja dans le modele et du fee d'antenne du DSN — avant, on
+                  // pouvait acheter cent jours d ecoute pour zero.
+                  CHECK(fen::mission::cout_poursuite_me(0.0) == 0.0,
+                        "rythme : ne rien ecouter ne coute rien");
+                  const double c14 = fen::mission::cout_poursuite_me(14.0);
+                  CHECK(c14 > 0.0 && std::fabs(fen::mission::cout_poursuite_me(28.0) - 2.0 * c14)
+                                         < 1e-12,
+                        "rythme : le cout est PROPORTIONNEL aux heures d antenne ouvertes");
+                  fen::mission::Mission m_ach = m0;
+                  auto& F = Gt.finance;
+                  const double treso_avant = F.treasury_me;
+                  CHECK(tv.acheter_poursuite(m_ach, 14.0),
+                        "rythme : on achete 14 jours d ecoute supplementaires");
+                  CHECK(std::fabs((treso_avant - F.treasury_me) - c14) < 1e-9,
+                        "rythme : ... et la tresorerie les paie au tarif d antenne");
+                  CHECK(std::fabs(m_ach.poursuite_jours - 14.0) < 1e-12,
+                        "rythme : l achat s ajoute a l arc autorise");
+                  F.treasury_me = 0.0;
+                  fen::mission::Mission m_pauvre = m0;
+                  CHECK(!tv.acheter_poursuite(m_pauvre, 14.0),
+                        "rythme : sans tresorerie, pas d ecoute — on ne creuse pas la reserve");
+                  F.treasury_me = treso_avant;
+
+                  std::printf("     rythme de mesure : 2 j -> %d mesures, sigma_v %.3f m/s | "
+                              "14 j -> %d mesures, sigma_v %.3f m/s | 14 j d ecoute = %.3f M EUR\n",
+                              c_peu.sol.n_mesures, c_peu.sol.sigma_v,
+                              c_beaucoup.sol.n_mesures, c_beaucoup.sol.sigma_v, c14);
+                  tv.mission_plan.program.tracking_days = garde_prog;
+                }
+              }
+
+              tv.mission_plan.program.tracking_days = garde_track;
+              Gt.finance.suspended = garde_susp;
+            }
+          }
+        }
+      }
+    }
   }
 
   std::printf("\nSESSION : %d oracles OK, %d en echec.\n", g_ok, g_ko);

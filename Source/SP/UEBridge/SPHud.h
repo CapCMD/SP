@@ -146,6 +146,7 @@ private:
 	TSharedRef<SWidget> BuildAnalyse();         // base de fiabilité
 	TSharedRef<SWidget> BuildOperations();      // flotte en service
 	TSharedRef<SWidget> BuildConception();      // atelier d'assemblage
+	TSharedRef<SWidget> BuildCodeVol();         // éditeur de logiciel de vol [GDD 15.5]
 	TSharedRef<SWidget> BuildInfo(int Poste);   // fiche lecture seule (autres postes)
 
 	fen::app::Session* Session = nullptr;

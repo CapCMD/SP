@@ -22,6 +22,12 @@ namespace
 	bool   bHandoff = false;
 	int32  Cadence = -1;
 	bool   bVol = false;
+	bool   bCode = false;
+	bool   bCodeAtelier = true;
+	FString VolPhase = TEXT("ascension");
+	bool   bOeil = false;
+	double OeilM[3] = {0.0, 0.0, 0.0};
+	double OeilCap[2] = {0.0, 0.0};       // yaw, pitch (deg)
 	int32  Frames = 150;
 	FString OutPath;
 	int32  Counter = 0;
@@ -52,10 +58,52 @@ namespace
 		if (FParse::Value(Cmd, TEXT("-spdist="), DistF)) Dist = DistF;
 		bHandoff = FParse::Param(Cmd, TEXT("sphandoff"));
 		FParse::Value(Cmd, TEXT("-spcadence="), Cadence);
+		// `-spcode` ouvre l'ATELIER ; `-spcode=vol` reste sur la CONDUITE DE
+		// MISSION, en mode Pro — c'est là que le logiciel embarqué décide. Les
+		// deux faces du poste doivent se photographier, sinon l'une des deux ne
+		// serait jamais vérifiée.
+		bCode = FParse::Param(Cmd, TEXT("spcode"));
+		FString CodeVue;
+		if (FParse::Value(Cmd, TEXT("-spcode="), CodeVue) && !CodeVue.IsEmpty())
+		{
+			bCode = true;
+			bCodeAtelier = !CodeVue.Equals(TEXT("vol"), ESearchCase::IgnoreCase);
+		}
 		bVol = FParse::Param(Cmd, TEXT("spvol"));
+		// `-spvol=<phase>` : la phase de la chronologie à épingler. Le drapeau nu
+		// vaut « ascension », ce qu'il a toujours voulu dire.
+		if (!FParse::Value(Cmd, TEXT("-spvol="), VolPhase) || VolPhase.IsEmpty())
+			VolPhase = TEXT("ascension");
+		else
+			bVol = true;
+		// -spoeil=x,y,z[,yaw,pitch] : POSE L'ŒIL DU PAWN dans la station (repère
+		// station, mètres et degrés — le même que `NOVELLUS_OEIL_M`). Le point
+		// d'apparition du jeu est dans le module Novellus ; des endroits qui
+		// COMPTENT sont ailleurs (la CUPOLA est à 38 m de là, derrière deux
+		// nœuds), et une capture ne peut pas y aller à pied. Même office que
+		// `-sphandoff` et `-spvol` : rendre vérifiable un état qu'on n'atteint
+		// autrement qu'en jouant.
+		// `bShouldStopOnSeparator = false` : par DÉFAUT `FParse::Value` s'arrête sur
+		// une virgule (Parse.h:71), et ne rendait donc que « -18.2 » du triplet.
+		FString Oeil;
+		if (FParse::Value(Cmd, TEXT("-spoeil="), Oeil, /*bShouldStopOnSeparator=*/false))
+		{
+			TArray<FString> Champs;
+			Oeil.ParseIntoArray(Champs, TEXT(","), true);
+			if (Champs.Num() >= 3)
+			{
+				for (int32 k = 0; k < 3; ++k) OeilM[k] = FCString::Atod(*Champs[k]);
+				for (int32 k = 0; k < 2 && 3 + k < Champs.Num(); ++k)
+					OeilCap[k] = FCString::Atod(*Champs[3 + k]);
+				bOeil = true;
+			}
+		}
 		UE_LOG(LogTemp, Log,
-		       TEXT("[SPCapture] scene=%d focus=%d post=%d dist=%.0f handoff=%d cadence=%d vol=%d frames=%d -> %s"),
-		       Scene, Focus, Post, Dist, bHandoff ? 1 : 0, Cadence, bVol ? 1 : 0, Frames, *OutPath);
+		       TEXT("[SPCapture] scene=%d focus=%d post=%d dist=%.0f handoff=%d cadence=%d vol=%d(%s) "
+		            "oeil=%d(%.2f,%.2f,%.2f cap %.0f/%.0f) frames=%d -> %s"),
+		       Scene, Focus, Post, Dist, bHandoff ? 1 : 0, Cadence, bVol ? 1 : 0, *VolPhase,
+		       bOeil ? 1 : 0, OeilM[0], OeilM[1], OeilM[2], OeilCap[0], OeilCap[1],
+		       Frames, *OutPath);
 	}
 }
 
@@ -67,6 +115,19 @@ double SPCapture::RequestedDist() { ParseOnce(); return Dist; }
 bool SPCapture::RequestedHandoff() { ParseOnce(); return bHandoff; }
 int  SPCapture::RequestedCadence() { ParseOnce(); return Cadence; }
 bool SPCapture::RequestedVol() { ParseOnce(); return bVol; }
+const TCHAR* SPCapture::RequestedVolPhase() { ParseOnce(); return *VolPhase; }
+bool SPCapture::RequestedCode() { ParseOnce(); return bCode; }
+bool SPCapture::RequestedCodeAtelier() { ParseOnce(); return bCode && bCodeAtelier; }
+
+bool SPCapture::RequestedOeil(double OutM[3], double& OutYawDeg, double& OutPitchDeg)
+{
+	ParseOnce();
+	if (!bOeil) return false;
+	for (int32 k = 0; k < 3; ++k) OutM[k] = OeilM[k];
+	OutYawDeg = OeilCap[0];
+	OutPitchDeg = OeilCap[1];
+	return true;
+}
 
 void SPCapture::Tick()
 {

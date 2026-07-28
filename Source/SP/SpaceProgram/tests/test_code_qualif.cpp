@@ -63,15 +63,42 @@ int main() {
           "15.5 : tester plus coute plus cher et plus longtemps");
   }
 
+  // ═══ 3 bis. ÉLARGIR LE DOMAINE DILUE LA COUVERTURE ═══ [GDD 15.5]
+  // « Testé sur une plage, pas au-delà. » Déclarer qu'on couvre AUSSI les
+  // profils dégradés et les interfaces agrandit l'espace d'état prétendu
+  // couvert : à heures constantes, la couverture doit BAISSER. Sans cette
+  // propriété, cocher les deux cases serait une montée en confiance gratuite —
+  // un domaine plus large certifié au même prix.
+  {
+    ValidityDomain etroit = leo;
+    etroit.degraded_profiles = false;
+    etroit.interfaces_tested = false;
+    Certification large  = run_test_bench("gnc", true, leo, 500.0);
+    Certification serre  = run_test_bench("gnc", true, etroit, 500.0);
+    CHECK(serre.coverage > large.coverage,
+          "15.5 : a heures egales, un domaine plus LARGE est moins couvert");
+    CHECK(bench_h_char(leo) > bench_h_char(etroit),
+          "15.5 : un domaine plus large demande plus d heures caracteristiques");
+    // ... et la dilution se RACHÈTE en heures : c'est un arbitrage, pas un mur.
+    Certification paye = run_test_bench("gnc", true, leo, 500.0 * bench_h_char(leo) /
+                                                          bench_h_char(etroit));
+    CHECK(std::fabs(paye.coverage - serre.coverage) < 1e-9,
+          "15.5 : payer les heures du domaine elargi rend la meme couverture");
+  }
+
   // ═══ 4. LA CONFIANCE dépend de la couverture ET des interfaces/dégradés ═══
+  // 2 000 h, et non 1 000 : le domaine complet (dégradés + interfaces) a des
+  // heures caractéristiques élargies (voir 3 bis), donc la confiance A se paie
+  // plus cher qu'au nominal. C'est le prix de ce qu'on déclare couvrir.
   {
     // Bien testé, interfaces + dégradés couverts -> A possible.
-    Certification a = run_test_bench("gnc", true, leo, 1000.0);
+    Certification a = run_test_bench("gnc", true, leo, 2000.0);
     CHECK(a.confidence == reliability::Confidence::A,
           "15.5 : couverture haute + interfaces + degrades = confiance A");
-    // Le point faible : ne pas tester les interfaces plafonne la confiance.
+    // Le point faible : ne pas tester les interfaces plafonne la confiance —
+    // à HEURES ÉGALES, pour que l'oracle isole bien le seul drapeau d'interface.
     ValidityDomain sans_itf = leo; sans_itf.interfaces_tested = false;
-    Certification b = run_test_bench("gnc", true, sans_itf, 1000.0);
+    Certification b = run_test_bench("gnc", true, sans_itf, 2000.0);
     CHECK(b.confidence <= reliability::Confidence::B,
           "15.5 : sans test d interfaces, la confiance plafonne (defaut naturel)");
     // Peu testé -> confiance basse.

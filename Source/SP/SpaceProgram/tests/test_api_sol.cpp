@@ -205,16 +205,24 @@ int main() {
     CHECK_NEAR(km(1), 1000.0, 1e-12, "vol : km()");
   }
 
-  // Cible commune : nominale a l'origine, tolerance 5 km. Solveur par defaut
-  // (tau = 1 jour), donc |manoeuvre| = |ecart| / 86400 s.
-  const fen::Vec3 cible_pos{0, 0, 0};
+  // UN ETAT DE NAVIGATION EST UNE ORBITE, PAS UN POINT. Ces branches posaient
+  // une vitesse NULLE : arithmetiquement suffisant tant que le solveur divisait
+  // l'ecart par un temps, mais depuis qu'il resout sur la matrice de transition
+  // keplerienne (piege n°72), un etat sans vitesse n'a pas de trajectoire — le
+  // solveur rend alors une manoeuvre NULLE, et l'oracle indexait un vecteur
+  // vide. On pose donc un vrai etat heliocentrique : 1 UA, 30 km/s.
+  const fen::Vec3 r_ref{1.0e11, 0.0, 0.0};
+  const fen::Vec3 v_ref{0.0, 3.0e4, 0.0};
   const double tolerance = ares::vol::metres(5000);
+  // La cible NOMINALE ramenee a maintenant : l'ecart projete vaut alors
+  // exactement le decalage choisi (meme convention que `fen::code::EntreesVol`).
+  const auto cible_a = [&](double ecart_m) { return r_ref - fen::Vec3{ecart_m, 0.0, 0.0}; };
 
   // ── BRANCHE A : solution degradee (3sigma = 15 km > 12 km) ──
   {
     using namespace ares::vol;
-    Etat nav(Vec3{500000, 0, 0}, Vec3{0, 0, 0}, /*sigma3=*/15000.0);
-    Contexte ctx(nav, Cible(cible_pos, tolerance), Reserves(100.0));
+    Etat nav(r_ref, v_ref, /*sigma3=*/15000.0);
+    Contexte ctx(nav, Cible(cible_a(500000.0), tolerance), Reserves(100.0));
     sequence_correction(ctx);
     CHECK(ctx.alertes().size() == 1, "vol A : une alerte (solution degradee)");
     CHECK(ctx.replans().size() == 1, "vol A : une replanification");
@@ -227,8 +235,8 @@ int main() {
   // ── BRANCHE B : dans les marges (ecart 3 km < tolerance 5 km) ──
   {
     using namespace ares::vol;
-    Etat nav(Vec3{3000, 0, 0}, Vec3{0, 0, 0}, /*sigma3=*/2000.0);
-    Contexte ctx(nav, Cible(cible_pos, tolerance), Reserves(100.0));
+    Etat nav(r_ref, v_ref, /*sigma3=*/2000.0);
+    Contexte ctx(nav, Cible(cible_a(3000.0), tolerance), Reserves(100.0));
     sequence_correction(ctx);
     CHECK(ctx.alertes().empty(), "vol B : aucune alerte");
     CHECK(ctx.executees().empty(), "vol B : rien execute (dans les marges)");
@@ -238,34 +246,45 @@ int main() {
   }
 
   // ── BRANCHE C : correction > 35% des reserves ──
-  // ecart 5000 km -> dv = 5e6 / 86400 = 57.87 m/s ; 35% de 100 = 35 -> differe.
+  // ecart 5000 km sur un horizon d'un jour -> ~57.9 m/s ; 35% de 100 = 35 -> differe.
   {
     using namespace ares::vol;
-    Etat nav(Vec3{5000000, 0, 0}, Vec3{0, 0, 0}, /*sigma3=*/2000.0);
-    Contexte ctx(nav, Cible(cible_pos, tolerance), Reserves(100.0));
+    Etat nav(r_ref, v_ref, /*sigma3=*/2000.0);
+    Contexte ctx(nav, Cible(cible_a(5000000.0), tolerance), Reserves(100.0));
     sequence_correction(ctx);
     CHECK(ctx.alertes().size() == 1, "vol C : une alerte (>35%)");
     CHECK(ctx.differees().size() == 1, "vol C : une manoeuvre differee");
     CHECK(ctx.executees().empty(), "vol C : rien execute");
     CHECK_NEAR(ctx.dv_restant(), 100.0, 1e-12, "vol C : reserves intactes (differe)");
-    CHECK(ctx.differees()[0].dv() > 35.0, "vol C : la manoeuvre depasse bien 35%");
+    CHECK(!ctx.differees().empty() && ctx.differees()[0].dv() > 35.0,
+          "vol C : la manoeuvre depasse bien 35%");
   }
 
   // ── BRANCHE D : nominal ──
-  // ecart 500 km -> dv = 5e5 / 86400 = 5.787 m/s ; > tolerance, < 35% -> execute.
+  // ecart 500 km -> ~5.79 m/s ; > tolerance, < 35% -> execute.
   {
     using namespace ares::vol;
-    Etat nav(Vec3{500000, 0, 0}, Vec3{0, 0, 0}, /*sigma3=*/2000.0);
-    Contexte ctx(nav, Cible(cible_pos, tolerance), Reserves(100.0));
-    const double dv_attendu = 500000.0 / 86400.0;   // = |ecart| / tau
+    Etat nav(r_ref, v_ref, /*sigma3=*/2000.0);
+    Contexte ctx(nav, Cible(cible_a(500000.0), tolerance), Reserves(100.0));
+    // SUR UN HORIZON COURT, LA DROITE ET L'ORBITE COINCIDENT : un jour de vol
+    // heliocentrique courbe si peu que le premier ordre keplerien rend, a 1%
+    // pres, la regle de trois d'autrefois. C'est la meilleure preuve que le
+    // nouveau solveur n'a pas change de nature — il a cesse de se tromper LA OU
+    // la courbure compte (piege n°72).
+    const double dv_droite = 500000.0 / 86400.0;
     sequence_correction(ctx);
     CHECK(ctx.alertes().empty(), "vol D : aucune alerte");
     CHECK(ctx.differees().empty(), "vol D : rien differe");
     CHECK(ctx.executees().size() == 1, "vol D : une manoeuvre executee");
-    CHECK_NEAR(ctx.executees()[0].dv(), dv_attendu, 1e-9, "vol D : dv = |ecart|/tau");
-    CHECK_NEAR(ctx.dv_restant(), 100.0 - dv_attendu, 1e-9, "vol D : reserves = 100 - dv");
+    CHECK(!ctx.executees().empty() &&
+          std::fabs(ctx.executees()[0].dv() - dv_droite) < 0.01 * dv_droite,
+          "vol D : sur un jour, le premier ordre keplerien rejoint |ecart|/tau a 1%");
+    CHECK_NEAR(ctx.dv_restant(), 100.0 - (ctx.executees().empty() ? 0.0
+                                          : ctx.executees()[0].dv()),
+               1e-9, "vol D : les reserves sont amputees de ce qui a ete execute");
     CHECK(ctx.journal().size() == 1, "vol D : une ligne de journal de bord");
-    CHECK(ctx.journal()[0].find("Correction executee") != std::string::npos,
+    CHECK(!ctx.journal().empty() &&
+          ctx.journal()[0].find("Correction executee") != std::string::npos,
           "vol D : journal de bord trace la correction");
   }
 

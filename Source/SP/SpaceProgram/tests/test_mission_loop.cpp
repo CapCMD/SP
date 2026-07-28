@@ -75,6 +75,49 @@ int main() {
     CHECK(c.anomaly.modifiers.human_lethal_exposure,
           "issue : un echec habite expose l equipage");
 
+    // ═══ LE LOGICIEL DE VOL HORS DE SON DOMAINE [GDD 15.5, ch.10] ═══
+    // « Executer hors du domaine = comportement NON COUVERT = cause d'anomalie
+    // legitime. » C'est ce qui donne son prix au banc d'essai : sans cette
+    // porte, acheter des heures de qualification ne changeait rien a l'issue.
+    {
+      // Un vol PARFAIT par ailleurs : succes certain, aucune autre cause.
+      mission::Mission mcode = m;
+      mcode.code_embarque = true;
+      mcode.code_non_couvert = true;
+      const auto d = mission::fly_mission(mcode, plan, 12345);
+      CHECK(!d.success,
+            "code embarque : hors domaine, un vol par ailleurs parfait ECHOUE [15.5]");
+      CHECK(d.has_anomaly && d.anomaly.what.find("domaine de validite") != std::string::npos,
+            "code embarque : ... et l anomalie NOMME la cause");
+      CHECK(d.anomaly.modifiers.player_error_causal,
+            "code embarque : ... imputee au joueur — la fiche disait ce qu elle couvrait");
+      CHECK(d.severity >= mission::Severity::Major,
+            "code embarque : un comportement non couvert est GRAVE");
+
+      // DANS son domaine : le logiciel ne coute rien. Ecrire du code n'est pas
+      // une penalite — c'est l'embarquer sur un vol qu'il n'a jamais vu au banc
+      // qui se paie.
+      mission::Mission mbon = m;
+      mbon.code_embarque = true;
+      mbon.code_non_couvert = false;
+      const auto e = mission::fly_mission(mbon, plan, 12345);
+      CHECK(e.success && !e.has_anomaly,
+            "code embarque : dans son domaine, le logiciel ne coute RIEN");
+
+      // Sans logiciel a bord, le drapeau ne mord pas : un vol sans code ne peut
+      // pas etre hors du domaine d'un code qui n'existe pas.
+      mission::Mission msans = m;
+      msans.code_embarque = false;
+      msans.code_non_couvert = true;   // incoherent : doit rester sans effet
+      CHECK(mission::fly_mission(msans, plan, 12345).success,
+            "code embarque : sans code a bord, le hors-domaine n a pas de sens");
+
+      // UN EQUIPAGE AGGRAVE LE PALIER, ici comme ailleurs [GDD 10.3].
+      mission::Mission mhab = mcode; mhab.contract.crewed = true;
+      CHECK(mission::fly_mission(mhab, plan, 12345).anomaly.modifiers.human_lethal_exposure,
+            "code embarque : un vol habite hors domaine expose l equipage");
+    }
+
     // La graine dérivée dépend de l'identité de la mission (rejouabilité).
     CHECK(mission::mission_seed(42, "A") != mission::mission_seed(42, "B"),
           "graine : deux missions differentes -> graines differentes");

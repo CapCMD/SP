@@ -31,6 +31,7 @@
 
 #include "fen/core/Constants.hpp"
 #include "fen/game/GameClock.hpp"
+#include "fen/mission/FlightTimeline.hpp"
 #include "fen/mission/MissionFsm.hpp"
 
 namespace fen::mission {
@@ -40,24 +41,10 @@ namespace fen::mission {
 // 20 s = le temps de lire un écran et d'agir, pas celui de subir une cinématique.
 inline constexpr double OBSERVATION_MIN_S = 20.0;
 
-// ═══ DURÉES CARACTÉRISTIQUES DES PHASES ═══ (secondes de temps de JEU)
-// Ordres de grandeur RÉELS et sourcés [GDD 6.8], jamais des valeurs de confort :
-//   . ascension sol -> orbite ~9 min   (Falcon 9 : SECO à T+8 min 40 ;
-//                                       Navette : MECO à T+8 min 30) ;
-//   . EDL ~7 min                       (MSL, « seven minutes of terror » :
-//                                       entrée atmosphérique -> toucher) ;
-//   . manœuvre critique ~10 min        (insertion orbitale : Apollo LOI 6 min 2 s,
-//                                       ordre de grandeur de la dizaine de min).
-// Les phases NON critiques n'ont pas de durée opposable : elles durent ce que la
-// trajectoire dure, et rien n'y exige la présence du joueur.
-inline double phase_duration_s(FlightPhase p) {
-  switch (p) {
-    case FlightPhase::Launch:           return 9.0 * 60.0;
-    case FlightPhase::Edl:              return 7.0 * 60.0;
-    case FlightPhase::CriticalManeuver: return 10.0 * 60.0;
-    default:                            return 0.0;   // pas de durée opposable
-  }
-}
+// Les DURÉES des phases et la CHRONOLOGIE qui les date vivent dans
+// FlightTimeline.hpp : ce fichier ne porte que la LOI DU PLAFOND, qui les lit.
+// La séparation n'est pas cosmétique — la loi ci-dessous serait identique si les
+// durées venaient d'ailleurs, et c'est le signe qu'elle ne cache aucun réglage.
 
 // Le cran le plus rapide qui laisse `duree_s` durer au moins OBSERVATION_MIN_S
 // secondes réelles. PLANCHER : le temps réel — le modèle ne met JAMAIS le jeu en
@@ -75,32 +62,6 @@ inline game::TimeRate tempo_ceiling_for_duration(double duree_s) {
 inline game::TimeRate tempo_ceiling_for_phase(FlightPhase p) {
   if (!is_critical_phase(p)) return game::TimeRate::Month;   // aucun plafond
   return tempo_ceiling_for_duration(phase_duration_s(p));
-}
-
-// ═══ LA PHASE DE VOL EST DÉRIVÉE, PAS SAISIE ═══
-// `Mission::phase` existait sans que rien ne la renseigne : un drapeau qu'on ne
-// pouvait que cocher à la main, donc un « malus abstrait » en puissance. Elle est
-// désormais FONCTION de l'état FSM, du temps passé dans cet état et de la
-// famille — déterministe, rejouable, et rien à sauvegarder.
-//
-// CE QUE LE MODÈLE DATE AUJOURD'HUI : l'ASCENSION, qui commence à l'instant du
-// feu vert (entrée en `Launched`) et dure `phase_duration_s(Launch)`. Ensuite la
-// mission croise (ou opère en LEO pour les familles proches de la Terre).
-// L'INSERTION et l'EDL sont des phases critiques du modèle (Events.hpp les
-// module déjà) mais ne sont pas encore DATÉES : elles le seront quand la mission
-// vécue [GDD 9] portera sa chronologie de vol. DÉCLARÉ ici plutôt que simulé par
-// un tirage : on ne date pas un événement qu'on ne calcule pas.
-inline bool near_earth_family(const std::string& family) {
-  return family == "sat" || family == "logistique" || family == "service" ||
-         family == "habite";
-}
-
-inline FlightPhase flight_phase_of(const Mission& m, double now_days) {
-  if (m.state != MissionState::Launched) return FlightPhase::Ground;
-  const double t_s = (now_days - m.state_entered_days) * cst::DAY;
-  if (t_s < phase_duration_s(FlightPhase::Launch)) return FlightPhase::Launch;
-  return near_earth_family(m.contract.family) ? FlightPhase::LeoOps
-                                              : FlightPhase::TransferCruise;
 }
 
 // ═══ LE PLAFOND COURANT DE LA PARTIE ═══

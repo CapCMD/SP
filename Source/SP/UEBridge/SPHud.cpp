@@ -17,6 +17,7 @@
 
 #include "Engine/Engine.h"
 #include "Engine/GameViewportClient.h"
+#include "HAL/FileManager.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Fonts/FontMeasure.h"
 #include "Rendering/DrawElements.h"
@@ -29,6 +30,7 @@
 #include "Widgets/Layout/SSpacer.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SEditableTextBox.h"
+#include "Widgets/Input/SMultiLineEditableTextBox.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/SOverlay.h"
 #include "Widgets/Layout/SScrollBox.h"
@@ -371,9 +373,13 @@ int32 SSPWorldHud::PaintStation(const FGeometry& G, FSlateWindowElementList& Out
 	// capturée, on ne « glisse » plus pour regarder.
 	// L'état du temps n'est PAS répété ici : c'est le rôle du bandeau permanent en
 	// haut à droite (`SSPTemps`), présent aux deux cadrages.
+	// MAJ EST NOMMÉE, et il le faut : en impesanteur on ne s'arrête pas en lâchant
+	// la touche, on s'agrippe (cf. app/impesanteur.hpp). Un joueur qui l'ignore
+	// dérive jusqu'à la cloison suivante et croit à un bug — c'est la commande la
+	// moins devinable du jeu, donc celle qui doit être écrite.
 	const FString Haut = FString::Printf(
-		TEXT("%s   |   ZQSD/WASD se deplacer   |   SOURIS : regarder   |   "
-		     "E : poste   |   M : carte   |   F5 : sauvegarder"),
+		TEXT("%s   |   ZQSD/WASD se deplacer   |   MAJ : s'agripper   |   "
+		     "SOURIS : regarder   |   E : poste   |   M : carte   |   F5 : sauvegarder"),
 		*FString(Jeu.agence.nom.c_str()));
 	TexteOmbre(Out, Layer, G, Haut, FBarre, FVector2D(18.0 * S, 14.0 * S), SRGB(226, 234, 243), S);
 	TexteOmbre(Out, Layer, G, TEXT("CARTE  [ M ]"), Mono(10.0f * S, 80),
@@ -1802,11 +1808,365 @@ TSharedRef<SWidget> SSPPoste::BuildConception()
 // (choix de programme + bilan viabilité), franchir chaque gate, engager le feu
 // vert (commit financier), exécuter le vol, lire le débrief. La logique vit dans
 // `app/session.hpp` (sous oracle) ; ici, la vue et les commandes.
+// ═══ OÙ VIT LA TOOLCHAIN ═══ [GDD 18]
+// Le modèle ne devine PAS où le projet est installé : les chemins lui sont
+// fournis, et c'est la couche plateforme qui les connaît. En développement on
+// compile contre les en-têtes du dépôt avec le compilateur DÉJÀ présent ;
+// l'embarquer dans la distribution reste une tâche de packaging, déclarée comme
+// telle dans `fen/code/Toolchain.hpp`. Quand il manque, la chaîne rend
+// `Indisponible` — et le poste le DIT, au lieu de faire croire à un code faux.
+static void ConfigurerToolchain(fen::app::Session& Se)
+{
+	if (!Se.toolchain.dossier_travail.empty()) return;
+	const FString Racine = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+	const FString Travail = FPaths::Combine(
+		FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir()), TEXT("SP"), TEXT("CodeVol"));
+	IFileManager::Get().MakeDirectory(*Travail, /*Tree*/ true);
+	Se.toolchain.dossier_travail = TCHAR_TO_UTF8(*Travail);
+
+	// ═══ LE SDK : EMBARQUÉ D'ABORD, DÉPÔT ENSUITE ═══ [GDD 18]
+	// L'atelier compilait contre `Source/SP/SpaceProgram/…` — un chemin qui
+	// **n'existe pas dans un build packagé**. Il marchait donc sur la machine de
+	// développement et nulle part ailleurs, sans que rien ne le dise.
+	// `Content/SP/Sdk` est produit par `Tools/stage_sdk.py` et empaqueté en
+	// NON-UFS (lu par `cl.exe`, pas par Unreal — dans un .pak il serait
+	// inatteignable). On préfère donc TOUJOURS l'embarqué, et on retombe sur
+	// l'arbre source quand il n'a pas été staged : en développement, ça continue
+	// de marcher sans rien faire.
+	const FString Sdk = FPaths::Combine(
+		FPaths::ConvertRelativePathToFull(FPaths::ProjectContentDir()), TEXT("SP"), TEXT("Sdk"));
+	const FString SdkInc = FPaths::Combine(Sdk, TEXT("include"));
+	const FString Src = FPaths::Combine(Racine, TEXT("Source"), TEXT("SP"), TEXT("SpaceProgram"));
+	if (IFileManager::Get().DirectoryExists(*SdkInc))
+	{
+		Se.toolchain.includes = { TCHAR_TO_UTF8(*SdkInc) };
+		Se.toolchain.sources = {
+			TCHAR_TO_UTF8(*FPaths::Combine(Sdk, TEXT("src"), TEXT("Kepler.cpp"))),
+		};
+	}
+	else
+	{
+		Se.toolchain.includes = {
+			TCHAR_TO_UTF8(*FPaths::Combine(Src, TEXT("astro_core"), TEXT("include"))),
+			TCHAR_TO_UTF8(*FPaths::Combine(Src, TEXT("mission"), TEXT("include"))),
+			TCHAR_TO_UTF8(*Src),
+		};
+		// `ares::vol` n'est plus fait que d'en-têtes : son solveur résout la
+		// correction sur la vraie matrice de transition, donc le programme du
+		// joueur doit LIER le propagateur képlérien du moteur — le même, pas une
+		// copie.
+		Se.toolchain.sources = {
+			TCHAR_TO_UTF8(*FPaths::Combine(Src, TEXT("astro_core"), TEXT("src"), TEXT("Kepler.cpp"))),
+		};
+	}
+
+	// ═══ LE COMPILATEUR : EMBARQUÉ D'ABORD, MACHINE ENSUITE ═══ [GDD 18]
+	// Le premier candidat est le point de DÉPÔT de la distribution : une
+	// distribution qui y pose les Build Tools fonctionne sans toucher à ce code.
+	// Les quatre suivants sont le mode développement — pratique ici, mais on ne
+	// peut pas en faire une hypothèse chez le joueur.
+	Se.toolchain.vcvars.clear();
+	const FString Embarque = FPaths::Combine(
+		FPaths::ConvertRelativePathToFull(FPaths::ProjectContentDir()),
+		TEXT("SP"), TEXT("Toolchain"), TEXT("VC"), TEXT("Auxiliary"), TEXT("Build"),
+		TEXT("vcvars64.bat"));
+	static const TCHAR* Candidats[] = {
+		TEXT("C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Auxiliary/Build/vcvars64.bat"),
+		TEXT("C:/Program Files/Microsoft Visual Studio/2022/Professional/VC/Auxiliary/Build/vcvars64.bat"),
+		TEXT("C:/Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Auxiliary/Build/vcvars64.bat"),
+		TEXT("C:/Program Files/Microsoft Visual Studio/2022/BuildTools/VC/Auxiliary/Build/vcvars64.bat"),
+	};
+	if (IFileManager::Get().FileExists(*Embarque))
+	{
+		Se.toolchain.vcvars = TCHAR_TO_UTF8(*Embarque);
+	}
+	else
+	{
+		for (const TCHAR* C : Candidats)
+		{
+			if (IFileManager::Get().FileExists(C)) { Se.toolchain.vcvars = TCHAR_TO_UTF8(C); break; }
+		}
+	}
+	// OÙ IL FAUDRAIT LE METTRE, pour que le poste puisse le DIRE. Un atelier qui
+	// refuse sans indiquer le chemin attendu est une panne aux yeux du joueur
+	// (piège n°42) — et ici la réparation est à sa portée.
+	Se.toolchain_depot = TCHAR_TO_UTF8(*Embarque);
+}
+
+// ═══ L'ATELIER LOGICIEL — mode PRO [GDD 15.1, 15.5, 18] ═══
+// « Le joueur écrit du VRAI C++, compilé et exécuté par une toolchain
+// embarquée. » Cette vue est la SURFACE de la chaîne déjà vérifiée : on écrit,
+// on compile (coût nul), on qualifie au banc (qui coûte du budget et des jours),
+// puis on téléverse — et seulement alors le code monte à bord.
+//
+// CE QU'ELLE REFUSE DE FAIRE : proposer un bouton « corriger mon code », donner
+// une solution toute faite, ou laisser monter à bord un texte que le banc n'a
+// jamais exercé. Une procédure prête à rejouer est exactement ce que [GDD 2.4]
+// interdit ; en PRO il n'y a même plus de graphe — il y a le code, et son prix.
+TSharedRef<SWidget> SSPPoste::BuildCodeVol()
+{
+	int n = 0; const fen::app::PosteDef* defs = fen::app::postes_def(n);
+	const fen::app::PosteDef& D = defs[3];
+	fen::app::Session& Se = *Session;
+	ConfigurerToolchain(Se);
+	fen::mission::Mission* mc = Se.mission_courante();
+
+	TSharedRef<SVerticalBox> Col = SNew(SVerticalBox);
+
+	// --- L'ÉTAT DE LA CHAÎNE, en une ligne : où en est CE texte ---------------
+	// Les trois étapes de [GDD 15.5] portent sur un TEXTE, pas sur le joueur :
+	// éditer une ligne après le banc invalide la fiche. Le dire ici évite qu'on
+	// croie voler avec un code qualifié qu'on a modifié depuis.
+	{
+		const bool bComp = Se.source_vol_compilee() && Se.resultat_vol.ok();
+		const bool bCert = Se.source_vol_certifiee();
+		const bool bBord = Se.source_vol_a_bord();
+		Col->AddSlot().AutoHeight().Padding(0, 0, 0, 3)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+			[ Txt(TEXT("CHAINE"), 10.0f, ColTexteFaible, 90) ]
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(10, 0, 0, 0)
+			[ Txt(bComp ? TEXT("[x] COMPILE") : TEXT("[ ] COMPILE"), 10.0f,
+			      bComp ? ColVert : ColTexteFaible) ]
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(10, 0, 0, 0)
+			[ Txt(bCert ? TEXT("[x] QUALIFIE") : TEXT("[ ] QUALIFIE"), 10.0f,
+			      bCert ? ColVert : ColTexteFaible) ]
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(10, 0, 0, 0)
+			[ Txt(bBord ? TEXT("[x] A BORD") : TEXT("[ ] A BORD"), 10.0f,
+			      bBord ? ColVert : ColTexteFaible) ]
+			+ SHorizontalBox::Slot().FillWidth(1.0f).HAlign(HAlign_Right).VAlign(VAlign_Center)
+			[ BoutonAction(FText::FromString(TEXT("< CONDUITE DE MISSION")),
+			               FOnClicked::CreateLambda([this]() {
+				               Session->atelier_logiciel = false; Rebuild(); return FReply::Handled(); })) ]
+		];
+		// Le cas qui trompe : un code EST à bord, mais ce n'est plus celui-ci.
+		if (Se.code_a_bord && !bBord)
+		{
+			Col->AddSlot().AutoHeight().Padding(0, 0, 0, 3)
+			[ Txt(TEXT("Texte MODIFIE depuis le televersement : le bord execute l ancienne version."),
+			      9.0f, SRGB(255, 190, 90), 20) ];
+		}
+		else if (Se.cert_vol.certified && !bCert)
+		{
+			Col->AddSlot().AutoHeight().Padding(0, 0, 0, 3)
+			[ Txt(TEXT("Texte MODIFIE depuis le banc : la fiche de qualification ne le couvre plus."),
+			      9.0f, SRGB(255, 190, 90), 20) ];
+		}
+	}
+
+	// --- LE CODE ---------------------------------------------------------------
+	Col->AddSlot().FillHeight(1.0f).Padding(0, 2)
+	[
+		SNew(SBorder).BorderImage(Plein())
+		.BorderBackgroundColor(FSlateColor(SRGB(6, 10, 18, 0.96f)))
+		.Padding(FMargin(4))
+		[
+			SNew(SMultiLineEditableTextBox)
+			.Text(FText::FromString(FString(UTF8_TO_TCHAR(Se.source_vol.c_str()))))
+			.Font(Mono(9.0f, 0))
+			.AllowMultiLine(true)
+			.OnTextChanged_Lambda([this](const FText& T) {
+				Session->source_vol = TCHAR_TO_UTF8(*T.ToString());
+			})
+		]
+	];
+
+	// --- CE QUE LA CHAÎNE A RÉPONDU -------------------------------------------
+	if (Se.resultat_vol_lu)
+	{
+		const bool bOk = Se.resultat_vol.ok();
+		Col->AddSlot().AutoHeight().Padding(0, 3, 0, 1)
+		[ LigneKV(TEXT("TOOLCHAIN"), FString(UTF8_TO_TCHAR(fen::code::issue_nom(Se.resultat_vol.issue))),
+		          bOk ? ColVert : SRGB(242, 90, 80)) ];
+		if (Se.resultat_vol.issue == fen::code::IssueCode::Indisponible)
+		{
+			// NE PAS FAIRE PASSER UNE MACHINE MAL EQUIPEE POUR UN CODE FAUX
+			// (piège n°69) : la distinction est dite, pas devinée. Et on DONNE
+			// le chemin attendu : un atelier qui refuse sans dire ce qu'il
+			// attend est une panne, alors que la reparation est a portee.
+			Col->AddSlot().AutoHeight().Padding(6, 0)
+			[ Txt(TEXT("Aucun compilateur : ni embarque dans la distribution, ni installe ici."),
+			      9.0f, ColTexteFaible, 20) ];
+			Col->AddSlot().AutoHeight().Padding(6, 0)
+			[ Txt(FString::Printf(TEXT("Deposer les MSVC Build Tools de sorte que ce chemin existe :")),
+			      9.0f, ColTexteFaible, 20) ];
+			Col->AddSlot().AutoHeight().Padding(10, 0)
+			[ Txt(FString(UTF8_TO_TCHAR(Se.toolchain_depot.c_str())), 9.0f,
+			      SRGB(255, 190, 90), 20) ];
+		}
+		else if (!Se.resultat_vol.diagnostics.empty() && !bOk)
+		{
+			// Les diagnostics du compilateur, TELS QUELS [GDD 15.5]. Trois lignes
+			// suffisent à situer l'erreur ; le cadre clippe le reste (piège n°42).
+			FString Diag = FString(UTF8_TO_TCHAR(Se.resultat_vol.diagnostics.c_str()));
+			TArray<FString> Lignes; Diag.ParseIntoArrayLines(Lignes);
+			int32 Montrees = 0;
+			for (const FString& L : Lignes)
+			{
+				if (L.TrimStartAndEnd().IsEmpty()) continue;
+				Col->AddSlot().AutoHeight().Padding(6, 0)
+				[ Txt(L.Left(96), 9.0f, SRGB(242, 90, 80), 0) ];
+				if (++Montrees >= 3) break;
+			}
+		}
+		else if (bOk)
+		{
+			const fen::code::DecisionsVol& Dec = Se.resultat_vol.decisions;
+			Col->AddSlot().AutoHeight().Padding(6, 0)
+			[ LigneKV(TEXT("DECISION"),
+			          Dec.execute
+			              ? FString::Printf(TEXT("EXECUTE  %.2f m/s"), fen::norm(Dec.dv))
+			              : FString::Printf(TEXT("rien execute  (%d differee(s), replan %.0f h)"),
+			                                Dec.differees, Dec.replan_s / 3600.0),
+			          Dec.execute ? ColVert : SRGB(140, 179, 255)) ];
+			for (const std::string& A : Dec.alertes)
+			{
+				Col->AddSlot().AutoHeight().Padding(6, 0)
+				[ Txt(FString::Printf(TEXT("! %s"), UTF8_TO_TCHAR(A.c_str())), 9.0f, SRGB(255, 190, 90), 0) ];
+			}
+			for (const std::string& J : Dec.journal)
+			{
+				Col->AddSlot().AutoHeight().Padding(6, 0)
+				[ Txt(FString::Printf(TEXT("  %s"), UTF8_TO_TCHAR(J.c_str())), 9.0f, ColTexteFaible, 0) ];
+			}
+		}
+	}
+
+	// --- LA CAMPAGNE D'ESSAI : ce qu'on DÉCLARE couvrir, et ce que ça coûte ----
+	// Le banc RASSURE SANS GARANTIR [GDD 15.5]. Chaque réglage est montré AVEC sa
+	// conséquence chiffrée AVANT le clic : un bouton qui prélève un budget sans
+	// dire combien serait un piège (même doctrine que la marge, piège n°64).
+	if (mc)
+	{
+		const fen::code::Certification Prev = fen::code::run_test_bench(
+			mc->contract.id, /*compiled*/ true, Se.domaine_vise(*mc), Se.banc_heures);
+		Col->AddSlot().AutoHeight().Padding(0, 4, 0, 1)
+		[ Txt(TEXT("BANC D'ESSAI — ce qu'on declare avoir exerce"), 10.0f, ColTexteFaible, 90) ];
+
+		auto Reglage = [&](const TCHAR* Nom, double& Valeur, double Pas, const FString& Lu)
+		{
+			return SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+			[ SNew(SBox).WidthOverride(140.0f)[ Txt(Nom, 10.0f, ColTexte) ] ]
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(6, 0, 2, 0)
+			[ BoutonMini(TEXT("-"), FOnClicked::CreateLambda([this, &Valeur, Pas]() {
+				Valeur = FMath::Max(Pas, Valeur - Pas); Rebuild(); return FReply::Handled(); })) ]
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+			[ SNew(SBox).WidthOverride(110.0f)[ Txt(Lu, 10.0f, SRGB(140, 179, 255), 0) ] ]
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+			[ BoutonMini(TEXT("+"), FOnClicked::CreateLambda([this, &Valeur, Pas]() {
+				Valeur += Pas; Rebuild(); return FReply::Handled(); })) ];
+		};
+		Col->AddSlot().AutoHeight().Padding(6, 1)
+		[ Reglage(TEXT("HEURES D'ESSAI"), Se.banc_heures, 50.0,
+		          FString::Printf(TEXT("%.0f h"), Se.banc_heures)) ];
+		Col->AddSlot().AutoHeight().Padding(6, 1)
+		[ Reglage(TEXT("PLAGE 3s COUVERTE"), Se.banc_borne_sigma3_m, 2000.0,
+		          FString::Printf(TEXT("0 - %.0f km"), Se.banc_borne_sigma3_m / 1000.0)) ];
+		Col->AddSlot().AutoHeight().Padding(6, 1)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().AutoWidth()
+			[ SNew(SBox).WidthOverride(180.0f)
+			  [ BoutonAction(FText::FromString(FString::Printf(TEXT("%s PROFILS DEGRADES"),
+			                 Se.banc_degrade ? TEXT("[x]") : TEXT("[ ]"))),
+			                 FOnClicked::CreateLambda([this]() {
+				                 Session->banc_degrade = !Session->banc_degrade;
+				                 Rebuild(); return FReply::Handled(); })) ] ]
+			+ SHorizontalBox::Slot().AutoWidth().Padding(6, 0)
+			[ SNew(SBox).WidthOverride(180.0f)
+			  [ BoutonAction(FText::FromString(FString::Printf(TEXT("%s INTERFACES"),
+			                 Se.banc_interfaces ? TEXT("[x]") : TEXT("[ ]"))),
+			                 FOnClicked::CreateLambda([this]() {
+				                 Session->banc_interfaces = !Session->banc_interfaces;
+				                 Rebuild(); return FReply::Handled(); })) ] ]
+		];
+		// LA LECTURE QUI MOTIVE CES BOUTONS : couverture attendue, prix, retard.
+		// Élargir le domaine DILUE la couverture — c'est ici que ça se voit.
+		Col->AddSlot().AutoHeight().Padding(6, 1)
+		[ LigneKV(TEXT("SI ON LANCE LE BANC"),
+		          FString::Printf(TEXT("couverture %.0f %%   %.1f M EUR   +%.1f j"),
+		                          Prev.coverage * 100.0, Prev.budget_spent_me,
+		                          fen::code::bench_delay_days(Prev)),
+		          SRGB(140, 179, 255)) ];
+		// LA FICHE OBTENUE — et son domaine, qui est tout ce qu'elle vaut.
+		if (Se.cert_vol.certified)
+		{
+			const TCHAR* Conf = (Se.cert_vol.confidence == fen::reliability::Confidence::A) ? TEXT("A")
+			                  : (Se.cert_vol.confidence == fen::reliability::Confidence::B) ? TEXT("B")
+			                  : (Se.cert_vol.confidence == fen::reliability::Confidence::C) ? TEXT("C") : TEXT("D");
+			Col->AddSlot().AutoHeight().Padding(6, 1)
+			[ LigneKV(TEXT("FICHE"),
+			          FString::Printf(TEXT("%s  couverture %.0f %%  confiance %s  |  %s, 3s < %.0f km%s"),
+			                          Se.source_vol_certifiee() ? TEXT("VALIDE") : TEXT("PERIMEE"),
+			                          Se.cert_vol.coverage * 100.0, Conf,
+			                          UTF8_TO_TCHAR(Se.cert_vol.domain.environment.c_str()),
+			                          Se.cert_vol.domain.input_hi / 1000.0,
+			                          Se.cert_vol.domain.degraded_profiles ? TEXT(", degrades") : TEXT("")),
+			          Se.source_vol_certifiee() ? ColVert : SRGB(255, 190, 90)) ];
+			Col->AddSlot().AutoHeight().Padding(6, 0)
+			[ Txt(TEXT("Le banc RASSURE, il ne garantit pas : un etat non imagine passe toujours."),
+			      9.0f, ColTexteFaible, 20) ];
+			// L'AVERTISSEMENT DOIT ARRIVER QUAND IL EST ENCORE ACTIONNABLE.
+			// « Un code qualifie en orbite basse n'est PAS qualifie pour Mars »
+			// [GDD 15.5] : ce desaccord-la est connu AVANT le feu vert, et le
+			// feu vert le consignera sur la mission (`code_non_couvert`), d'ou
+			// `fly_mission` en tirera un echec. Le dire au debrief serait une
+			// sanction ; le dire ici est une decision.
+			const FString EnvFiche(UTF8_TO_TCHAR(Se.cert_vol.domain.environment.c_str()));
+			const FString EnvMission(UTF8_TO_TCHAR(fen::app::Session::env_vol(*mc)));
+			if (Se.source_vol_a_bord() && EnvFiche != EnvMission)
+			{
+				Col->AddSlot().AutoHeight().Padding(6, 1)
+				[ Txt(FString::Printf(TEXT("HORS DOMAINE AU DECOLLAGE : qualifie \"%s\", cette mission vole \"%s\"."),
+				                      *EnvFiche, *EnvMission),
+				      9.0f, SRGB(242, 90, 80), 20) ];
+				Col->AddSlot().AutoHeight().Padding(6, 0)
+				[ Txt(TEXT("Requalifier sur ce profil, ou ne pas embarquer ce code."),
+				      9.0f, ColTexteFaible, 20) ];
+			}
+		}
+	}
+
+	// --- LES TROIS ÉTAPES, DANS L'ORDRE [GDD 15.5] ----------------------------
+	Col->AddSlot().AutoHeight().Padding(0, 4, 0, 0)
+	[
+		SNew(SHorizontalBox)
+		+ SHorizontalBox::Slot().FillWidth(1.0f).Padding(0, 0, 3, 0)
+		[ BoutonAction(FText::FromString(TEXT("COMPILER")),
+		               FOnClicked::CreateLambda([this]() {
+			               Session->compiler_vol(Session->mission_courante());
+			               Rebuild(); return FReply::Handled(); })) ]
+		// Le banc n'est offert QUE sur un texte qui compile : [GDD 15.5] étape 1
+		// avant étape 2, et un code faux ne coûte donc jamais un centime.
+		+ SHorizontalBox::Slot().FillWidth(1.0f).Padding(3, 0)
+		[ BoutonAction(FText::FromString(TEXT("BANC D'ESSAI")),
+		               FOnClicked::CreateLambda([this]() {
+			               if (fen::mission::Mission* M = Session->mission_courante())
+				               Session->banc_essai_vol(*M);
+			               Rebuild(); return FReply::Handled(); }),
+		               mc != nullptr && Se.source_vol_compilee() && Se.resultat_vol.ok()) ]
+		// « TOUT code de vol passe par un banc d'essai avant televersement. »
+		+ SHorizontalBox::Slot().FillWidth(1.0f).Padding(3, 0, 0, 0)
+		[ BoutonAction(FText::FromString(TEXT("TELEVERSER")),
+		               FOnClicked::CreateLambda([this]() {
+			               Session->televerser_vol(); Rebuild(); return FReply::Handled(); }),
+		               Se.source_vol_certifiee()) ]
+	];
+
+	return FramePoste(D, Col);
+}
+
 TSharedRef<SWidget> SSPPoste::BuildControle()
 {
 	int n = 0; const fen::app::PosteDef* defs = fen::app::postes_def(n);
 	const fen::app::PosteDef& D = defs[3];
 	fen::app::Session& Se = *Session;
+
+	// En PRO, le poste a une seconde face : l'atelier logiciel [GDD 15.1].
+	if (Se.atelier_logiciel && Se.jeu.agence.mode == fen::app::ModeAide::Pro) return BuildCodeVol();
+	if (Se.jeu.agence.mode != fen::app::ModeAide::Pro) Se.atelier_logiciel = false;
 
 	// Cibler une mission à piloter si la précédente est close (jamais en plein
 	// débrief : on ne veut pas perdre l'issue affichée).
@@ -1837,12 +2197,343 @@ TSharedRef<SWidget> SSPPoste::BuildControle()
 	Col->AddSlot().AutoHeight().Padding(0, 0, 0, 3)
 	[ LigneKV(TEXT("BUDGET CONTRAT"), FString::Printf(TEXT("%.0f M EUR"), mc->contract.terms.budget_musd)) ];
 
+	// LA PORTE DE L'ATELIER LOGICIEL. Un mécanisme correct mais inatteignable est
+	// un mécanisme absent (piège n°40) : sans ce bouton, toute la toolchain
+	// vérifiée resterait un fichier que personne n'ouvre. En NORMAL, elle n'a pas
+	// à exister — l'assistance y est le graphe [GDD 2.2].
+	if (Se.jeu.agence.mode == fen::app::ModeAide::Pro)
+	{
+		Col->AddSlot().AutoHeight().Padding(0, 1, 0, 3)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().FillWidth(1.0f).VAlign(VAlign_Center)
+			[ Txt(Se.source_vol_a_bord() ? TEXT("Logiciel de vol : A BORD")
+			                             : TEXT("Logiciel de vol : rien a bord"),
+			      10.0f, Se.source_vol_a_bord() ? ColVert : ColTexteFaible, 20) ]
+			+ SHorizontalBox::Slot().AutoWidth()
+			[ BoutonAction(FText::FromString(TEXT("ATELIER LOGICIEL >")),
+			               FOnClicked::CreateLambda([this]() {
+				               Session->atelier_logiciel = true; Rebuild(); return FReply::Handled(); })) ]
+		];
+	}
+
+	// --- LE VOL EN COURS : sa phase et sa date d'arrivée [GDD 9, 14.3] -------
+	// Le vol DURE (fen/mission/FlightTimeline.hpp) : ascension, parking,
+	// injection, croisière, puis insertion ou EDL. Sans ces deux lignes, une
+	// mission lancée aurait l'air figée pendant des mois de temps de jeu.
+	if (mc->state == St::Launched && Session->jeu.ares.initialisee())
+	{
+		const double NowDays = Session->jeu.ares.etat->clock.now_days();
+		const fen::mission::FlightPhase Ph = fen::mission::flight_phase_of(*mc, NowDays);
+		const fen::mission::ArrivalStatus Arr = fen::mission::flight_arrival(*mc, NowDays);
+		const bool bCritique = fen::mission::is_critical_phase(Ph);
+		Col->AddSlot().AutoHeight().Padding(0, 0, 0, 3)
+		[ LigneKV(TEXT("PHASE DE VOL"), FString(fen::mission::phase_name(Ph)),
+		          bCritique ? SRGB(255, 190, 90) : ColVert) ];
+		Col->AddSlot().AutoHeight().Padding(0, 0, 0, 3)
+		[ LigneKV(TEXT("ARRIVEE"),
+		          !Arr.dated ? FString(TEXT("cible non nommee : non datee"))
+		          : Arr.arrived ? FString(TEXT("atteinte"))
+		          : FString::Printf(TEXT("dans %.0f jours"), Arr.reste_jours),
+		          Arr.dated && !Arr.arrived ? SRGB(140, 179, 255) : ColVert) ];
+		// LE CORRIDOR SE LIT ICI [GDD 8.3] : « Terminal : ... incertitude 1σ/3σ ».
+		// La carte le DESSINE, mais rapporté à l'échelle du système il ne fait que
+		// quelques pixels — ce qui n'est pas séparable à l'écran doit être CHIFFRÉ
+		// (même doctrine que Novellus, piège n°41).
+		if (Se.trace_vol.ok && Se.trace_vol.corridor_3s_m > 0.0)
+		{
+			Col->AddSlot().AutoHeight().Padding(0, 0, 0, 3)
+			[ LigneKV(TEXT("CORRIDOR 3s"),
+			          FString::Printf(TEXT("%.0f km  (sans poursuite)"),
+			                          Se.trace_vol.corridor_3s_m / 1000.0),
+			          SRGB(255, 190, 90)) ];
+		}
+
+		// ═══ LA CORRECTION EST UN ACTE DU JOUEUR [GDD 7.4] ═══
+		// À la date d'une manœuvre critique, le monde est retombé au temps réel
+		// (le plafond de cadence l'impose) et le joueur a quelque chose à FAIRE :
+		// lire sa solution de navigation, décider d'un Δv, l'exécuter. Le modèle
+		// applique littéralement ce qu'il commande.
+		const fen::mission::VueNavigation Vue = Se.vue_vol(*mc);
+		if (Vue.ok && bCritique)
+		{
+			Col->AddSlot().AutoHeight().Padding(0, 6, 0, 2)
+			[ Txt(TEXT("SOLUTION DE NAVIGATION — correction de mi-parcours"), 10.0f, ColTexteFaible, 90) ];
+			Col->AddSlot().AutoHeight().Padding(6, 1)
+			[ LigneKV(TEXT("MANQUE AU BUT PROJETE"),
+			          FString::Printf(TEXT("%.0f km  (1s : %.0f km)"), Vue.manque_km, Vue.sigma_r / 1000.0),
+			          SRGB(255, 190, 90)) ];
+			Col->AddSlot().AutoHeight().Padding(6, 1)
+			[ LigneKV(TEXT("MARGE RESTANTE"),
+			          FString::Printf(TEXT("%.0f / %.0f m/s"),
+			                          Se.mission_plan.program.dv_margin - mc->tcm_dv_depense, Se.mission_plan.program.dv_margin),
+			          mc->tcm_dv_depense < Se.mission_plan.program.dv_margin ? ColVert : SRGB(242, 90, 80)) ];
+			// LE DÉLAI DE COMMUNICATION — que [GDD 8.3] liste depuis toujours
+			// parmi ce que le plan terminal doit afficher, et que rien ne
+			// montrait. Ce n'est pas décoratif : ce qu'on commande ici part
+			// maintenant et n'arrive là-bas qu'après ce délai.
+			{
+				const double Dm = Vue.delai_com_s / 60.0;
+				Col->AddSlot().AutoHeight().Padding(6, 1)
+				[ LigneKV(TEXT("DELAI DE COMMUNICATION"),
+				          FString::Printf(TEXT("%.0f min %02.0f s  (aller)  -  la commande arrive apres"),
+				                          std::floor(Dm), Vue.delai_com_s - std::floor(Dm) * 60.0),
+				          SRGB(255, 190, 90)) ];
+				// LA BOUCLE SOL SE FERME-T-ELLE ? [GDD 9.6] La comparaison de
+				// l'aller-retour a la duree PROPRE de la manoeuvre — deux
+				// grandeurs physiques, aucun seuil de confort. C'est ce qui dit
+				// au joueur pourquoi une descente ne se pilote pas du sol.
+				const fen::app::Session::BoucleSol B = Se.boucle_sol(*mc);
+				if (B.valide && B.duree_phase_s > 0.0)
+				{
+					Col->AddSlot().AutoHeight().Padding(6, 1)
+					[ LigneKV(TEXT("BOUCLE SOL"),
+					          B.fermee
+					            ? FString::Printf(TEXT("FERMEE  -  %.0f s aller-retour contre %.0f min de manoeuvre"),
+					                              B.aller_retour_s, B.duree_phase_s / 60.0)
+					            : FString::Printf(TEXT("OUVERTE  -  %.0f min aller-retour contre %.0f min : conduite A BORD"),
+					                              B.aller_retour_s / 60.0, B.duree_phase_s / 60.0),
+					          B.fermee ? ColVert : SRGB(242, 90, 80)) ];
+				}
+			}
+
+			// ═══ LE RYTHME DE MESURE EST UN CHOIX [GDD 8.6] ═══
+			// « Trop rare laisse deriver, trop frequent coute des ressources et
+			// du temps. » Sans ce bouton il n'y a rien a choisir : la poursuite
+			// etait achetee une fois a la conception et ne bougeait plus. Le prix
+			// est montre AVANT le clic, comme la marge et le banc (piege n°64).
+			{
+				const double Arc = mc->arc_poursuite_j;
+				Col->AddSlot().AutoHeight().Padding(6, 1)
+				[ LigneKV(TEXT("ARC DE POURSUITE"),
+				          FString::Printf(TEXT("%.1f j exploites  -  1s en vitesse : %.3f m/s"),
+				                          Arc, mc->nav_sigma_v),
+				          Arc > 0.0 ? ColVert : SRGB(242, 90, 80)) ];
+				const double CoutPasse = fen::mission::cout_poursuite_me(7.0);
+				Col->AddSlot().AutoHeight().Padding(6, 2)
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot().FillWidth(1.0f).VAlign(VAlign_Center)
+					[ Txt(FString::Printf(TEXT("SI ON ECOUTE 7 JOURS DE PLUS : %.3f M EUR d antenne"), CoutPasse),
+					      9.0f, ColTexteFaible, 70) ]
+					+ SHorizontalBox::Slot().AutoWidth().HAlign(HAlign_Right).VAlign(VAlign_Center)
+					[
+						BoutonAction(FText::FromString(TEXT("ACHETER 7 J D ECOUTE")),
+						             FOnClicked::CreateLambda([this, mc]() {
+							             Session->acheter_poursuite(*mc, 7.0);
+							             return FReply::Handled();
+						             }),
+						             Se.jeu.ares.etat->finance.treasury_me >= CoutPasse)
+					]
+				];
+			}
+
+			// Les trois composantes, en repère RSW — celui que le cœur déclare
+			// comme « LE repère dans lequel le joueur exprime ses Delta-v ».
+			auto AxeDv = [&](const TCHAR* Nom, int Axe)
+			{
+				return SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+				[ SNew(SBox).WidthOverride(150.0f)[ Txt(Nom, 10.0f, ColTexte) ] ]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(6, 0, 2, 0)
+				[ BoutonMini(TEXT("-"), FOnClicked::CreateLambda([this, Axe]() {
+					Session->tcm_commande[Axe] -= 1.0; Rebuild(); return FReply::Handled(); })) ]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+				[ SNew(SBox).WidthOverride(80.0f)
+				  [ Txt(FString::Printf(TEXT("%.1f m/s"), Session->tcm_commande[Axe]), 10.0f, SRGB(140, 179, 255), 0) ] ]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+				[ BoutonMini(TEXT("+"), FOnClicked::CreateLambda([this, Axe]() {
+					Session->tcm_commande[Axe] += 1.0; Rebuild(); return FReply::Handled(); })) ];
+			};
+			Col->AddSlot().AutoHeight().Padding(6, 1)[ AxeDv(TEXT("Dv RADIAL   (R)"), 0) ];
+			Col->AddSlot().AutoHeight().Padding(6, 1)[ AxeDv(TEXT("Dv LONGITUD.(S)"), 1) ];
+			Col->AddSlot().AutoHeight().Padding(6, 1)[ AxeDv(TEXT("Dv HORS-PLAN(W)"), 2) ];
+
+			Col->AddSlot().AutoHeight().Padding(6, 3)
+			[
+				SNew(SHorizontalBox)
+				// L'ASSISTANCE DÉPEND DU MODE, ET DE RIEN D'AUTRE [GDD 2.2]. En
+				// NORMAL, le solveur est un nœud préconstruit qu'on peut appeler ;
+				// en PRO, il n'existe pas — le joueur fait son calcul. C'est le
+				// premier endroit du jeu où `ModeAide` change quelque chose.
+				+ SHorizontalBox::Slot().FillWidth(1.0f).HAlign(HAlign_Right).VAlign(VAlign_Center)
+				[
+					BoutonAction(FText::FromString(TEXT("EXECUTER LA CORRECTION")),
+					             FOnClicked::CreateLambda([this, mc]() {
+						             Session->executer_tcm(*mc,
+						                 fen::Vec3{Session->tcm_commande[0],
+						                           Session->tcm_commande[1],
+						                           Session->tcm_commande[2]});
+						             Session->tcm_commande[0] = Session->tcm_commande[1] =
+						                 Session->tcm_commande[2] = 0.0;
+						             Rebuild(); return FReply::Handled(); }))
+				]
+			];
+
+			// ═══ LE GRAPHE — l'assistance du mode NORMAL [GDD 2.2, 2.4] ═══
+			// Il n'y a PAS de bouton « solveur » : une réponse en un clic serait
+			// la « procédure prête à rejouer » que [GDD 2.4] interdit. Ce que
+			// Normal accorde, ce sont des PRIMITIVES typées — un nœud, un appel
+			// d'API — que le joueur assemble lui-même, à chaque analyse. En PRO,
+			// rien : il calcule et saisit ses trois composantes.
+			if (Se.jeu.agence.mode == fen::app::ModeAide::Normal)
+			{
+				const auto Res = fen::mission::evaluer_graphe(Se.graphe, Vue);
+				Col->AddSlot().AutoHeight().Padding(0, 5, 0, 2)
+				[ Txt(TEXT("GRAPHE — assemblez le calcul (mode NORMAL)"), 10.0f, ColTexteFaible, 90) ];
+
+				for (int32 k = 0; k < (int32)Se.graphe.size(); ++k)
+				{
+					const fen::mission::NoeudDef& D2 = fen::mission::noeud_def(Se.graphe[k]);
+					const bool bFautif = (Res.noeud_fautif == k);
+					Col->AddSlot().AutoHeight().Padding(10, 0)
+					[
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+						[ SNew(SBox).WidthOverride(170.0f)
+						  [ Txt(FString::Printf(TEXT("%d. %hs"), k + 1, D2.nom), 10.0f,
+						        bFautif ? SRGB(242, 90, 80) : SRGB(140, 179, 255)) ] ]
+						+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+						[ SNew(SBox).WidthOverride(230.0f)
+						  [ Txt(FString::Printf(TEXT("%hs"), D2.appel), 9.0f, ColTexteFaible) ] ]
+						+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+						[ Txt(FString::Printf(TEXT("-> %hs"),
+						        fen::mission::type_nom(k < (int32)Res.sorties.size()
+						                               ? Res.sorties[k] : fen::mission::TypeSignal::Aucun)),
+						      9.0f, ColTexteFaible) ]
+						+ SHorizontalBox::Slot().FillWidth(1.0f).HAlign(HAlign_Right).VAlign(VAlign_Center)
+						[ BoutonMini(TEXT("x"), FOnClicked::CreateLambda([this, k]() {
+							Session->graphe.erase(Session->graphe.begin() + k);
+							Rebuild(); return FReply::Handled(); })) ]
+					];
+				}
+				if (!Res.valide)
+				{
+					Col->AddSlot().AutoHeight().Padding(10, 1)
+					[ Txt(FString(Res.motif.c_str()), 9.0f, SRGB(242, 90, 80), 20) ];
+				}
+
+				// La PALETTE : les primitives disponibles. Chacune NOMME la
+				// fonction d'API qu'elle est — c'est l'équivalence stricte de
+				// [GDD 2.2], lisible à l'écran et pas seulement promise.
+				// Deux rangees : huit primitives ne tiennent pas sur une ligne du
+				// cadre, et un bouton dont le nom est tronque ne dit plus quelle
+				// fonction il est — ce qui ruine justement l'equivalence [GDD 2.2].
+				for (int32 Rangee = 0; Rangee < 2; ++Rangee)
+				{
+					TSharedRef<SHorizontalBox> Palette = SNew(SHorizontalBox);
+					const auto& Dispo = fen::mission::noeuds_disponibles();
+					for (int32 q = Rangee * 4; q < (Rangee + 1) * 4 && q < (int32)Dispo.size(); ++q)
+					{
+						const fen::mission::TypeNoeud T = Dispo[q].type;
+						Palette->AddSlot().AutoWidth().Padding(2, 0)
+						[ SNew(SBox).WidthOverride(150.0f)
+						  [ BoutonAction(FText::FromString(FString::Printf(TEXT("%hs"), Dispo[q].nom)),
+						                 FOnClicked::CreateLambda([this, T]() {
+							                 Session->graphe.push_back(T);
+							                 Rebuild(); return FReply::Handled(); })) ] ];
+					}
+					Col->AddSlot().AutoHeight().Padding(10, 1)[ Palette ];
+				}
+
+				if (Res.valide)
+				{
+					Col->AddSlot().AutoHeight().Padding(10, 2)
+					[ BoutonAction(FText::FromString(FString::Printf(
+					      TEXT("REPORTER LE RESULTAT : R %.1f  S %.1f  W %.1f"),
+					      Res.dv_rsw.x, Res.dv_rsw.y, Res.dv_rsw.z)),
+					      FOnClicked::CreateLambda([this, Res]() {
+						      Session->tcm_commande[0] = Res.dv_rsw.x;
+						      Session->tcm_commande[1] = Res.dv_rsw.y;
+						      Session->tcm_commande[2] = Res.dv_rsw.z;
+						      Rebuild(); return FReply::Handled(); })) ];
+				}
+			}
+			else
+			{
+				// ═══ MODE PRO : LE CODE DÉCIDE [GDD 9.6, 15.1] ═══
+				// « Le joueur ne pilote pas : il écrit à l'avance la logique qui
+				// décidera à sa place, avec ses propres garde-fous. » Ici, le
+				// logiciel téléversé s'exécute sur la solution de navigation
+				// RÉELLE — dans son processus, avec son délai — et sa manœuvre
+				// remplit les trois composantes ci-dessus. Il PROPOSE ; c'est
+				// encore le joueur qui appuie sur EXECUTER.
+				Col->AddSlot().AutoHeight().Padding(0, 5, 0, 2)
+				[ Txt(TEXT("LOGICIEL DE VOL — mode PRO, aucun solveur fourni [GDD 2.2]"),
+				      10.0f, ColTexteFaible, 90) ];
+				if (!Se.source_vol_a_bord())
+				{
+					Col->AddSlot().AutoHeight().Padding(6, 1)
+					[ Txt(Se.code_a_bord
+					          ? TEXT("Le code a bord n est plus celui de l atelier. Rien d autre ne s executera.")
+					          : TEXT("Aucun code televerse. Sans lui, la correction se saisit a la main."),
+					      9.0f, SRGB(255, 190, 90), 20) ];
+				}
+				else
+				{
+					// EXÉCUTER HORS DU DOMAINE DE VALIDITÉ [GDD 15.5] : on ne
+					// l'empêche pas — on le DIT. C'est la cause d'anomalie la plus
+					// fréquente du logiciel de vol, et elle doit être un choix
+					// éclairé, pas une surprise au débrief.
+					if (Se.code_hors_domaine(*mc))
+					{
+						Col->AddSlot().AutoHeight().Padding(6, 1)
+						[ Txt(FString::Printf(TEXT("HORS DOMAINE : qualifie 3s < %.0f km, la solution est a %.0f km"),
+						                      Se.cert_vol.domain.input_hi / 1000.0,
+						                      3.0 * Vue.sigma_r / 1000.0),
+						      9.0f, SRGB(242, 90, 80), 20) ];
+						Col->AddSlot().AutoHeight().Padding(6, 0)
+						[ Txt(TEXT("Comportement NON COUVERT par le banc — anomalie legitime [GDD 15.5]."),
+						      9.0f, ColTexteFaible, 20) ];
+					}
+					Col->AddSlot().AutoHeight().Padding(6, 2)
+					[ BoutonAction(FText::FromString(TEXT("EXECUTER LE CODE DE VOL")),
+					               FOnClicked::CreateLambda([this, mc]() {
+						               Session->executer_code_vol(*mc);
+						               Rebuild(); return FReply::Handled(); })) ];
+					// CE QU'IL A DÉCIDÉ. Les quatre décisions, pas seulement le Δv :
+					// différer et alerter sont des décisions, et ne rien exécuter
+					// en est une aussi.
+					if (Se.resultat_vol_lu)
+					{
+						const fen::code::DecisionsVol& Dec = Se.resultat_vol.decisions;
+						Col->AddSlot().AutoHeight().Padding(6, 1)
+						[ LigneKV(TEXT("LE CODE A DECIDE"),
+						          !Se.resultat_vol.ok()
+						              ? FString(UTF8_TO_TCHAR(fen::code::issue_nom(Se.resultat_vol.issue)))
+						              : Dec.execute
+						                  ? FString::Printf(TEXT("executer %.2f m/s"), fen::norm(Dec.dv))
+						                  : FString::Printf(TEXT("ne rien executer (%d differee(s))"), Dec.differees),
+						          !Se.resultat_vol.ok() ? SRGB(242, 90, 80)
+						          : Dec.execute ? ColVert : SRGB(140, 179, 255)) ];
+						for (const std::string& A : Dec.alertes)
+						{
+							Col->AddSlot().AutoHeight().Padding(6, 0)
+							[ Txt(FString::Printf(TEXT("! %s"), UTF8_TO_TCHAR(A.c_str())),
+							      9.0f, SRGB(255, 190, 90), 0) ];
+						}
+					}
+				}
+			}
+		}
+	}
+
 	// --- LE PROGRAMME : ce que le joueur choisit (couche Program.hpp) ---------
 	Se.evaluer_plan();
 	fen::mission::MissionPlan& P = Se.mission_plan;
 	const auto& progEngines = fen::mission::engines();
 	const int ei = FMath::Clamp(P.program.engine_index, 0, (int)progEngines.size() - 1);
 
+	// ON NE RECONÇOIT PAS UN VÉHICULE EN VOL. Les commandes de programme (moteur,
+	// étages, essais, marge) et l'étude de navigation appartiennent à la
+	// CONCEPTION : une fois le feu vert donné, le véhicule est parti et ces
+	// boutons ne peuvent plus rien changer. Les masquer n'est donc pas un gain de
+	// place, c'est la vérité de la phase — et ça laisse la place aux données de
+	// VOL, qui elles ne servent qu'à ce moment-là. (Le cadre d'un poste CLIPPE le
+	// texte, il ne le replie pas : piège n°42.)
+	const bool bEnVol = (mc->state == St::Launched || mc->state == St::Debrief);
+	if (!bEnVol)
+	{
 	Col->AddSlot().AutoHeight().Padding(0, 6, 0, 2)
 	[ Txt(TEXT("PROGRAMME — moteur, etages, qualification"), 10.0f, ColTexteFaible, 90) ];
 
@@ -1897,13 +2588,87 @@ TSharedRef<SWidget> SSPPoste::BuildControle()
 		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
 		[ BoutonMini(TEXT("+"), FOnClicked::CreateLambda([this, &P]() {
 			P.program.test_hours += 50.0; Rebuild(); return FReply::Handled(); })) ]
-		// marge de dv
+	];
+	// MARGE DE CORRECTION — elle était AFFICHÉE sans être réglable. Tant que
+	// `p_physics` valait 0,985 elle ne servait qu'à alourdir l'étage, et personne
+	// ne la touchait ; depuis qu'elle COMMANDE la probabilité de navigation
+	// [GDD 8.4], ne pas pouvoir la régler rendrait toute mission interplanétaire
+	// impossible — un mécanisme correct et inatteignable est un mécanisme absent
+	// (piège n°40).
+	Col->AddSlot().AutoHeight().Padding(6, 1)
+	[
+		SNew(SHorizontalBox)
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)[ Txt(TEXT("MARGE CORRECTION"), 10.0f, ColTexte) ]
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(6, 0, 2, 0)
+		[ BoutonMini(TEXT("-"), FOnClicked::CreateLambda([this, &P]() {
+			P.program.dv_margin = FMath::Max(0.0, P.program.dv_margin - 25.0);
+			Rebuild(); return FReply::Handled(); })) ]
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+		[ SNew(SBox).WidthOverride(70.0f)[ Txt(FString::Printf(TEXT("%.0f m/s"), P.program.dv_margin), 10.0f, SRGB(140, 179, 255), 0) ] ]
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+		[ BoutonMini(TEXT("+"), FOnClicked::CreateLambda([this, &P]() {
+			P.program.dv_margin += 25.0; Rebuild(); return FReply::Handled(); })) ]
 		+ SHorizontalBox::Slot().FillWidth(1.0f).HAlign(HAlign_Right).VAlign(VAlign_Center)
-		[ Txt(FString::Printf(TEXT("marge %.0f m/s"), P.program.dv_margin), 9.0f, ColTexteFaible, 30) ]
+		[ Txt(TEXT("provisionnee en ergols"), 9.0f, ColTexteFaible, 30) ]
+	];
+	// POURSUITE — même histoire que la marge : `tracking_days` était acheté et
+	// facturé depuis le premier jour SANS RIEN FAIRE, donc sans bouton. Depuis
+	// qu'il commande la qualité de la solution de navigation [GDD 8.6], c'est le
+	// second levier du joueur sur son vol — et sans lui, la correction se calcule
+	// sur un état faux (en-tête de nav/Tracking.hpp).
+	Col->AddSlot().AutoHeight().Padding(6, 1)
+	[
+		SNew(SHorizontalBox)
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)[ Txt(TEXT("POURSUITE"), 10.0f, ColTexte) ]
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(6, 0, 2, 0)
+		[ BoutonMini(TEXT("-"), FOnClicked::CreateLambda([this, &P]() {
+			P.program.tracking_days = FMath::Max(0.0, P.program.tracking_days - 2.0);
+			P.program.tracking_musd = 0.12 * P.program.tracking_days;
+			Rebuild(); return FReply::Handled(); })) ]
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+		[ SNew(SBox).WidthOverride(70.0f)[ Txt(FString::Printf(TEXT("%.0f j"), P.program.tracking_days), 10.0f, SRGB(140, 179, 255), 0) ] ]
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+		[ BoutonMini(TEXT("+"), FOnClicked::CreateLambda([this, &P]() {
+			P.program.tracking_days += 2.0;
+			// Le prix d'une passe : `nav::Station::cost_musd_per_hour` x 8 h/jour,
+			// pris sur le catalogue réel du DSN — pas un tarif inventé ici.
+			P.program.tracking_musd = 0.12 * P.program.tracking_days;
+			Rebuild(); return FReply::Handled(); })) ]
+		+ SHorizontalBox::Slot().FillWidth(1.0f).HAlign(HAlign_Right).VAlign(VAlign_Center)
+		[ Txt(FString::Printf(TEXT("%.1f M EUR de passes DSN"), P.program.tracking_musd), 9.0f, ColTexteFaible, 30) ]
 	];
 
+	// --- LA NAVIGATION : ce que P(succes) doit a la trajectoire [GDD 8.4] ----
+	// Sans ces trois lignes, la marge se reglerait a l'aveugle : le joueur doit
+	// voir CE QU IL FAUT couvrir, et d'ou ca vient. C'est le chiffre du 99e
+	// centile qu'il provisionne — comme un vrai bureau d'etudes.
+	if (Se.nav_disp.ok)
+	{
+		const fen::mission::NavDispersion& N = Se.nav_disp;
+		Col->AddSlot().AutoHeight().Padding(0, 6, 0, 2)
+		[ Txt(TEXT("NAVIGATION — dispersion d'injection"), 10.0f, ColTexteFaible, 90) ];
+		Col->AddSlot().AutoHeight().Padding(6, 1)
+		[ LigneKV(TEXT("INJECTION"), FString::Printf(TEXT("%.0f m/s  (+/- %.1f, Oberth x%.1f)"),
+		          N.dv_injection, N.sigma_dv_inj, N.oberth_gain)) ];
+		Col->AddSlot().AutoHeight().Padding(6, 1)
+		[ LigneKV(TEXT("MANQUE AU BUT 1s"), FString::Printf(TEXT("%.0f km sans correction"),
+		          N.sigma_r_arr_km), SRGB(255, 190, 90)) ];
+		Col->AddSlot().AutoHeight().Padding(6, 1)
+		[ LigneKV(TEXT("CORRECTION A PREVOIR"), FString::Printf(TEXT("%.0f m/s (99e centile, TCM a J+%.0f)"),
+		          N.dv_corr_p99, N.t_tcm_days),
+		          P.program.dv_margin >= N.dv_corr_p99 ? ColVert : SRGB(242, 90, 80)) ];
+	}
+	}   // fin du bloc CONCEPTION (voir bEnVol)
+
 	// --- LE BILAN (assess) : le tableau de viabilité -------------------------
+	// PENDANT UNE MANŒUVRE CRITIQUE, l'ecran est une CONSOLE DE VOL : la fiche de
+	// viabilite n'y a pas plus sa place que les commandes de conception (piege
+	// n°65). Le joueur pilote, il n'evalue pas un programme.
+	const bool bConsole = bEnVol && Se.vue_vol(*mc).ok &&
+	                      fen::mission::is_critical_phase(fen::mission::flight_phase_of(
+	                          *mc, Se.jeu.ares.initialisee() ? Se.jeu.ares.etat->clock.now_days() : 0.0));
 	const fen::mission::Assessment& A = P.assessment;
+	if (!bConsole) {
 	Col->AddSlot().AutoHeight().Padding(0, 6, 0, 2)
 	[ Txt(TEXT("BILAN DE VIABILITE"), 10.0f, ColTexteFaible, 90) ];
 	Col->AddSlot().AutoHeight().Padding(6, 1)
@@ -1922,6 +2687,8 @@ TSharedRef<SWidget> SSPPoste::BuildControle()
 	[ Txt(A.ok ? FString(TEXT("PROGRAMME VIABLE")) : (FString(TEXT("VERROU : ")) + FString(A.why.c_str())),
 	      10.0f, A.ok ? ColVert : SRGB(242, 90, 80), 40) ];
 
+	}   // fin du BILAN (masque en console de vol)
+
 	// --- L'ISSUE (au débrief) ------------------------------------------------
 	if (mc->state == St::Debrief && Se.mission_outcome_pret)
 	{
@@ -1930,6 +2697,36 @@ TSharedRef<SWidget> SSPPoste::BuildControle()
 		      12.0f, Se.mission_outcome.success ? ColVert : SRGB(242, 90, 80), 90) ];
 		Col->AddSlot().AutoHeight().Padding(6, 0)
 		[ Txt(FString(Se.mission_outcome.cause.c_str()), 10.0f, ColTexteFaible, 30) ];
+		// LE DÉBRIEF DIT CE QUI S'EST RÉELLEMENT PASSÉ [GDD 10.4]. L'écart
+		// d'injection était invisible pendant tout le vol [GDD 7.5] : c'est ici,
+		// et seulement ici, que le joueur apprend le chiffre — et qu'il peut
+		// juger sa marge sur autre chose qu'une statistique.
+		if (mc->nav_evaluee)
+		{
+			Col->AddSlot().AutoHeight().Padding(6, 1)
+			[ LigneKV(TEXT("MANQUE AU BUT REEL"), FString::Printf(TEXT("%.0f km"), mc->nav_miss_km)) ];
+			Col->AddSlot().AutoHeight().Padding(6, 1)
+			[ LigneKV(TEXT("CORRECTION DEPENSEE"),
+			          FString::Printf(TEXT("%.0f m/s  /  %.0f m/s provisionnes"),
+			                          mc->nav_dv_required, P.program.dv_margin),
+			          mc->nav_dv_required <= P.program.dv_margin ? ColVert : SRGB(242, 90, 80)) ];
+			// QUI A TENU LES RENDEZ-VOUS. Sans cette ligne, un vol perdu faute
+			// d'avoir corrige ne se lit que comme un manque au but inexplique —
+			// et le joueur n'apprend rien de ce qui l'a coute (piege n°42).
+			{
+				const TCHAR* Qui = TEXT("PERSONNE - aucun rendez-vous tenu");
+				FLinearColor ColQui = SRGB(242, 90, 80);
+				switch (mc->vol_conduit_par)
+				{
+					case 1: Qui = TEXT("VOUS, depuis le terminal");       ColQui = ColVert;          break;
+					case 2: Qui = TEXT("LE LOGICIEL DE BORD");            ColQui = ColVert;          break;
+					case 3: Qui = TEXT("L'ADJOINT, en votre absence");    ColQui = SRGB(255, 190, 90); break;
+					default: break;
+				}
+				Col->AddSlot().AutoHeight().Padding(6, 1)
+				[ LigneKV(TEXT("CORRECTIONS CONDUITES PAR"), Qui, ColQui) ];
+			}
+		}
 	}
 
 	Col->AddSlot().FillHeight(1.0f)[ SNew(SSpacer) ];
@@ -1941,18 +2738,25 @@ TSharedRef<SWidget> SSPPoste::BuildControle()
 			: mc->state == St::Design ? TEXT("VALIDER LA CONCEPTION")
 			: mc->state == St::WindowSearch ? TEXT("RETENIR LA FENETRE")
 			: mc->state == St::Qualification ? TEXT("FEU VERT : ENGAGER (paye le programme)")
-			: mc->state == St::Launched ? TEXT("EXECUTER LE VOL")
+			: mc->state == St::Launched ? TEXT("CLORE LE VOL ET DEBRIEFER")
 			: mc->state == St::Debrief ? TEXT("CLORE LE DEBRIEF")
 			: TEXT("MISSION CLOSE");
 		const bool closable = mc->state != St::Completed && mc->state != St::Failed &&
 		                      mc->state != St::Aborted;
-		// motif de refus (gate) affiché sous le bouton
-		Col->AddSlot().AutoHeight().Padding(0, 2, 0, 4)
+		Col->AddSlot().AutoHeight().Padding(0, 2, 0, 1)
 		[ BoutonAction(FText::FromString(lib),
 		               FOnClicked::CreateLambda([this]() {
 			               Session->avancer_mission();
 			               Rebuild(); return FReply::Handled();
 		               }), closable) ];
+		// LE MOTIF DU REFUS. Il était calculé et jeté : le bouton refusait en
+		// silence, ce qui se lit comme une panne (piège n°42). Deux lignes
+		// courtes plutôt qu'une longue — le cadre du poste CLIPPE, il ne replie pas.
+		if (!Session->dernier_refus_mission.empty())
+		{
+			Col->AddSlot().AutoHeight().Padding(6, 0, 0, 4)
+			[ Txt(FString(Session->dernier_refus_mission.c_str()), 10.0f, SRGB(242, 90, 80), 30) ];
+		}
 	}
 	return FramePoste(D, Col);
 }

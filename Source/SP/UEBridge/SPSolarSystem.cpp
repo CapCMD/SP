@@ -29,6 +29,7 @@
 #include "fen/core/Constants.hpp"
 #include "fen/ephem/BodyOrientation.hpp"
 #include "fen/ephem/Ephemeris.hpp"
+#include "fen/ephem/Satellites.hpp"
 
 #include "SPSolarSystem.h"
 
@@ -44,6 +45,8 @@
 #include "Components/StaticMeshComponent.h"
 #include "Engine/Engine.h"
 #include "Engine/GameViewportClient.h"
+#include "Engine/LocalPlayer.h"
+#include "SceneView.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
@@ -61,49 +64,47 @@ struct FBodyDef
 	const TCHAR* Asset;      // nom d'asset sous /Game/SolarSystem (import GLB)
 	FLinearColor Color;      // repli si le GLB n'est pas importé ; couleur du marqueur
 	bool bMoon;
-	// Période SIDÉRALE vraie en heures (négatif = rétrograde). N'est utilisée QUE
-	// comme repli pour un corps sans éléments IAU : l'orientation réelle (axe +
-	// obliquité + méridien origine) vient désormais de `ephem/BodyOrientation`
-	// (WGCCRE), fonction déterministe de l'époque. Jalon B2 (IAU) : LEVÉ.
-	double SpinH;
 };
 
 // ORDRE : chaque lune SUIT son parent. Ce n'est pas cosmétique — la règle de
 // séparabilité écran (piège n°41) teste une lune contre l'item déjà publié de son
-// parent : il doit donc être calculé avant. `SpinH` d'une lune = sa période
-// ORBITALE (rotation synchrone : toutes ces lunes présentent la même face à leur
-// planète — c'est un FAIT physique, pas un réglage), négatif si rétrograde.
+// parent : il doit donc être calculé avant.
+// LA PÉRIODE SIDÉRALE A DISPARU DE CETTE TABLE (2026-07-27) : c'était le repli de
+// l'ancien `OrientationAt`, une rotation à axe et à phase inventés. L'orientation
+// vient maintenant ENTIÈREMENT du cœur (`ephem/BodyOrientation` pour les corps à
+// éléments IAU, `ephem/Satellites` pour le verrou synchrone des lunes) — il n'y a
+// plus de chiffre d'orientation dupliqué ici, donc plus de chiffre à désaccorder.
 const FBodyDef GBodies[] = {
-	{Body::Sun,      Body::Sun,      TEXT("Sun"),     FLinearColor(1.00f, 0.85f, 0.30f), false,   609.12},
-	{Body::Mercury,  Body::Sun,      TEXT("Mercury"), FLinearColor(0.55f, 0.50f, 0.45f), false,  1407.6},
-	{Body::Venus,    Body::Sun,      TEXT("Venus"),   FLinearColor(0.90f, 0.75f, 0.50f), false, -5832.5},
-	{Body::EarthBary,Body::Sun,      TEXT("Earth"),   FLinearColor(0.25f, 0.45f, 0.90f), false,    23.9345},
-	{Body::Moon,     Body::EarthBary,TEXT("Moon"),    FLinearColor(0.62f, 0.62f, 0.62f), true,    655.72},
-	{Body::Mars,     Body::Sun,      TEXT("Mars"),    FLinearColor(0.85f, 0.45f, 0.25f), false,    24.6229},
-	{Body::Phobos,   Body::Mars,     TEXT("Phobos"),  FLinearColor(0.55f, 0.50f, 0.46f), true,      7.654},
-	{Body::Deimos,   Body::Mars,     TEXT("Deimos"),  FLinearColor(0.58f, 0.53f, 0.48f), true,     30.299},
-	{Body::Jupiter,  Body::Sun,      TEXT("Jupiter"), FLinearColor(0.80f, 0.65f, 0.50f), false,     9.925},
-	{Body::Io,       Body::Jupiter,  TEXT("Io"),    FLinearColor(0.92f, 0.84f, 0.45f), true,     42.459},
-	{Body::Europa,   Body::Jupiter,  TEXT("Europa"),  FLinearColor(0.85f, 0.80f, 0.72f), true,     85.228},
-	{Body::Ganymede, Body::Jupiter,  TEXT("Ganymede"),FLinearColor(0.68f, 0.63f, 0.58f), true,    171.709},
-	{Body::Callisto, Body::Jupiter,  TEXT("Callisto"),FLinearColor(0.48f, 0.44f, 0.40f), true,    400.536},
-	{Body::Saturn,   Body::Sun,      TEXT("Saturn"),  FLinearColor(0.85f, 0.75f, 0.55f), false,    10.656},
-	{Body::Mimas,    Body::Saturn,   TEXT("Mimas"),   FLinearColor(0.72f, 0.72f, 0.70f), true,     22.618},
-	{Body::Enceladus,Body::Saturn,   TEXT("Enceladus"),FLinearColor(0.95f,0.96f, 0.97f), true,     32.885},
-	{Body::Tethys,   Body::Saturn,   TEXT("Tethys"),  FLinearColor(0.88f, 0.88f, 0.86f), true,     45.307},
-	{Body::Dione,    Body::Saturn,   TEXT("Dione"),   FLinearColor(0.80f, 0.80f, 0.78f), true,     65.686},
-	{Body::Rhea,     Body::Saturn,   TEXT("Rhea"),    FLinearColor(0.78f, 0.78f, 0.76f), true,    108.437},
-	{Body::Titan,    Body::Saturn,   TEXT("Titan"),   FLinearColor(0.80f, 0.65f, 0.30f), true,    382.690},
-	{Body::Iapetus,  Body::Saturn,   TEXT("Iapetus"), FLinearColor(0.62f, 0.58f, 0.52f), true,   1903.924},
-	{Body::Uranus,   Body::Sun,      TEXT("Uranus"),  FLinearColor(0.55f, 0.75f, 0.85f), false,   -17.24},
-	{Body::Miranda,  Body::Uranus,   TEXT("Miranda"), FLinearColor(0.70f, 0.70f, 0.70f), true,     33.924},
-	{Body::Umbriel,  Body::Uranus,   TEXT("Umbriel"), FLinearColor(0.52f, 0.52f, 0.52f), true,     99.460},
-	{Body::Titania,  Body::Uranus,   TEXT("Titania"), FLinearColor(0.66f, 0.63f, 0.60f), true,    208.941},
-	{Body::Oberon,   Body::Uranus,   TEXT("Oberon"),  FLinearColor(0.60f, 0.56f, 0.53f), true,    323.118},
-	{Body::Neptune,  Body::Sun,      TEXT("Neptune"), FLinearColor(0.35f, 0.50f, 0.90f), false,    16.11},
-	{Body::Triton,   Body::Neptune,  TEXT("Triton"),  FLinearColor(0.82f, 0.80f, 0.76f), true,   -141.044},
-	{Body::Pluto,    Body::Sun,      TEXT("Pluto"),   FLinearColor(0.65f, 0.60f, 0.55f), false,  -153.29},
-	{Body::Charon,   Body::Pluto,    TEXT("Charon"),  FLinearColor(0.58f, 0.56f, 0.55f), true,    153.294},
+	{Body::Sun,      Body::Sun,      TEXT("Sun"),     FLinearColor(1.00f, 0.85f, 0.30f), false},
+	{Body::Mercury,  Body::Sun,      TEXT("Mercury"), FLinearColor(0.55f, 0.50f, 0.45f), false},
+	{Body::Venus,    Body::Sun,      TEXT("Venus"),   FLinearColor(0.90f, 0.75f, 0.50f), false},
+	{Body::EarthBary,Body::Sun,      TEXT("Earth"),   FLinearColor(0.25f, 0.45f, 0.90f), false},
+	{Body::Moon,     Body::EarthBary,TEXT("Moon"),    FLinearColor(0.62f, 0.62f, 0.62f), true},
+	{Body::Mars,     Body::Sun,      TEXT("Mars"),    FLinearColor(0.85f, 0.45f, 0.25f), false},
+	{Body::Phobos,   Body::Mars,     TEXT("Phobos"),  FLinearColor(0.55f, 0.50f, 0.46f), true},
+	{Body::Deimos,   Body::Mars,     TEXT("Deimos"),  FLinearColor(0.58f, 0.53f, 0.48f), true},
+	{Body::Jupiter,  Body::Sun,      TEXT("Jupiter"), FLinearColor(0.80f, 0.65f, 0.50f), false},
+	{Body::Io,       Body::Jupiter,  TEXT("Io"),      FLinearColor(0.92f, 0.84f, 0.45f), true},
+	{Body::Europa,   Body::Jupiter,  TEXT("Europa"),  FLinearColor(0.85f, 0.80f, 0.72f), true},
+	{Body::Ganymede, Body::Jupiter,  TEXT("Ganymede"),FLinearColor(0.68f, 0.63f, 0.58f), true},
+	{Body::Callisto, Body::Jupiter,  TEXT("Callisto"),FLinearColor(0.48f, 0.44f, 0.40f), true},
+	{Body::Saturn,   Body::Sun,      TEXT("Saturn"),  FLinearColor(0.85f, 0.75f, 0.55f), false},
+	{Body::Mimas,    Body::Saturn,   TEXT("Mimas"),   FLinearColor(0.72f, 0.72f, 0.70f), true},
+	{Body::Enceladus,Body::Saturn,   TEXT("Enceladus"),FLinearColor(0.95f,0.96f, 0.97f), true},
+	{Body::Tethys,   Body::Saturn,   TEXT("Tethys"),  FLinearColor(0.88f, 0.88f, 0.86f), true},
+	{Body::Dione,    Body::Saturn,   TEXT("Dione"),   FLinearColor(0.80f, 0.80f, 0.78f), true},
+	{Body::Rhea,     Body::Saturn,   TEXT("Rhea"),    FLinearColor(0.78f, 0.78f, 0.76f), true},
+	{Body::Titan,    Body::Saturn,   TEXT("Titan"),   FLinearColor(0.80f, 0.65f, 0.30f), true},
+	{Body::Iapetus,  Body::Saturn,   TEXT("Iapetus"), FLinearColor(0.62f, 0.58f, 0.52f), true},
+	{Body::Uranus,   Body::Sun,      TEXT("Uranus"),  FLinearColor(0.55f, 0.75f, 0.85f), false},
+	{Body::Miranda,  Body::Uranus,   TEXT("Miranda"), FLinearColor(0.70f, 0.70f, 0.70f), true},
+	{Body::Umbriel,  Body::Uranus,   TEXT("Umbriel"), FLinearColor(0.52f, 0.52f, 0.52f), true},
+	{Body::Titania,  Body::Uranus,   TEXT("Titania"), FLinearColor(0.66f, 0.63f, 0.60f), true},
+	{Body::Oberon,   Body::Uranus,   TEXT("Oberon"),  FLinearColor(0.60f, 0.56f, 0.53f), true},
+	{Body::Neptune,  Body::Sun,      TEXT("Neptune"), FLinearColor(0.35f, 0.50f, 0.90f), false},
+	{Body::Triton,   Body::Neptune,  TEXT("Triton"),  FLinearColor(0.82f, 0.80f, 0.76f), true},
+	{Body::Pluto,    Body::Sun,      TEXT("Pluto"),   FLinearColor(0.65f, 0.60f, 0.55f), false},
+	{Body::Charon,   Body::Pluto,    TEXT("Charon"),  FLinearColor(0.58f, 0.56f, 0.55f), true},
 };
 constexpr int32 NUM_BODIES = UE_ARRAY_COUNT(GBodies);
 
@@ -121,6 +122,21 @@ constexpr double UU_PER_KM = 1.0e5;      // 1 km = 100 000 cm = 100 000 u
 // sous le budget d'un batch de lignes, et la courbe devient lisse au gros plan.
 constexpr int32  ORBIT_SAMPLES = 512;
 constexpr double ORBIT_REDRAW_DAYS = 2.0;      // dérive d'éphéméride sous le pixel
+// ═══ TRAÎNÉE PLUTÔT QU'ANNEAU FERMÉ ═══ (2026-07-27, demande utilisateur)
+// La trajectoire s'allume DERRIÈRE le corps et s'estompe vers la queue, façon
+// Eyes on the Solar System. Fraction de période allumée : assez longue pour que
+// la forme de l'orbite se lise, assez courte pour que la queue meure avant de
+// rattraper la tête (une trace qui se rejoint redevient un anneau).
+constexpr double ORBIT_TRAIL_FRAC = 0.72;
+// Exposant du fondu (1 = linéaire). Au-dessus, la tête reste franche plus
+// longtemps et la queue part vite — c'est le profil de la référence.
+constexpr double ORBIT_TRAIL_GAMMA = 1.35;
+// En deçà de cette période, la trace se REBOUCLE (fenêtre = une période pile).
+// N'est vrai que d'un modèle exactement périodique : ce seuil ne s'applique qu'aux
+// lunes de `Satellites.hpp` (cercles parfaits). Il vaut plusieurs fois la
+// péremption du cache, pour que ces orbites très rapides (Phobos : 7,7 h) ne
+// forcent pas un ré-échantillonnage à chaque poignée de minutes de jeu.
+constexpr double ORBIT_CYCLE_MAX_S = 8.0 * 86400.0;
 constexpr int32  FLEET_PER_CAT = 6;
 constexpr int32  FLEET_GEO0 = 0, FLEET_MARS0 = 6, FLEET_PROBE0 = 12, FLEET_GEOFLIGHT = 18;
 constexpr int32  FLEET_TOTAL = 19;
@@ -144,6 +160,30 @@ constexpr double BODY_GEOM_FACTOR = 400.0;
 // EXACTEMENT la position écran (projection invariante par échelle radiale) ;
 // seule la profondeur du marqueur change — invisible pour un point/marqueur.
 constexpr double RENDER_MAX_UU = 1.0e6;
+// PLANCHER DE RENDU : la SURFACE du corps le plus proche ne doit jamais rendre en
+// deçà. 1e4 u = 100 m — très au-delà du plan de clipping proche (10 u) et de
+// l'enveloppe de Novellus (55 m), donc la Terre vue de la cupola est devant
+// l'œil et derrière le hublot, pas noyée dans la cabine. Voir l'homothétie.
+constexpr double RENDER_MIN_UU = 1.0e4;
+// Genou de la COURBURE des lointains : en deçà, la mise à l'échelle est purement
+// linéaire (le premier plan est rendu à son facteur exact) ; au-delà, les
+// distances sont repliées dans (Genou, RENDER_MAX_UU] par une hyperbole. Le
+// repli est STRICTEMENT CROISSANT : deux corps à des distances différentes ne
+// peuvent pas atterrir sur la même sphère — c'était le défaut de la borne
+// individuelle (Lune et Terre qui s'interpénétraient), et il ne revient pas.
+// La taille angulaire reste EXACTE : le rayon subit le même facteur que la
+// position, et une mise à l'échelle radiale de centre l'œil ne change pas la
+// projection.
+constexpr double RENDER_KNEE_UU = 0.5e6;
+
+// Distance de rendu d'un corps, à partir de sa distance vraie mise à l'échelle.
+// Identité sous le genou ; hyperbole croissante et bornée au-dessus.
+double RemapDist(double DistUU)
+{
+	if (DistUU <= RENDER_KNEE_UU) return DistUU;
+	return RENDER_KNEE_UU +
+	       (RENDER_MAX_UU - RENDER_KNEE_UU) * (1.0 - RENDER_KNEE_UU / DistUU);
+}
 
 // ═══ REBASÉ (km) -> RENDU (cm réels) ═══
 // Ancienne « compression scaled space » SUPPRIMÉE (décision 2026-07-25 : rendu à
@@ -157,6 +197,41 @@ FVector CompressKm(const FVector& RelKm, double* OutFactor = nullptr)
 	// rayon (OutFactor), donc la taille angulaire reste exacte.
 	if (OutFactor) *OutFactor = UU_PER_KM;
 	return RelKm * UU_PER_KM;
+}
+
+// ═══ L'ASPECT DU VIEWPORT, LU LÀ OÙ IL EST VRAI ═══ (2026-07-27)
+// `GEngine->GameViewport` est le viewport GLOBAL : en PIE il peut ne pas être
+// celui qui rend ce monde. On demande d'abord au joueur local de CE monde, qui
+// est la source dont se sert le moteur lui-même pour bâtir sa matrice de
+// projection ; le viewport global n'est qu'un repli, et le 16:9 un dernier
+// recours SIGNALÉ (un repli silencieux est exactement ce qui a fait décaler les
+// marqueurs pendant des jours).
+double ViewportAspect(const UWorld* W)
+{
+	if (W)
+		if (const APlayerController* PC = W->GetFirstPlayerController())
+			if (const ULocalPlayer* LP = PC->GetLocalPlayer())
+				if (LP->ViewportClient && LP->ViewportClient->Viewport)
+				{
+					const FIntPoint S = LP->ViewportClient->Viewport->GetSizeXY();
+					const double Wpx = S.X * LP->Size.X, Hpx = S.Y * LP->Size.Y;
+					if (Wpx > 1.0 && Hpx > 1.0) return Wpx / Hpx;
+				}
+	if (GEngine && GEngine->GameViewport)
+	{
+		FVector2D VP;
+		GEngine->GameViewport->GetViewportSize(VP);
+		if (VP.X > 1.0 && VP.Y > 1.0) return VP.X / VP.Y;
+	}
+	static bool bDit = false;
+	if (!bDit)
+	{
+		bDit = true;
+		UE_LOG(LogTemp, Warning,
+		       TEXT("[SPSolarSystem] aucun viewport interrogeable : aspect suppose 16:9. "
+		            "Marqueurs et tracés divergeront si la fenêtre n'est pas en 16:9."));
+	}
+	return 16.0 / 9.0;
 }
 
 // L'éphéméride Standish est sans état : une instance partagée suffit.
@@ -201,11 +276,22 @@ FVector BodyWorldKm(const FBodyDef& Def, double EpochTdb)
 	return EclToUeKm(GEph.state(Def.B, Body::Sun, E).r);
 }
 
-// Période orbitale (s) autour du parent, tirée de l'état réel (vis-viva) — pas
-// d'une table : c'est l'éphéméride qui décide.
-double OrbitalPeriodS(const FBodyDef& Def, double EpochTdb)
+// Période de la TRACE (s) : la durée au bout de laquelle le corps revient là où
+// il était, telle que le MODÈLE qui le déplace la définit.
+//
+// PIÈGE MESURÉ À L'ORACLE (2026-07-27, `diag_orbites`). Elle était tirée du seul
+// vis-viva, avec le µ du parent SEUL — alors que `Satellites.hpp` fait tourner
+// ses lunes sur µ(parent) + µ(lune). L'écart est invisible partout... sauf sur
+// PLUTON-CHARON, quasi-binaire : la période sortait 29 % trop longue et la trace
+// de Charon se rebouclait 104° trop loin (écart de fermeture mesuré : 1,57 fois
+// le rayon de l'orbite). Pour un corps dont le modèle EST périodique, la période
+// se demande donc au modèle lui-même — le vis-viva ne sert que de repli, pour les
+// corps que Standish propage par éléments osculateurs.
+double TracePeriodS(const FBodyDef& Def, double EpochTdb)
 {
 	if (Def.B == Body::Sun) return 0.0;
+	if (const fen::ephem::SatelliteDef* S = fen::ephem::satellite_def(Def.B))
+		return fen::ephem::satellite_period_days(*S) * 86400.0;
 	const Body Centre = Def.bMoon ? Def.Parent : Body::Sun;
 	const fen::ephem::PosVel PV = GEph.state(Def.B, Centre, fen::Epoch{EpochTdb});
 	const double Mu = fen::ephem::body_mu(Centre);
@@ -220,34 +306,85 @@ double OrbitalPeriodS(const FBodyDef& Def, double EpochTdb)
 	return UE_DOUBLE_TWO_PI * FMath::Sqrt(A * A * A / Mu);
 }
 
-// Orientation propre à l'époque = INCLINAISON (obliquité IAU) + ROTATION propre
-// (angle du méridien origine W(t)). Le pôle vient de `ephem::spin_axis_ecliptic`
-// (repère écliptique J2000), converti en UE par le MÊME miroir y que les
-// positions. Le miroir change la chiralité : une rotation directe en écliptique
-// devient −W en UE — d'où le signe négatif, cohérent avec l'ancien yaw −θ.
-// Fonction PURE de l'époque : déterministe, rejouable. [IAU WGCCRE]
+// écliptique (droitier, m) -> UE (gaucher) : le MÊME miroir en y que les positions,
+// pour une DIRECTION (pas d'unité à convertir).
+FVector DirEclToUe(const fen::Vec3& V) { return FVector(V.x, -V.y, V.z); }
+
+// ═══ DU REPÈRE DU CORPS À LA ROTATION DU MESH ═══ (2026-07-27)
+//
+// Le repère lié au corps est calculé par le CŒUR (`ephem::body_frame_ecliptic`
+// pour les corps à éléments IAU, `ephem::satellite_frame_ecliptic` pour les lunes
+// verrouillées) : le rendu ne recalcule aucune orientation, il change de repère.
+// Deux changements de convention se composent ici, et il faut les DEUX.
+//
+// 1. ÉCLIPTIQUE -> UE : le miroir en y renverse la chiralité. Le triplet du corps
+//    (droitier par construction) se lit gaucher une fois ses composantes en UE.
+// 2. LE MESH N'EST PAS ORIENTÉ COMME LA CARTE. `SM_SP_Body` sort de
+//    `FSphereGenerator` (via `append_sphere_lat_long`, aucune transformation
+//    ajoutée) : sommet = (cos θ sin φ, sin θ sin φ, cos φ), U = 1 − θ/2π et
+//    V = φ/π. Avec une équirectangulaire centrée sur la longitude 0 et le nord en
+//    haut (U = 0,5 + λ/360), il vient θ = π − λ, donc :
+//        longitude 0  -> local −X        longitude +90° est -> local +Y
+//        pôle nord    -> local +Z
+//    LE MÉRIDIEN ORIGINE EST SUR −X, pas sur +X. C'est une propriété de l'asset,
+//    lue dans le générateur du moteur, pas un réglage à tâtonner.
+//
+// Les deux renversements se composent en une rotation PROPRE (det = +1, vérifié :
+// (−1)·(−1)) — le quaternion se bâtit donc directement, sans miroir résiduel.
+// Les lignes d'une FMatrix UE sont les IMAGES des axes locaux (convention
+// vecteur-ligne : v_monde = v_local × M).
+FQuat MeshRotationFrom(const fen::ephem::BodyFrame& F)
+{
+	const FVector X = DirEclToUe(F.x), Y = DirEclToUe(F.y), Z = DirEclToUe(F.z);
+	return FMatrix(-X, Y, Z, FVector::ZeroVector).ToQuat().GetNormalized();
+}
+
+// ═══ L'ATTITUDE DE NOVELLUS : LA CUPOLA REGARDE LA TERRE ═══ (2026-07-27)
+//
+// LE MODÈLE EXTÉRIEUR ÉTAIT POSÉ SANS AUCUNE ORIENTATION (position + échelle, pas
+// de rotation) : la station gardait donc un cap fixe dans le référentiel inertiel,
+// donc sa cupola balayait le vide, l'espace, la Terre, le vide, au fil de l'orbite.
+// L'ISS ne vole pas comme ça — elle tient une attitude LVLH (« XVV », torque
+// equilibrium) : axe de vol dans le vecteur vitesse, et le NADIR vers la Terre,
+// où sont la cupola et les fenêtres d'observation. Elle fait un tour complet par
+// orbite dans le repère inertiel, ce qui est exactement ce qu'on doit voir.
+//
+// LE CALCUL A ÉMIGRÉ EN C++ PUR (`app/novellus_orbite.hpp`), et ce n'est pas un
+// rangement : TROIS consommateurs doivent voir la MÊME attitude, à la frame près —
+// ce modèle extérieur, la géométrie INTÉRIEURE (SPStation) et la pose de caméra du
+// handoff (`Session::pose_bord`, qui vit en C++ pur). Deux d'entre eux se relaient
+// à la traversée de la coque : la moindre divergence ferait SAUTER l'orientation
+// de la station à cet instant précis. Le pont porte donc les trois vecteurs, déjà
+// dans le repère de rendu, et le rendu ne dérive rien [doctrine du pont]. Le repère
+// du modèle (+X avant, +Y tribord, +Z zénith) y est documenté et MESURÉ par
+// `Tools/diag_iss_repere.py`.
+//
+// Ici il ne reste que le changement de représentation : les lignes d'une FMatrix UE
+// sont les IMAGES des axes locaux, et ce sont exactement les trois vecteurs publiés.
+FQuat StationAttitude(const fen::app::RenderBridge::StationWorld& St)
+{
+	const FVector Fwd(St.att_avant[0], St.att_avant[1], St.att_avant[2]);
+	const FVector Stbd(St.att_tribord[0], St.att_tribord[1], St.att_tribord[2]);
+	const FVector Up(St.att_zenith[0], St.att_zenith[1], St.att_zenith[2]);
+	return FMatrix(Fwd, Stbd, Up, FVector::ZeroVector).ToQuat().GetNormalized();
+}
+
+// Orientation propre à l'époque : fonction PURE de l'époque, déterministe et
+// rejouable. Deux régimes, tous deux SANS phase à deviner :
+//   . lune de `Satellites.hpp` -> verrou synchrone (même face à son primaire) ;
+//   . corps à éléments IAU     -> pôle + méridien origine W(t) [WGCCRE].
+// Il n'y a pas de troisième cas : la table `GBodies` est exactement l'union des
+// deux (30 = 12 IAU + 19 lunes − Titan compté deux fois). `BuildScene` le VÉRIFIE
+// au démarrage plutôt que de faire confiance à ce commentaire.
 FQuat OrientationAt(const FBodyDef& Def, double EpochTdb)
 {
 	using namespace fen::ephem;
-	if (!has_orientation(Def.B))
-	{
-		// Repli : aucun élément IAU pour ce corps -> axe = normale écliptique et
-		// rotation par la période sidérale (comportement historique, sans obliquité).
-		if (Def.SpinH == 0.0) return FQuat::Identity;
-		const double Tsid = Def.SpinH * 3600.0;
-		const double Theta = UE_DOUBLE_TWO_PI * FMath::Frac(EpochTdb / Tsid);
-		return FQuat(FVector::UpVector, -Theta);
-	}
-	// Pôle nord IAU en écliptique -> UE (miroir y), unitaire.
-	const fen::Vec3 Ax = spin_axis_ecliptic(Def.B);
-	const FVector AxisUe = FVector(Ax.x, -Ax.y, Ax.z).GetSafeNormal();
-	// Inclinaison : amener +Z local (pôle du mesh) sur l'axe réel du corps.
-	const FQuat Tilt = FQuat::FindBetweenNormals(FVector::UpVector, AxisUe);
-	// Rotation propre autour de ce pôle par l'angle du méridien origine W(t). Un
-	// taux W négatif (Vénus, Uranus) donne naturellement une rotation rétrograde.
-	const double Wdeg = prime_meridian_deg(Def.B, fen::Epoch{EpochTdb});
-	const FQuat Spin = FQuat(AxisUe, -FMath::DegreesToRadians(Wdeg));
-	return Spin * Tilt;
+	const fen::Epoch E{EpochTdb};
+	if (const SatelliteDef* S = satellite_def(Def.B))
+		return MeshRotationFrom(satellite_frame_ecliptic(*S, E));
+	if (has_orientation(Def.B))
+		return MeshRotationFrom(body_frame_ecliptic(Def.B, E));
+	return FQuat::Identity;      // signalé par BuildScene, jamais atteint en l'état
 }
 
 UStaticMesh* FindImportedMesh(const TCHAR* AssetName)
@@ -343,6 +480,17 @@ void USPSolarSystemSubsystem::BuildScene()
 	// Soleil et marqueurs : émissifs (param vectoriel "Color" vérifié dans l'uasset).
 	UMaterialInterface* EmissiveMat = LoadObject<UMaterialInterface>(
 		nullptr, TEXT("/Engine/EngineMaterials/EmissiveMeshMaterial.EmissiveMeshMaterial"));
+
+	// ═══ AUCUN CORPS SANS ORIENTATION ═══ (2026-07-27)
+	// `OrientationAt` n'a plus de repli : un corps qui n'est ni une lune verrouillée
+	// ni un corps à éléments IAU rendrait FIGÉ, sans que rien ne le dise. On le
+	// vérifie une fois au démarrage plutôt que de le supposer dans un commentaire —
+	// c'est ce genre de silence qui a laissé les dix-huit lunes tourner faux.
+	for (const FBodyDef& Def : GBodies)
+		if (!fen::ephem::satellite_def(Def.B) && !fen::ephem::has_orientation(Def.B))
+			UE_LOG(LogTemp, Warning,
+			       TEXT("[SPSolarSystem] %s : ni lune verrouillee ni elements IAU -> rendu SANS rotation"),
+			       Def.Asset);
 
 	for (const FBodyDef& Def : GBodies)
 	{
@@ -558,25 +706,39 @@ void USPSolarSystemSubsystem::BuildScene()
 	bBuilt = true;
 }
 
+// LA GÉOMÉTRIE DU MONDE REND-ELLE ? Vrai au plan système, au décor du menu, et
+// désormais AUSSI à bord — le monde est unique, et depuis la cupola on doit voir
+// la Terre. Ce n'est plus la même question que « la carte a-t-elle l'œil ».
 void USPSolarSystemSubsystem::SetMapActive(bool bActive)
 {
 	if (MapActor) MapActor->SetActorHiddenInGame(!bActive);
+}
+
+// LA CARTE A-T-ELLE L'ŒIL ? C'est ce qui commande la CAMÉRA et les remises à zéro
+// du cadrage. À bord, la réponse est non : le pawn tient la caméra (SPStation), le
+// plan système n'est qu'un décor autour de lui.
+void USPSolarSystemSubsystem::SetMapHasEye(bool bHasEye)
+{
 	UWorld* W = GetWorld();
 	APlayerController* PC = W ? W->GetFirstPlayerController() : nullptr;
-	if (!PC) return;
-	if (bActive)
+	if (bHasEye)
 	{
-		PreviousViewTarget = PC->GetViewTarget();
-		if (MapCamera) PC->SetViewTargetWithBlend(MapCamera, 0.0f);
 		LastOrbitEpoch = -1.0e300;         // force le retracé des orbites
 		bFocusPrimed = false;              // recadre sans animation parasite
 		SmoothDistKm = -1.0;               // ... et sans vol parasite à l'entrée
+		if (!PC) return;
+		PreviousViewTarget = PC->GetViewTarget();
+		if (MapCamera) PC->SetViewTargetWithBlend(MapCamera, 0.0f);
 	}
 	else
 	{
+		// Les traits d'orbite ne sont émis que quand la carte a l'œil : on les
+		// purge en la lui retirant, sinon ils resteraient tendus en travers de
+		// l'intérieur de la station.
 		if (ULineBatchComponent* LB =
 		        W ? W->GetLineBatcher(UWorld::ELineBatcherType::WorldPersistent) : nullptr)
 			LB->Flush();
+		if (!PC) return;
 		// Ne rendre la caméra QUE si personne ne l'a déjà reprise : la station
 		// s'active dans la même frame que la désactivation du décor du menu, et
 		// l'ordre des Tick entre subsystems n'est pas garanti.
@@ -708,10 +870,15 @@ void USPSolarSystemSubsystem::UpdateScene(double EpochTdb, const FVector& CamWor
 	// bornée radialement à RENDER_MAX_UU pour rester sous le plafond de précision
 	// GPU d'UE (cf. RENDER_MAX_UU). Même direction depuis l'œil -> même position
 	// écran ; seule la profondeur change. Les lignes d'orbite ont leur R propre.
-	auto R = [&CamWorldKm](const FVector& WorldKm) {
+	// `RenderRot` : identité au plan système, inverse de l'attitude À BORD — le
+	// rendu s'y fait dans le repère de la STATION (voir GetRenderRot). Elle
+	// s'applique APRÈS la compression : celle-ci est radiale autour de l'œil, donc
+	// une rotation autour de l'œil commute avec elle, et l'ordre ne change rien —
+	// on la met là où il n'y a qu'une ligne à écrire.
+	auto R = [&CamWorldKm, this](const FVector& WorldKm) {
 		const FVector P = CompressKm(WorldKm - CamWorldKm);
 		const double M = P.Size();
-		return (M > RENDER_MAX_UU) ? P * (RENDER_MAX_UU / M) : P;
+		return RenderRot.RotateVector((M > RENDER_MAX_UU) ? P * (RENDER_MAX_UU / M) : P);
 	};
 	// Taille d'un marqueur pour qu'il garde une taille écran constante.
 	auto MarkerScale = [](const FVector& Rendered) {
@@ -732,16 +899,50 @@ void USPSolarSystemSubsystem::UpdateScene(double EpochTdb, const FVector& CamWor
 	// les tailles angulaires ET l'ordre des profondeurs — c'est la seule
 	// contraction qui ne ment sur rien. On la calibre sur le corps le plus
 	// éloigné effectivement rendu en géométrie.
+	//
+	// ═══ ... MAIS ELLE NE DOIT PAS ÉCRASER LE CORPS LE PLUS PROCHE ═══ (2026-07-27)
+	// Calibrée sur le corps le plus LOINTAIN, l'homothétie unique porte tout le
+	// poids de la dynamique de la scène. Depuis Novellus, cette dynamique est
+	// démente : la Terre est à 6 796 km, le Soleil à 1,5e8 — un rapport de 22 000.
+	// Le facteur tombait à 6,6e-8 et la Terre était rendue en SPHÈRE DE 42 cm à
+	// 45 cm de l'œil. Taille angulaire juste (70°), position juste (mesurée : le
+	// centre tombe pile au nadir) — et pourtant RIEN à l'écran : tout l'hémisphère
+	// visible se trouvait entre 2,7 et 5,5 u de profondeur, c'est-à-dire ENTIÈREMENT
+	// devant le plan de clipping proche (10 u). On voyait les étoiles à travers la
+	// Terre. Le défaut n'est pas propre au rendu à bord : il frappait déjà tout
+	// cadrage serré sur un corps depuis un objet proche.
+	//
+	// LE FACTEUR EST DONC BORNÉ PAR LE BAS, par ce que le PREMIER PLAN exige : la
+	// surface du corps le plus proche doit rendre au-delà de `RENDER_MIN_UU`. Et
+	// comme les deux contraintes ne peuvent pas toujours être satisfaites ensemble,
+	// c'est celle du premier plan qui gagne — le lointain, lui, se rattrape par une
+	// COURBURE (voir `RemapDist`) au lieu d'un écrasement uniforme.
+	//
+	// CE QUI GARANTIT L'ABSENCE DE RÉGRESSION : toute mise à l'échelle RADIALE de
+	// centre l'œil laisse la projection EXACTEMENT invariante — position écran et
+	// taille angulaire inchangées, puisque la position et le rayon subissent le même
+	// facteur. Changer de facteur ne change donc pas l'image ; cela ne change que la
+	// PROFONDEUR, c'est-à-dire précisément ce qui était cassé.
 	double DistMaxGeomUU = 0.0;
+	double SurfaceMinUU = TNumericLimits<double>::Max();
 	for (int32 i = 0; i < NUM_BODIES && i < MapActor->BodyMeshes.Num(); ++i)
 	{
 		const FBodyDef& Def = GBodies[i];
 		const double DistKm = (BodyWorldKm(Def, EpochTdb) - CamWorldKm).Size();
 		if (DistKm < BodyRadiusKm(Def.B) * BODY_GEOM_FACTOR)
+		{
 			DistMaxGeomUU = FMath::Max(DistMaxGeomUU, DistKm * UU_PER_KM);
+			// distance à la SURFACE, pas au centre : c'est elle qui doit dégager le
+			// plan proche et la coque de la station.
+			SurfaceMinUU = FMath::Min(
+				SurfaceMinUU, FMath::Max(1.0, (DistKm - BodyRadiusKm(Def.B)) * UU_PER_KM));
+		}
 	}
-	const double HomoK = (DistMaxGeomUU > RENDER_MAX_UU)
+	const double KLoin = (DistMaxGeomUU > RENDER_MAX_UU)
 		? RENDER_MAX_UU / DistMaxGeomUU : 1.0;
+	const double KPres = (SurfaceMinUU < TNumericLimits<double>::Max())
+		? RENDER_MIN_UU / SurfaceMinUU : 0.0;
+	const double HomoK = FMath::Min(1.0, FMath::Max(KLoin, KPres));
 
 	for (int32 i = 0; i < NUM_BODIES && i < MapActor->BodyMeshes.Num(); ++i)
 	{
@@ -763,7 +964,12 @@ void USPSolarSystemSubsystem::UpdateScene(double EpochTdb, const FVector& CamWor
 		C->SetVisibility(true, true);
 		// rotation AVANT la position : SetWorldRotation ne touche pas la
 		// translation, et les enfants (anneaux de Saturne) suivent.
-		C->SetWorldRotation(OrientationAt(Def, EpochTdb));
+		// `RenderRot` COMPOSÉE PAR LA GAUCHE : l'orientation du corps est donnée dans
+		// le repère de rendu INERTIEL (pôle IAU, méridien origine) ; à bord, le repère
+		// de rendu est celui de la station, et il faut y transporter le corps ENTIER
+		// — sa position comme son axe. N'appliquer la rotation qu'à la position
+		// laisserait la Terre au bon endroit mais avec un pôle pointant n'importe où.
+		C->SetWorldRotation(RenderRot * OrientationAt(Def, EpochTdb));
 		// Le rayon suit la MÊME homothétie que la position : la taille angulaire
 		// vue de l'œil reste donc exactement la vraie.
 		double Fac = 1.0;
@@ -786,8 +992,19 @@ void USPSolarSystemSubsystem::UpdateScene(double EpochTdb, const FVector& CamWor
 		// EXACTEMENT conservées ; le facteur étant unique, l'ordre des profondeurs
 		// l'est aussi. On ne déplace rien : on ramène l'échelle dans le domaine où
 		// le GPU est juste.
-		P *= HomoK;
-		Fac *= HomoK;
+		// Homothétie commune, puis COURBURE des lointains (voir RemapDist) : le
+		// facteur effectif de CE corps est le rapport des deux distances, et il
+		// s'applique à la position ET au rayon — la taille angulaire reste exacte.
+		const double DistUU = P.Size() * HomoK;
+		const double FacCorps = (DistUU > 1.0e-12) ? RemapDist(DistUU) / DistUU : 1.0;
+		P *= HomoK * FacCorps;
+		Fac *= HomoK * FacCorps;
+		// LES CORPS NE PASSENT PAS PAR `R()` (ils ont leur propre homothétie, qui
+		// doit rester COMMUNE à tous) : le changement de repère de rendu leur est
+		// donc appliqué ICI, explicitement. L'oublier était le premier bug du rendu
+		// à bord — la géométrie sortait juste, mais dans le repère inertiel : par la
+		// cupola on voyait les étoiles, et la Terre était ailleurs dans le ciel.
+		P = RenderRot.RotateVector(P);
 		C->SetWorldLocation(P);
 
 		// ═══ OÙ EST LA NUIT ═══ — la direction du Soleil, passée au matériau.
@@ -798,10 +1015,27 @@ void USPSolarSystemSubsystem::UpdateScene(double EpochTdb, const FVector& CamWor
 		// nuit et y allume la carte des lumières de villes.
 		if (BodyMids.IsValidIndex(i) && BodyMids[i])
 		{
-			const FVector SunDir = BodyWorldKm(Def, EpochTdb).GetSafeNormal();
+			// Direction dans le repère de RENDU (le matériau la compare à la normale
+			// du maillage, qui y vit aussi) : elle subit `RenderRot` comme le reste,
+			// sinon le terminateur se décollerait de l'éclairage à bord.
+			const FVector SunDir =
+				RenderRot.RotateVector(BodyWorldKm(Def, EpochTdb).GetSafeNormal());
 			if (!SunDir.IsNearlyZero())
 				BodyMids[i]->SetVectorParameterValue(
 					TEXT("SunDir"), FLinearColor(SunDir.X, SunDir.Y, SunDir.Z, 0.0f));
+			// ═══ L'ATMOSPHÈRE TOURNE PLUS VITE QUE LE SOL ═══ (2026-07-27)
+			// La période vient du VENT ZONAL réel (`ephem::cloud_deck_period_s`) : le
+			// rendu ne choisit rien, il convertit un temps en décalage d'UV. Signe : la
+			// longitude sous un U donné DÉCROÎT quand le décalage croît (le matériau
+			// échantillonne en U + δ), donc un vent d'est (v > 0) demande δ décroissant
+			// — d'où le moins. Vénus, rétrograde, part naturellement dans l'autre sens.
+			// `Frac` garde le paramètre dans [0,1) pour ne pas perdre la précision d'un
+			// float après des années d'époque ; c'est sans effet visible, le décalage
+			// étant constant sur tout le maillage (la texture boucle en U).
+			const double CloudT = fen::ephem::cloud_deck_period_s(Def.B);
+			if (CloudT != 0.0)
+				BodyMids[i]->SetScalarParameterValue(
+					TEXT("CloudSpin"), static_cast<float>(FMath::Frac(-EpochTdb / CloudT)));
 		}
 		const double MeshR = BodyMeshRadius.IsValidIndex(i) ? BodyMeshRadius[i] : 50.0;
 		C->SetWorldScale3D(FVector(BodyRadiusKm(Def.B) * Fac / MeshR));
@@ -830,14 +1064,17 @@ void USPSolarSystemSubsystem::UpdateScene(double EpochTdb, const FVector& CamWor
 	if (MapActor->SunLight)
 	{
 		// CamWorldKm est la position de l'œil, le Soleil est à l'origine du monde :
-		// la lumière voyage donc du Soleil vers l'œil, direction CamWorldKm.
-		const FVector Dir = CamWorldKm.GetSafeNormal();
+		// la lumière voyage donc du Soleil vers l'œil, direction CamWorldKm. Elle
+		// passe par le MÊME changement de repère que les positions (`RenderRot`),
+		// sans quoi à bord la Terre serait éclairée depuis un ailleurs inertiel et
+		// son terminateur ne collerait plus à ce qu'on voit par le hublot.
+		const FVector Dir = RenderRot.RotateVector(CamWorldKm.GetSafeNormal());
 		if (!Dir.IsNearlyZero())
 			MapActor->SunLight->SetWorldRotation(Dir.Rotation());
 	}
 
 	// --- vaisseau en vol interplanétaire : position ESTIMÉE [GDD 7.5] --------
-	const bool bVehicle = Bridge.vehicle.valid.load();
+	const bool bVehicle = Bridge.vehicle.valid.load() && !bBord;   // symbole : pas à bord
 	if (MapActor->VehicleMarker)
 	{
 		MapActor->VehicleMarker->SetVisibility(bVehicle);
@@ -870,7 +1107,12 @@ void USPSolarSystemSubsystem::UpdateScene(double EpochTdb, const FVector& CamWor
 		// Pnov). Le modèle extérieur s'efface alors : deux modèles du même objet ne
 		// peuvent pas s'interpénétrer à l'écran. La bascule tombe au franchissement
 		// de la coque, là où elle est le moins visible.
-		const bool bCoexiste = Bridge.interieur_coexiste.load();
+		// À BORD, l'œil est DANS la station de plein droit (plus seulement en
+		// transit) : c'est le même cas que la coexistence, en permanent. Ni modèle
+		// extérieur (il envelopperait la caméra), ni marqueur (une sphère émissive
+		// collée à l'œil) — seule la géométrie intérieure rend, et c'est SPStation
+		// qui la porte, dans son repère canonique.
+		const bool bCoexiste = Bridge.interieur_coexiste.load() || bBord;
 		const bool bModel = bStation && !bCoexiste &&
 		                    ((St.envergure_m * 0.001) / DistNov > 3.0e-3);
 
@@ -892,6 +1134,13 @@ void USPSolarSystemSubsystem::UpdateScene(double EpochTdb, const FVector& CamWor
 			}
 		}
 
+		// L'ATTITUDE : cupola au nadir, axe de vol dans la vitesse. Posée en tête de
+		// Tick (la caméra du handoff en a besoin AVANT le placement des objets), et
+		// lue telle quelle par la géométrie INTÉRIEURE — sans quoi la bascule de LOD
+		// à la traversée de la coque ferait pivoter la station d'un coup, en plein
+		// milieu du vol [M].
+		const FQuat AttNov = NovellusAttitude;
+
 		// Le modèle est construit tôt (Tick, dès la carte active) pour que ses
 		// shaders soient chauds ; ici on ne fait que le MONTRER/cacher (LOD) et le
 		// placer, caméra-relatif.
@@ -901,8 +1150,12 @@ void USPSolarSystemSubsystem::UpdateScene(double EpochTdb, const FVector& CamWor
 			if (bModel)
 			{
 				// centre du modèle amené sur Novellus ; échelle réelle (km/u).
+				// LE RECENTRAGE PASSE PAR L'ATTITUDE : le centre du modèle doit tomber
+				// sur Novellus APRÈS rotation, sinon la station décrirait un petit
+				// cercle parasite (du rayon de son décentrage) en tournant sur elle-même.
 				ExtRoot->SetWorldScale3D(FVector(ExtScaleKm));
-				ExtRoot->SetWorldLocation(Pnov - ExtCentreUU * ExtScaleKm);
+				ExtRoot->SetWorldRotation(AttNov);
+				ExtRoot->SetWorldLocation(Pnov - AttNov.RotateVector(ExtCentreUU * ExtScaleKm));
 			}
 		}
 		if (ExtLight)
@@ -917,8 +1170,12 @@ void USPSolarSystemSubsystem::UpdateScene(double EpochTdb, const FVector& CamWor
 	// un relais GEO est à 42 164 km de la Terre, et il y EST.
 	{
 		const auto& F = Bridge.fleet;
-		const int32 NCraft =
-			FMath::Min(F.n.load(), fen::app::RenderBridge::FleetSnap::MAX);
+		// À BORD, aucun marqueur : ce sont des SYMBOLES de carte (taille écran
+		// constante, sphères émissives), et un symbole n'a rien à faire dans une
+		// scène vécue à la première personne. Un relais GEO vu du hublot serait un
+		// point mobile de la taille d'une planète.
+		const int32 NCraft = bBord ? 0
+			: FMath::Min(F.n.load(), fen::app::RenderBridge::FleetSnap::MAX);
 		const int32 Base[3] = {FLEET_GEO0, FLEET_MARS0, FLEET_PROBE0};
 		int32 Used[3] = {0, 0, 0};
 		for (int32 i = 0; i < NCraft; ++i)
@@ -945,7 +1202,7 @@ void USPSolarSystemSubsystem::UpdateScene(double EpochTdb, const FVector& CamWor
 		// vol GEO en cours : la trace publiée est géocentrique (km) — l'estimé
 		// est placé à sa VRAIE position autour de la Terre.
 		UStaticMeshComponent* GeoM = MapActor->FleetMarkers[FLEET_GEOFLIGHT];
-		const bool bGeo = Bridge.geo.valid.load();
+		const bool bGeo = Bridge.geo.valid.load() && !bBord;   // symbole : pas à bord
 		GeoM->SetVisibility(bGeo);
 		if (bGeo)
 		{
@@ -967,21 +1224,40 @@ void USPSolarSystemSubsystem::RebuildOrbitCache(double EpochTdb)
 	for (const FBodyDef& Def : GBodies)
 	{
 		if (Def.B == Body::Sun) continue;
-		const double T = OrbitalPeriodS(Def, EpochTdb);
+		const double T = TracePeriodS(Def, EpochTdb);
 		if (T <= 0.0) continue;
 
-		// Trace = la trajectoire RÉELLE échantillonnée sur une période via
-		// l'éphéméride (pas une ellipse idéalisée). Pour une LUNE on garde la trace
-		// RELATIVE à son parent : c'est l'émission qui la recentre chaque frame.
+		// ═══ LA FENÊTRE DE TEMPS ÉCHANTILLONNÉE ═══
+		// Un modèle EXACTEMENT périodique (les lunes de `Satellites.hpp` : cercles
+		// de moyen mouvement constant) se boucle sans couture — on lui donne une
+		// période pile, et l'indice de tête boucle modulo. Tout le reste (planètes,
+		// Lune, grosses lunes) n'est PAS périodique : les éléments de Standish
+		// dérivent, la série lunaire encore plus. On échantillonne alors le PASSÉ
+		// réel — la traînée à allumer — plus la péremption du cache (le corps
+		// avance dans la fenêtre entre deux reconstructions). Aucune de ces traces
+		// n'est rebouclée : aucune cassure ne peut donc apparaître.
+		const bool bCycle = Def.bMoon && T <= ORBIT_CYCLE_MAX_S;
+		const double Trail = ORBIT_TRAIL_FRAC * T;
+		const double Marge = FMath::Min(ORBIT_REDRAW_DAYS * 86400.0, 0.30 * T);
+		const double WinStart = bCycle ? EpochTdb : (EpochTdb - Trail);
+		const double WinSpan  = bCycle ? T : (Trail + Marge);
+
+		// Trace = la trajectoire RÉELLE échantillonnée via l'éphéméride (pas une
+		// ellipse idéalisée). Pour une LUNE on garde la trace RELATIVE à son
+		// parent : c'est l'émission qui la recentre chaque frame.
 		FOrbitCache Entry;
-		Entry.Color = FLinearColor(Def.Color.R, Def.Color.G, Def.Color.B, 0.35f);
+		Entry.Color = FLinearColor(Def.Color.R, Def.Color.G, Def.Color.B, 1.0f);
 		Entry.bMoon = Def.bMoon;
 		Entry.Body = static_cast<int>(Def.B);
 		Entry.ParentBody = static_cast<int>(Def.Parent);
+		Entry.WindowStartS = WinStart;
+		Entry.WindowS = WinSpan;
+		Entry.TrailS = Trail;
+		Entry.bCycle = bCycle;
 		Entry.PointsKm.Reserve(ORBIT_SAMPLES + 1);
 		for (int32 k = 0; k <= ORBIT_SAMPLES; ++k)
 		{
-			const double Tk = EpochTdb + (T * k) / ORBIT_SAMPLES;
+			const double Tk = WinStart + (WinSpan * k) / ORBIT_SAMPLES;
 			const fen::Vec3 Rel = GEph.state(Def.B, Def.bMoon ? Def.Parent : Body::Sun,
 			                                 fen::Epoch{Tk}).r;
 			const FVector P = EclToUeKm(Rel);
@@ -1025,6 +1301,20 @@ void USPSolarSystemSubsystem::EmitOrbits(const FVector& CamWorldKm, double CamDi
 	// (ref_menu.png) ce sont de simples cercles à la limite du visible.
 	const bool bDecor = fen::app::g_render_bridge.menu_backdrop.load() &&
 	                    !fen::app::g_render_bridge.carte3d_active.load();
+	// ═══ UN TRAIT DU BATCHER N'A PAS D'ALPHA ═══ (trouvé dans le moteur, 2026-07-27)
+	// Les lignes et les points de `ULineBatchComponent` sont dessinés dans la passe
+	// de base avec le filtre `OpaqueAndMasked` et le nuanceur `SE_BLEND_Opaque`
+	// (Engine/Private/BatchedElements.cpp) : l'état de mélange est `TStaticBlendState<>`
+	// et le pixel rendu vaut `Source.rgb` — LE CANAL ALPHA EST IGNORÉ, purement et
+	// simplement. Tout ce fichier atténuait pourtant ses tracés par l'alpha : le
+	// fondu rasant, la mise en avant au survol et l'opacité 0,35 des orbites
+	// n'avaient donc AUCUN effet, sauf le seuil qui coupe le trait. C'est aussi
+	// l'explication des « paliers d'opacité » constatés à la première tentative de
+	// traînée : le dégradé ne passait pas, seule sa coupure se voyait.
+	// RÈGLE DE CE FICHIER : sur un tracé du batcher, on module le RVB. Le fond est
+	// noir, le rendu est donc le même qu'un fondu — sans dépendre d'un mélange que
+	// le moteur ne fait pas.
+	//
 	// FONDU EN VUE RASANTE. Les orbites sont ~coplanaires (écliptique) : vues par la
 	// tranche, elles s'écrasent en UNE ligne dure traversant tout l'écran et le corps
 	// focalisé. On atténue leur opacité quand l'élévation de l'œil au-dessus du plan
@@ -1055,13 +1345,6 @@ void USPSolarSystemSubsystem::EmitOrbits(const FVector& CamWorldKm, double CamDi
 			if (DistKm > 1.0 && (O.RadiusKm / DistKm) < MARKER_ANG * 2.0) continue;
 		}
 
-		// ÉPAISSEUR PROPRE À CHAQUE ORBITE. Elle était tirée de la distance de l'œil
-		// au POINT VISÉ, la même pour toutes : une orbite de lune, dix mille fois
-		// plus proche que la distance de cadrage d'un plan système, recevait donc un
-		// trait calibré pour l'autre échelle — d'où des anneaux hachés, « pas
-		// alignés ». On la tire maintenant de la distance de l'ORBITE elle-même :
-		// chaque trajectoire garde la même épaisseur À L'ÉCRAN, quelle que soit son
-		// échelle. C'est la même doctrine que `MarkerScale` pour les marqueurs.
 		// ═══ TRAIT FIN, PAS UN RUBAN ═══ (2026-07-27, sur retour d'essai)
 		// L'épaisseur était donnée en unités MONDE : `DrawLine` construit alors un
 		// QUAD face caméra par segment, et les quads consécutifs ne se raccordent
@@ -1076,24 +1359,60 @@ void USPSolarSystemSubsystem::EmitOrbits(const FVector& CamWorldKm, double CamDi
 		// MISE EN AVANT : l'orbite du corps survolé ou focalisé est plus franche.
 		// C'est ce qui rend le survol lisible sans rien écrire à l'écran.
 		const bool bVedette = (O.Body == Survol) || (O.Body == Focus);
+		const double Gain = Att * (bVedette ? 1.7 : 1.0);
+		if (Gain <= 0.004) continue;
 
-		// ═══ PAS DE TRAÎNÉE ═══
-		// Une version précédente allumait la portion d'orbite que le corps venait
-		// de parcourir et l'éteignait en remontant le temps. À l'essai c'était
-		// franchement laid : sur un trait d'un pixel, le dégradé se lit en PALIERS
-		// d'opacité, pas en fondu, et la trajectoire semblait se déliter. La
-		// référence, elle, trace une ligne UNIFORME — et elle a raison : une
-		// trajectoire est un lieu géométrique, pas un événement ; ce qui doit
-		// attirer l'œil est le CORPS et sa désignation, pas un artifice sur sa
-		// courbe. Retiré. Seule subsiste la mise en avant au survol.
-		const float A = static_cast<float>(FMath::Clamp(
-			O.Color.A * Att * (bVedette ? 2.4 : 1.0), 0.0, 1.0));
-		if (A <= 0.004f) continue;
-		const FLinearColor Col(O.Color.R, O.Color.G, O.Color.B, A);
-		const int32 N = O.PointsKm.Num();
-		for (int32 k = 1; k < N; ++k)
-			LB->DrawLine(R(Centre + O.PointsKm[k - 1]), R(Centre + O.PointsKm[k]),
-			             Col, SDPG_World, ThickO, 0.0f);
+		// ═══ LA TRAÎNÉE ═══ (2026-07-27, demande utilisateur)
+		// L'anneau fermé est remplacé par la portion que le corps VIENT de
+		// parcourir, franche à la tête et éteinte à la queue — la lecture d'Eyes
+		// on the Solar System : on voit d'un coup d'œil où va le corps.
+		//
+		// La tête n'est PAS un point du cache : c'est la position COURANTE du
+		// corps, celle-là même qui place son marqueur. Le trait part donc
+		// exactement du corps à chaque frame, quelle que soit la péremption du
+		// cache — c'est ce qui garantit qu'une trace ne peut plus se « décaler »
+		// de son corps.
+		//
+		// Le cache étant échantillonné UNIFORMÉMENT EN TEMPS sur une fenêtre
+		// connue, l'indice de la tête se lit sans aucun calcul d'éphéméride.
+		const int32 N = O.PointsKm.Num() - 1;         // nombre d'intervalles
+		if (N < 8 || O.WindowS <= 0.0) continue;
+		const double PasS = O.WindowS / N;
+		double Tete = (EpochTdb - O.WindowStartS) / PasS;
+		if (O.bCycle)
+		{
+			Tete = FMath::Fmod(Tete, static_cast<double>(N));
+			if (Tete < 0.0) Tete += N;
+		}
+		else Tete = FMath::Clamp(Tete, 0.0, static_cast<double>(N));
+		const int32 NbSeg = FMath::Clamp(FMath::RoundToInt(O.TrailS / PasS), 2, N);
+
+		// POSITION COURANTE DU CORPS dans le repère de la trace (absolu pour une
+		// planète, relatif au parent pour une lune — même convention que le cache).
+		const FBodyDef* DefO = FindDef(static_cast<Body>(O.Body));
+		if (!DefO) continue;
+		const FVector TeteKm = BodyWorldKm(*DefO, EpochTdb) - Centre;
+
+		// LE DÉGRADÉ PASSE PAR LE RVB, PAS PAR L'ALPHA (voir plus haut : le batcher
+		// dessine opaque). Et il est étalé sur ~370 segments : un cran de couleur
+		// couvre donc deux segments, soit une fraction de degré d'arc — la marche
+		// d'escalier qui avait fait rejeter la première traînée ne peut pas
+		// réapparaître, elle venait de l'alpha ignoré, pas de la quantification.
+		FVector Prec = Centre + TeteKm;
+		int32 k = FMath::FloorToInt(Tete);
+		for (int32 j = 0; j < NbSeg; ++j, --k)
+		{
+			const int32 Idx = O.bCycle ? ((k % N) + N) % N : k;
+			if (Idx < 0) break;                        // fenêtre passée épuisée
+			const double s = static_cast<double>(j) / NbSeg;      // 0 tête -> 1 queue
+			const float F = static_cast<float>(Gain * FMath::Pow(1.0 - s, ORBIT_TRAIL_GAMMA));
+			const FVector Suiv = Centre + O.PointsKm[Idx];
+			if (F > 0.004f)
+				LB->DrawLine(R(Prec), R(Suiv),
+				             FLinearColor(O.Color.R * F, O.Color.G * F, O.Color.B * F, 1.0f),
+				             SDPG_World, ThickO, 0.0f);
+			Prec = Suiv;
+		}
 	}
 	if (bDecor) return;   // pas de trajectoire ni de flotte derrière le menu
 
@@ -1103,25 +1422,30 @@ void USPSolarSystemSubsystem::EmitOrbits(const FVector& CamWorldKm, double CamDi
 	const auto& V = fen::app::g_render_bridge.vehicle;
 	if (V.valid.load() && V.n >= 2)
 	{
-		const FLinearColor Jaune(1.0f, 0.85f, 0.2f, 0.9f * Graze);
+		// Fondu rasant par le RVB (le batcher ignore l'alpha, cf. plus haut).
+		const FLinearColor Jaune(1.0f * Graze, 0.85f * Graze, 0.2f * Graze, 1.0f);
 		for (int32 k = 1; k < V.n; ++k)
 			LB->DrawLine(R(EclToUeKmd(V.traj_m[k - 1][0], V.traj_m[k - 1][1], V.traj_m[k - 1][2])),
 			             R(EclToUeKmd(V.traj_m[k][0], V.traj_m[k][1], V.traj_m[k][2])),
 			             Jaune, SDPG_World, Thick * 1.4f, 0.0f);
 
-		// corridor 3σ : cercle dans le plan écliptique autour de l'estimé
-		const FVector Centre = R(EclToUeKmd(V.pos_m[0], V.pos_m[1], V.pos_m[2]));
+		// corridor 3σ : cercle dans le plan écliptique autour de l'estimé.
+		// Le cercle se construit en km MONDE puis passe par R, comme tout le reste :
+		// il était bâti en ajoutant des km à un point DÉJÀ converti en unités de
+		// rendu, soit un rayon 100 000 fois trop petit (jamais vu — ce tracé dort
+		// tant que la boucle de mission vécue ne le réveille pas).
+		const FVector CentreKm = EclToUeKmd(V.pos_m[0], V.pos_m[1], V.pos_m[2]);
 		const double RayonKm = V.corridor_3s_m * KM_PER_M;
 		if (RayonKm > 1.0)
 		{
-			const FLinearColor Orange(1.0f, 0.6f, 0.2f, 0.55f * Graze);
+			const FLinearColor Orange(1.0f * Graze, 0.6f * Graze, 0.2f * Graze, 1.0f);
 			constexpr int32 SEG = 48;
-			FVector Prev = Centre + FVector(RayonKm, 0, 0);
+			FVector Prev = R(CentreKm + FVector(RayonKm, 0, 0));
 			for (int32 k = 1; k <= SEG; ++k)
 			{
 				const double A = UE_DOUBLE_TWO_PI * k / SEG;
-				const FVector P = Centre +
-					FVector(RayonKm * FMath::Cos(A), RayonKm * FMath::Sin(A), 0.0);
+				const FVector P = R(CentreKm +
+					FVector(RayonKm * FMath::Cos(A), RayonKm * FMath::Sin(A), 0.0));
 				LB->DrawLine(Prev, P, Orange, SDPG_World, Thick, 0.0f);
 				Prev = P;
 			}
@@ -1154,7 +1478,7 @@ void USPSolarSystemSubsystem::EmitOrbits(const FVector& CamWorldKm, double CamDi
 		const double Sma = G.target_sma_km;
 		if (Sma > 1.0)
 		{
-			const FLinearColor Vert(0.35f, 0.95f, 0.45f, 0.8f * Graze);
+			const FLinearColor Vert(0.35f * Graze, 0.95f * Graze, 0.45f * Graze, 1.0f);
 			constexpr int32 SEG = 96;
 			FVector Prev = R(GeoToWorld(Sma, 0.0, 0.0));
 			for (int32 k = 1; k <= SEG; ++k)
@@ -1168,7 +1492,7 @@ void USPSolarSystemSubsystem::EmitOrbits(const FVector& CamWorldKm, double CamDi
 		// trace CYAN = solution de navigation (ESTIMÉE, jamais la vérité)
 		if (G.n >= 2)
 		{
-			const FLinearColor Cyan(0.3f, 0.9f, 1.0f, 0.9f * Graze);
+			const FLinearColor Cyan(0.3f * Graze, 0.9f * Graze, 1.0f * Graze, 1.0f);
 			FVector Prev = R(GeoToWorld(G.traj_km[0][0], G.traj_km[0][1], G.traj_km[0][2]));
 			for (int32 k = 1; k < G.n; ++k)
 			{
@@ -1186,16 +1510,49 @@ void USPSolarSystemSubsystem::PublishScreen(const FVector& CamWorldKm, const FRo
                                             double FovDeg)
 {
 	auto& S = fen::app::g_render_bridge.screen;
-	double Aspect = 16.0 / 9.0;
-	if (GEngine && GEngine->GameViewport)
-	{
-		FVector2D VP;
-		GEngine->GameViewport->GetViewportSize(VP);
-		if (VP.X > 1.0 && VP.Y > 1.0) Aspect = VP.X / VP.Y;
-	}
+	const double Aspect = ViewportAspect(GetWorld());
 	const double TanH = FMath::Tan(FMath::DegreesToRadians(FovDeg) * 0.5);   // FOV horizontal
 	const double TanV = TanH / Aspect;
 	const double Epoch = fen::app::g_render_bridge.epoch_tdb.load();
+
+	// ═══ LE HUD SE CONFRONTE AU RENDU ═══ (2026-07-27)
+	// Un marqueur posé par le HUD et un tracé posé par le renderer ne peuvent
+	// coïncider que si les deux projections sont la MÊME. Elles ne l'étaient pas
+	// (voir Tick, `SetAspectRatio`), et rien ne le disait : le défaut n'apparaissait
+	// qu'à l'œil, hors 16:9, et j'ai cherché du côté des éphémérides. On compare
+	// donc une fois notre demi-champ à celui de la matrice de projection que le
+	// moteur va réellement employer. Si l'écart dépasse 1 %, la carte le DIT.
+	{
+		// Pas avant que la caméra de la carte ne soit posée ET prise par le
+		// gestionnaire de caméra : aux toutes premières frames la vue est encore
+		// celle du contrôleur (champ par défaut), et comparer là n'aurait aucun sens.
+		static int32 NVerif = 0;
+		const bool bVerifie = (++NVerif != 120);
+		if (!bVerifie)
+			if (const UWorld* Wd = GetWorld())
+				if (const APlayerController* PC = Wd->GetFirstPlayerController())
+					if (const ULocalPlayer* LP = PC->GetLocalPlayer())
+						if (LP->ViewportClient && LP->ViewportClient->Viewport)
+						{
+							FSceneViewProjectionData PD;
+							if (LP->GetProjectionData(LP->ViewportClient->Viewport, PD))
+							{
+								const double M00 = PD.ProjectionMatrix.M[0][0];
+								const double M11 = PD.ProjectionMatrix.M[1][1];
+								if (M00 > 1.0e-6 && M11 > 1.0e-6)
+								{
+									const double EH = FMath::Abs(1.0 / M00 - TanH) / TanH;
+									const double EV = FMath::Abs(1.0 / M11 - TanV) / TanV;
+									if (EH > 0.01 || EV > 0.01)
+										UE_LOG(LogTemp, Warning,
+										       TEXT("[SPSolarSystem] projection HUD != rendu : "
+										            "tanH %.6f vs %.6f (%.1f %%), tanV %.6f vs %.6f (%.1f %%). "
+										            "Les marqueurs se decaleront des traces."),
+										       TanH, 1.0 / M00, EH * 100.0, TanV, 1.0 / M11, EV * 100.0);
+								}
+							}
+						}
+	}
 
 	// ═══ NON SÉPARABLE DE SON PARENT = PAS DÉSIGNABLE ═══ (piège n°41)
 	// Vue du système, une lune tombe sur le MÊME pixel que sa planète : les
@@ -1296,7 +1653,16 @@ void USPSolarSystemSubsystem::Tick(float DeltaTime)
 	// La carte sert AUSSI de décor au menu (ciel étoilé + orbites ténues,
 	// cf. ref_menu.png) : elle s'active donc dans les deux cas, la scène Titre
 	// n'étant qu'une version en retrait de la même vue.
-	const bool bActive = Bridge.carte3d_active.load() || Bridge.menu_backdrop.load();
+	// ═══ LE MONDE REND AUSSI À BORD ═══ (2026-07-27)
+	// Il ne rendait qu'au plan système et au menu : à bord, on était enfermé dans
+	// une boîte noire — la Terre n'existait pas par les hublots, et l'attitude
+	// « cupola au nadir » n'y avait donc aucun témoin. C'était le dernier endroit
+	// où Novellus restait un MONDE À PART [GDD v1.2 17.3, ch.18].
+	// À bord, la caméra reste celle du PAWN : la carte rend, mais n'a pas l'œil.
+	const bool bMonde =
+		Bridge.scene.load() == static_cast<int>(fen::app::SceneJeu::Monde);
+	bBord = bMonde && !Bridge.carte3d_active.load();
+	const bool bActive = Bridge.carte3d_active.load() || Bridge.menu_backdrop.load() || bBord;
 
 	if (bActive && !bBuilt) BuildScene();
 	// Novellus vu de près : on charge son modèle extérieur DÈS que la carte est
@@ -1305,9 +1671,22 @@ void USPSolarSystemSubsystem::Tick(float DeltaTime)
 	// MapActor existe (ExtRoot s'y rattache).
 	if (bActive && bBuilt && !bExtBuilt) BuildExteriorStation();
 	if (bActive != bWasActive) { SetMapActive(bActive); bWasActive = bActive; }
+	const bool bEyeOnMap = bActive && !bBord;
+	if (bEyeOnMap != bWasEyeOnMap) { SetMapHasEye(bEyeOnMap); bWasEyeOnMap = bEyeOnMap; }
 	if (!bActive || !bBuilt) return;
 
 	const double Epoch = Bridge.epoch_tdb.load();
+
+	// L'ATTITUDE DE NOVELLUS, POSÉE EN TÊTE DE FRAME. Elle est lue par tout ce qui
+	// suit — la caméra du handoff juste en dessous, le modèle extérieur dans
+	// UpdateScene, et la géométrie intérieure via GetNovellusAttitude — et ces
+	// consommateurs se relaient à l'écran : les faire lire des frames différentes
+	// ferait pivoter la station à la bascule. Le jeu la publie, on la convertit.
+	NovellusAttitude = StationAttitude(Bridge.station);
+	// LE REPÈRE DE RENDU (voir GetRenderRot) : celui de la STATION à bord, où la
+	// géométrie intérieure reste canonique et où c'est donc le monde qui tourne ;
+	// l'inertiel partout ailleurs.
+	RenderRot = bBord ? NovellusAttitude.Inverse() : FQuat::Identity;
 
 	// ═══ LE VOL VERS UN CORPS [plan §6.4] ═══
 	// Cliquer un corps le focalise ET demande un nouveau cadrage. Si l'œil s'y
@@ -1391,9 +1770,33 @@ void USPSolarSystemSubsystem::Tick(float DeltaTime)
 	const FVector Offset(DistKm * FMath::Cos(Pitch) * FMath::Cos(Yaw),
 	                     DistKm * FMath::Cos(Pitch) * FMath::Sin(Yaw),
 	                     DistKm * FMath::Sin(Pitch));
-	const FVector CamWorldKm = SmoothFocusKm + Offset;
+	FVector CamWorldKm = SmoothFocusKm + Offset;
 	// la caméra regarde le point visé : depuis l'origine de rendu, c'est −Offset.
 	FRotator CamRot = (-Offset).Rotation();
+
+	// ═══ À BORD, L'ŒIL EST CELUI DU PAWN ═══
+	// Tout ce qui précède décrit l'orbite de la caméra de CARTE ; à bord elle n'a
+	// pas l'œil, et le monde doit être rebasé sur la tête du joueur, sinon la Terre
+	// serait rendue autour d'un point qui n'est plus le sien (parallaxe fausse de
+	// plusieurs dizaines de mètres — mesurable à 418 km, et surtout la station
+	// n'occulterait plus ce qu'elle doit occulter).
+	// L'œil est publié par SPStation en repère STATION (m) ; on repasse en repère
+	// du modèle (miroir en y, ×100 = u), puis dans le monde par l'ATTITUDE — c'est
+	// exactement la composition que fait `Session::pose_bord` pour l'amarrage, et
+	// c'est ce qui rend les deux descriptions superposables à la reprise.
+	if (bBord)
+	{
+		const auto& St = Bridge.station;
+		const FBodyDef* Terre = FindDef(Body::EarthBary);
+		const FVector TerrePos = Terre ? BodyWorldKm(*Terre, Epoch) : FVector::ZeroVector;
+		const FVector NovWorldKm = TerrePos + EclToUeKmd(St.rel_m[0], St.rel_m[1], St.rel_m[2]);
+		FVector OeilUU = FVector::ZeroVector;
+		if (Bridge.station_out.ready.load())
+			OeilUU = FVector( Bridge.station_out.eye_m[0].load() * 100.0,
+			                 -Bridge.station_out.eye_m[1].load() * 100.0,
+			                  Bridge.station_out.eye_m[2].load() * 100.0);
+		CamWorldKm = NovWorldKm + NovellusAttitude.RotateVector(OeilUU) / UU_PER_KM;
+	}
 
 	// HANDOFF VERS L'AMBULATION (incr. 3c-3) [GDD v1.2 17.4] : sur la dernière
 	// portion du vol [M], l'ORIENTATION et le CHAMP DE VISION glissent de ceux de
@@ -1412,8 +1815,17 @@ void USPSolarSystemSubsystem::Tick(float DeltaTime)
 		const double Melange = FMath::Clamp(Bridge.cam.look_to_bord.load(), 0.0, 1.0);
 		if (Melange > 0.0 && Bridge.station_out.ready.load())
 		{
-			const FRotator LookBord(Bridge.station_out.pitch.load(),
-			                        Bridge.station_out.yaw.load(), 0.0);
+			// LE REGARD DU PAWN EST PUBLIÉ DANS LE REPÈRE DU MODÈLE, pas dans le monde :
+			// à bord, la station rend dans son repère canonique (celui où le joueur
+			// marche et où vit la collision des 310 corps). Pendant la coexistence elle
+			// est posée TOURNÉE de son attitude — la caméra doit donc composer la MÊME
+			// rotation, faute de quoi elle regarderait une cloison qui n'est plus là.
+			// C'est cette composition qui garde le handoff invisible : caméra et
+			// géométrie subissent la même rotation rigide, donc l'image est inchangée.
+			const FRotator LookBord =
+				(NovellusAttitude * FRotator(Bridge.station_out.pitch.load(),
+				                             Bridge.station_out.yaw.load(), 0.0).Quaternion())
+					.Rotator();
 			// FMath::Lerp(FRotator,...) normalise le delta : passage par le plus
 			// court chemin, jamais un tour complet.
 			CamRot = FMath::Lerp(CamRot, LookBord, static_cast<float>(Melange));
@@ -1445,11 +1857,43 @@ void USPSolarSystemSubsystem::Tick(float DeltaTime)
 
 	UpdateScene(Epoch, CamWorldKm);
 
+	// À BORD, RIEN DE CE QUI SUIT : la caméra est celle du pawn (y toucher volerait
+	// la vue au joueur), les traits d'orbite n'ont pas de sens tendus en travers
+	// d'un module, et les marqueurs/labels de la carte non plus — on est DANS le
+	// monde, on ne le survole pas. Ne restent que les corps et le ciel.
+	if (bBord) return;
+
 	if (MapCamera)
 	{
 		MapCamera->SetActorLocationAndRotation(FVector::ZeroVector, CamRot);
 		if (UCameraComponent* Cam = MapCamera->GetCameraComponent())
+		{
+			// ═══ PIÈGE PAYÉ (2026-07-27) : « 45° » N'ÉTAIT PAS 45° ═══
+			// Le moteur ne prend PAS le champ posé pour un champ horizontal sur le
+			// viewport courant. `AspectRatioAxisConstraint` vaut MaintainYFOV pour
+			// tout projet (BaseEngine.ini), et dans ce mode
+			// `FMinimalViewInfo::CalculateProjectionMatrixGivenViewRectangle`
+			// (Camera/CameraStackTypes.cpp:324) convertit d'abord le champ posé en
+			// champ VERTICAL avec l'aspect DE LA CAMÉRA :
+			//     halfY = atan( tan(halfFOV) / UCameraComponent::AspectRatio )
+			// — cet aspect valant 16:9 par défaut, quelle que soit la fenêtre — puis
+			// maintient CE champ vertical. Résultat : le champ horizontal rendu suit
+			// la largeur de la fenêtre, et ne vaut les 45° demandés QUE si la fenêtre
+			// est exactement en 16:9.
+			// Le HUD, lui, projette les marqueurs avec « 45° horizontal sur l'aspect
+			// réel ». Les deux ne coïncidaient donc qu'en 16:9 : mes captures de
+			// contrôle étaient en 1600x900 et sortaient au pixel près, pendant qu'un
+			// viewport PIE de 1600x975 rendait 8,3 % plus zoomé — d'où des marqueurs
+			// qui s'écartent de leur tracé d'autant plus qu'ils sont loin du centre,
+			// et une orbite lunaire « décalée ». Mesuré : nous TanH=0,414214 contre
+			// 0,382351 pour le moteur, soit exactement 975/900.
+			// EN POSANT L'ASPECT DE LA CAMÉRA = celui du viewport, les deux branches
+			// du moteur (MaintainY comme MaintainX) redonnent EXACTEMENT
+			// tanH = tan(champ/2) et tanV = tanH/aspect : la convention du HUD
+			// devient la vérité du rendu, quelle que soit la forme de la fenêtre.
+			Cam->SetAspectRatio(static_cast<float>(ViewportAspect(GetWorld())));
 			Cam->SetFieldOfView(static_cast<float>(FovDeg));
+		}
 
 		// RÉ-ASSURE LA CIBLE DE VUE CHAQUE FRAME. SetMapActive ne la pose qu'à la
 		// TRANSITION ; or en PIE il n'y a pas de pawn par défaut (DefaultPawnClass =

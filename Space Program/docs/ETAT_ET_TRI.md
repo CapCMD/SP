@@ -67,11 +67,27 @@ l'image capturée montre des matériaux de repli.
 deux captures aux `-spframes` différents doivent montrer date, heure, rotation des
 corps et position de Novellus qui ont avancé.
 
-**`-spvol`** **épingle une mission EN ASCENSION** : c'est l'oracle visuel du
+**`-spvol[=<phase>]`** **épingle une mission EN VOL** : c'est l'oracle visuel du
 RYTHME IMPOSÉ [GDD 14.3] (§2), un instant qui ne s'atteint autrement qu'en jouant
 toute la boucle de mission. Comme `-sphandoff`, il pose l'ÉTAT DU MODÈLE et non
 le pont — sinon la capture ne prouverait que l'existence du drapeau. À combiner
 avec `-spcadence=4` : la demande « mois/s » doit ressortir bornée au temps réel.
+`<phase>` = `ascension` (défaut) · `parking` · `injection` · `croisiere` ·
+`insertion` · `edl`. Depuis que la chronologie DATE le vol (§2, « LA CHRONOLOGIE
+DE VOL »), ces instants EXISTENT et se capturent donc. La famille du contrat est
+choisie pour PORTER la phase demandée (EDL ⇒ `surface`), la durée de transit est
+celle de la VRAIE fenêtre, et la position dans la chronologie est **calculée**
+(milieu du segment visé), jamais un décalage écrit à la main — le jour où une
+durée change, la capture suit toute seule. `injection` et `insertion` sont la
+MÊME phase (manœuvre critique) à deux instants : la première et la dernière.
+
+**`-spcode[=vol]`** **ouvre l'ATELIER LOGICIEL du mode PRO** [GDD 15.1, 15.5] :
+la partie de capture démarre en PRO, et le poste CONTRÔLE s'ouvre sur sa face
+éditeur. `-spcode=vol` reste sur la CONDUITE DE MISSION, en PRO — l'autre face,
+celle où le logiciel embarqué décide. Même office que `-spvol` : le mode d'aide
+se choisit à la création d'une partie, écran qu'une capture ne traverse pas ;
+sans ce drapeau, l'éditeur serait un écran que rien ne peut photographier.
+À combiner avec `-sppost=3`.
 
 **`-sphandoff`** (avec `-spscene=map`) **gèle l'instant de la reprise** en 1re
 personne au bout du vol [M] : plan système actif, caméra amarrée sur l'œil du
@@ -109,26 +125,42 @@ conservées dans `Space Program/_archive/imgui_20260724/`.
 | Postes : contenu complet + arbre de compétences + catalogue de missions | **à faire** |
 | Boucle de mission [GDD 4.1] : contrat → conception → fenêtre → qualif → lancement → débrief | **fait** (`mission/MissionLoop.hpp` + poste CONTROLE) : gates réels par phase, commit financier, issue déterministe, conséquences à triple lecture |
 | **LE TEMPS QUI COULE [GDD 14.2]** : accélération pilotable et non neutre | **FAIT (2026-07-26), VÉRIFIÉ DE BOUT EN BOUT.** Le calendrier de l'agence (`agence.mois`) est devenu CONTINU ; la comptabilité reste MENSUELLE et se solde à chaque frontière franchie (`Jeu::avancer_temps`). Le temps n'avance que par SOUS-PAS FIXES de 1/64 j (`Jeu::PAS_JOURS`) : 4 frames ou 100 frames donnent le MÊME calendrier — sous oracle. Cinq cadences (`fen::game::TimeRate`), pilotables de **TROIS** endroits, tous équivalents : le **BANDEAU DU TEMPS en haut à droite** (`SSPTemps`, présent PARTOUT dans le Monde — les deux cadrages, poste ouvert compris ; date, heure, cinq crans cliquables, légende des touches), le **clavier** ([P] pause/reprise, [1-5] les crans — `ASPPlayerController::TickCadence`, touches lues par POSITION physique donc AZERTY comme QWERTY, aucune collision avec l'ambulation), et le **poste AGENCE**, qui reste le réglage « institutionnel » et affiche en plus le PRIX du temps tiré du modèle (`AgencyFinance::annual_idle_balance_me()` = −9,0 Md€/an d'inactivité). Aucun de ces trois n'est le « curseur de temps » que [GDD 14] interdit : ce sont des crans DISCRETS passant par le système temporel de l'agence, jamais un accès à une date arbitraire. **Deux corrections d'ergonomie payées à l'essai** (voir pièges n°40) : la première version ne réglait la cadence QU'au poste AGENCE — depuis le plan système il fallait rentrer à bord et marcher jusqu'au module pour démarrer le monde ; et l'état du temps ne s'affichait que sur la carte, ce qui faisait passer le reste du jeu pour figé. **CHOIX ASSUMÉ, PUIS RENVERSÉ (2026-07-27)** : la barre de temps du bas avait d'abord été gardée telle que dans `ref_systeme.png` (date | cadence | heure + rail), la fidélité à la référence l'emportant sur la non-redondance. L'utilisateur a tranché l'inverse à l'usage : **barre du bas et témoin « LIVE » RETIRÉS** de la carte (`ue_carte_hud_minimal.png`). Le bandeau reste seul, et c'est cohérent — il est partout, il en dit plus (crans cliquables, plafond de mission) et le HUD de la carte doit être MINIMAL. Le bandeau, lui, ne porte pas la cadence en clair (le cran actif est nommé et coloré) pour rester assez court et ne pas empiéter sur le cadre d'un poste. Toute partie DÉMARRE EN PAUSE (fondation, chargement, reset) : le temps est une dépense. Garde-fou : une frame > 0,25 s est bornée (un gel de shaders ne coûte pas des mois). La faillite arrête le calendrier. **PREUVE** : `-spcadence=4` à 900 puis 1500 frames → NOV 3 2026 puis DEC 27 2026, Terre tournée, terminateur déplacé, Novellus avancé sur son orbite |
-| **LE RYTHME DU TEMPS EN MISSION [GDD 14.3]** : une phase critique IMPOSE un plafond de cadence | **FAIT (2026-07-27), VÉRIFIÉ PAR CAPTURE.** « Toute manœuvre fine RAMÈNE le temps à un rythme lent » — le verbe du GDD est actif, donc le plafond est OPPOSABLE, pas suggéré. **`mission/MissionTempo.hpp`** (C++ pur) le DÉDUIT au lieu de le saisir : à la cadence r, une phase de durée propre D disparaît en D/r secondes réelles ; on exige qu'elle en dure au moins `OBSERVATION_MIN_S` = 20 s (SEUL paramètre libre de la loi, déclaré [GDD 6.8]), d'où le cran le plus rapide admissible. Les DURÉES sont des grandeurs sourcées, pas des réglages : ascension ~9 min (Falcon 9 SECO T+8 min 40), EDL ~7 min (MSL), insertion ~10 min (Apollo LOI 6 min 2 s). Aux cinq crans de `TimeRate`, toute phase < ~10 jours retombe sur le TEMPS RÉEL — résultat attendu, mais CALCULÉ, donc il se déplacera tout seul quand une phase durera des semaines. PLANCHER : jamais la pause — le modèle empêche d'aller trop vite, il ne fige pas le monde à la place du joueur [GDD 14]. **La phase de vol est DÉRIVÉE** (`flight_phase_of` : état FSM + temps passé dedans + famille) : `Mission::phase` était un drapeau que RIEN ne renseignait (piège n°20b) et que seule une saisie manuelle aurait pu remplir ; elle est maintenant vivante, rejouable, et rien de plus à sauvegarder. Le prédicat de phase critique est **partagé avec `Events.hpp`** (taux d'anomalie) : une seule définition pour deux lois qui disent la même chose. Enforcement à DEUX niveaux, pour que la faute soit impossible et non corrigée après coup : `Jeu::regler_cadence()` est la porte unique (les 4 écritures — bandeau, poste AGENCE, touches [P]/[1-5], `-spcadence` — y passent) ET `faire_couler_le_temps()` rappelle le plafond avant de convertir la moindre seconde. Le feu vert d'une mission appelle `appliquer_plafond()` DANS SA FRAME : c'est la manœuvre qui freine le monde, pas le joueur qui doit y penser. AFFICHÉ sur les trois surfaces (piège n°40) : bandeau `SSPTemps` (crans fermés en rouge + « RYTHME IMPOSE : ASCENSION »), poste AGENCE (boutons éteints + motif en toutes lettres), et la barre de la carte qui montre la cadence RÉELLEMENT appliquée. **PREUVE** (`-spvol`, nouveau drapeau §1) : deux captures à 900 frames, même `-spcadence=4` demandé — libre, le monde avance de 3 mois (OCT 27 2026, cran MOIS vert) ; sous ascension, il ne bouge pas (JUL 26 2026, `REAL RATE`, JOUR/SEM/MOIS en rouge). `ue_tempo_libre.png`, `ue_tempo_impose.png`, `ue_tempo_poste_agence.png`. RESTE : l'insertion et l'EDL sont des phases critiques du modèle mais ne sont pas encore DATÉES (seule l'ascension l'est) — elles le seront quand la mission vécue [GDD 9] portera sa chronologie de vol, c'est le point 2 ci-dessous |
+| **LE RYTHME DU TEMPS EN MISSION [GDD 14.3]** : une phase critique IMPOSE un plafond de cadence | **FAIT (2026-07-27), VÉRIFIÉ PAR CAPTURE.** « Toute manœuvre fine RAMÈNE le temps à un rythme lent » — le verbe du GDD est actif, donc le plafond est OPPOSABLE, pas suggéré. **`mission/MissionTempo.hpp`** (C++ pur) le DÉDUIT au lieu de le saisir : à la cadence r, une phase de durée propre D disparaît en D/r secondes réelles ; on exige qu'elle en dure au moins `OBSERVATION_MIN_S` = 20 s (SEUL paramètre libre de la loi, déclaré [GDD 6.8]), d'où le cran le plus rapide admissible. Les DURÉES sont des grandeurs sourcées, pas des réglages : ascension ~9 min (Falcon 9 SECO T+8 min 40), EDL ~7 min (MSL), insertion ~10 min (Apollo LOI 6 min 2 s). Aux cinq crans de `TimeRate`, toute phase < ~10 jours retombe sur le TEMPS RÉEL — résultat attendu, mais CALCULÉ, donc il se déplacera tout seul quand une phase durera des semaines. PLANCHER : jamais la pause — le modèle empêche d'aller trop vite, il ne fige pas le monde à la place du joueur [GDD 14]. **La phase de vol est DÉRIVÉE** (`flight_phase_of` : état FSM + temps passé dedans + famille) : `Mission::phase` était un drapeau que RIEN ne renseignait (piège n°20b) et que seule une saisie manuelle aurait pu remplir ; elle est maintenant vivante, rejouable, et rien de plus à sauvegarder. Le prédicat de phase critique est **partagé avec `Events.hpp`** (taux d'anomalie) : une seule définition pour deux lois qui disent la même chose. Enforcement à DEUX niveaux, pour que la faute soit impossible et non corrigée après coup : `Jeu::regler_cadence()` est la porte unique (les 4 écritures — bandeau, poste AGENCE, touches [P]/[1-5], `-spcadence` — y passent) ET `faire_couler_le_temps()` rappelle le plafond avant de convertir la moindre seconde. Le feu vert d'une mission appelle `appliquer_plafond()` DANS SA FRAME : c'est la manœuvre qui freine le monde, pas le joueur qui doit y penser. AFFICHÉ sur les trois surfaces (piège n°40) : bandeau `SSPTemps` (crans fermés en rouge + « RYTHME IMPOSE : ASCENSION »), poste AGENCE (boutons éteints + motif en toutes lettres), et la barre de la carte qui montre la cadence RÉELLEMENT appliquée. **PREUVE** (`-spvol`, nouveau drapeau §1) : deux captures à 900 frames, même `-spcadence=4` demandé — libre, le monde avance de 3 mois (OCT 27 2026, cran MOIS vert) ; sous ascension, il ne bouge pas (JUL 26 2026, `REAL RATE`, JOUR/SEM/MOIS en rouge). `ue_tempo_libre.png`, `ue_tempo_impose.png`, `ue_tempo_poste_agence.png`. RESTE : ~~l'insertion et l'EDL ne sont pas encore DATÉES~~ — **FAIT le 2026-07-27**, voir la ligne suivante |
+| **LA CHRONOLOGIE DE VOL [GDD 4.1, 9, 14.3]** : le vol DURE, et ses phases ont une date | **FAIT (2026-07-27), VÉRIFIÉ PAR CAPTURE.** `mission/FlightTimeline.hpp`. « Lancer » et « débriefer » étaient deux clics : un vol vers Mars ne consommait PAS UNE SECONDE de temps de jeu, et une phase sans date n'arrive jamais — d'où un plafond de cadence qui ne mordait qu'à l'ascension. Le vol a désormais une suite de segments jointifs depuis le feu vert (ascension → parking → injection → croisière → **insertion** ou **EDL** → exploitation), et **`flight_phase_of` LIT cette chronologie** au lieu de deviner. **AUCUNE DURÉE N'EST UN RÉGLAGE** : les trois durées critiques restent sourcées (Falcon 9 / MSL / Apollo LOI) et **tout le reste est dérivé par Kepler** de l'orbite concernée — une révolution de parking à 200 km (88,5 min), le transit GTO comme demi-période d'ellipse (5 h 15), le phasage de rendez-vous comme profil à 4 orbites. **L'orbite géostationnaire n'est même pas un chiffre** : `geo_radius_m()` = (µ/ω²)^⅓ sur la rotation SIDÉRALE, et on retrouve 42 164 km sans l'avoir écrit. **La croisière interplanétaire n'est pas inventée du tout** : c'est la DURÉE DE TRANSIT de la fenêtre réellement visée — `astro::WindowResult` la calculait déjà (c'est l'axe des durées du porkchop) **sans jamais la publier**, elle ne répondait qu'à « quand partir ? ». Fenêtre 2026 : optimum 310 j, transfert disponible **329 j**. **CE QU'ON NE SAIT PAS CALCULER EST DÉCLARÉ** [GDD 6.8] : une famille dont le contrat ne nomme pas de cible (« science ») et une spirale NEP n'ont PAS de date d'arrivée (`dated == false`), et un vol non daté ne bloque rien. **CONSÉQUENCE, et c'est le point** : `Launched → Debrief` a maintenant un **GATE D'ARRIVÉE** dont le refus CHIFFRE l'attente (« vol en cours : arrivee dans 249 jours »), et le plafond de cadence mord enfin **à l'insertion et à l'EDL**. **PREUVE** : `-spvol=insertion -spcadence=4` → bandeau « RYTHME IMPOSE : MANOEUVRE CRITIQUE », cran REEL vert, JOUR/SEM/MOIS rouges, calendrier immobile (`ue_chrono_insertion.png`) ; `-spvol=edl` → « RYTHME IMPOSE : EDL » (`ue_chrono_edl.png`) ; `-spvol=croisiere` → cran MOIS vert, le monde avance de 4 mois pendant que le poste CONTROLE affiche « PHASE DE VOL : CROISIERE / ARRIVEE : dans 165 jours » (`ue_chrono_poste_controle.png`) |
 
-Oracles hors moteur — **compteurs RELEVÉS en exécutant les 12 suites le
-2026-07-27** (les totaux de ce document ont déjà été périmés d'une trentaine
-d'unités : ne pas les recopier, les remesurer) :
+Oracles hors moteur — **compteurs RELEVÉS en exécutant les 11 suites le
+2026-07-27, après la chronologie de vol.** Ne pas les recopier : les remesurer.
+Le relevé précédent était faux de plus du double, et pas d'un peu — il donnait
+300 à `test_astro_core` là où la suite en imprime 1 626. Un compteur recopié de
+mémoire ne vaut rien ; seule la sortie du binaire compte.
 
 | Suite | Oracles |
 | :--- | ---: |
+| `Space Program/tests/test_astro_core.cpp` | **1 626** (+6 pour la durée de transit de la fenêtre) |
 | `tests/test_contenu_gdd.cpp` | 612 |
-| `tests/test_session.cpp` | **175** (82 avant l'incr. 3c-3, 107 après, 137 avec le temps qui coule, +38 pour le rythme en mission) |
-| `Space Program/tests/test_astro_core.cpp` | **300** (141 avant, +159 pour les 19 lunes) |
+| `tests/test_session.cpp` | **470** (222 avant, **+42** chronologie, **+29** trace, **+65** navigation et manœuvre, **+9** graphe, **+43** logiciel de vol du mode Pro, **+28** le prix de l'inaction, **+12** délai de communication, **+7** boucle sol, **+13** rythme de mesure) |
 | `tests/test_carte_flotte.cpp` | 135 |
 | `tests/test_reentry_perturb.cpp` | 108 |
 | `tests/test_api_sol.cpp` | 59 |
 | `tests/test_ares_modules.cpp` | 58 |
 | `tests/test_gdd_manques.cpp` | 57 |
-| `tests/test_mission_loop.cpp` | 53 |
+| `tests/test_mission_loop.cpp` | **60** (+7 : le logiciel de vol hors domaine) |
 | `tests/test_economie_v12.cpp` | 46 |
-| `tests/test_code_qualif.cpp` | 22 |
-| **TOTAL** | **1 625**, tous au vert |
+| `tests/test_code_qualif.cpp` | **25** (+3 : la dilution du domaine) |
+| `tests/test_toolchain.cpp` | **24** (toolchain embarquee, bac a sable, job object, horizon) |
+| **TOTAL** | **3 280**, tous au vert |
+
+⚠ `test_mission_loop` et `test_session` ont besoin de **`app/jeu.cpp`** en plus des
+TU du cœur (ils incluent `app/session.hpp`) : sans lui, huit symboles de
+`fen::app::Jeu` manquent au lien. Et `/Fo:` sur un dossier exige que le dossier
+EXISTE (`fatal error C1083` sinon) — deux minutes perdues chacune.
+
+⚠ `test_session` a besoin en plus de **`mission/src/Toolchain.cpp`** (depuis que
+`Session` pilote la chaîne du mode Pro) et de **tout `astro_core/src/*.cpp`**, pas
+des cinq TU seuls : `nav_solution` tire `OrbitDetermination.cpp`, qui tire
+`Propagator.cpp`, qui tire les intégrateurs. `test_toolchain` a besoin de
+`Toolchain.cpp` **et** de `Kepler.cpp`, et prend la racine du dépôt en argv[1] ;
+`test_session` aussi, pour la même raison.
 
 `test_api_sol.cpp` a besoin des seuls TU du cœur (pas de `app/jeu.cpp`) :
 ```
@@ -471,6 +503,1058 @@ réel (Hipparcos), plus juste ET plus net que n'importe quelle photo.
 
 **RESTE** : une petite encoche au pôle de la sphère lat-long (singularité du
 maillage), visible seulement au très gros plan sur Io. Mineure.
+
+**7. L'ORBITE ET L'ATTITUDE RÉELLES DE NOVELLUS (2026-07-27).**
+La station était publiée par le helper de la FLOTTE (`flotte_position_rel`, type
+`RelaisGeo`) : un cercle képlérien dans le **plan écliptique**. Le rayon était bon,
+donc la période aussi — mais le PLAN était faux de 51,6°, et un plan faux, c'est
+une Terre qui défile n'importe où sous la cupola. Elle gardait de plus un **cap
+fixe dans l'inertiel**, donc sa cupola balayait le vide, la Terre, le vide.
+
+- **LE MODÈLE, EN C++ PUR** : `app/novellus_orbite.hpp`. Deux chiffres seulement
+  sont SAISIS — altitude 418 km, inclinaison 51,64° — et tout le reste en DÉCOULE :
+  la période par la 3e loi (5 576 s = **92,9 min**, la valeur réelle de l'ISS), la
+  vitesse circulaire (7,66 km/s), et la **régression du nœud par J2**
+  (−3/2·J2·(R/p)²·n·cos i = **−4,95°/jour**, un tour de plan en 73 jours — ce qui
+  commande le cycle bêta et l'heure locale des survols). L'inclinaison se compte
+  sur l'**équateur terrestre**, qui est lui-même à 23,44° de l'écliptique : le
+  repère équatorial est bâti sur `ephem::equatorial_to_ecliptic`, la primitive
+  déjà utilisée pour l'orientation des corps, pas sur une obliquité recopiée.
+- **LA VITESSE EST ANALYTIQUE**, plus une différence finie : exacte, et exacte
+  quelle que soit la cadence du temps. *Une dérivée numérique sur une horloge
+  accélérée n'est pas une approximation, c'est une valeur fausse : à mois/s une
+  frame avance de huit orbites LEO, et la corde ne dit plus rien de la tangente.*
+- **L'ATTITUDE A TROIS CONSOMMATEURS, DONC UNE SEULE SOURCE.** Elle était calculée
+  côté rendu pour le seul modèle extérieur. Or la géométrie INTÉRIEURE et le
+  modèle extérieur **se relaient** à la traversée de la coque (bascule de LOD du
+  vol [M]) : l'intérieur non tourné faisait PIVOTER la station à l'écran à cet
+  instant précis — la coupure même que ce mécanisme existe pour supprimer. Et la
+  pose de caméra du handoff (`Session::pose_bord`) doit la porter aussi, sinon la
+  caméra sort de la station par un flanc qui n'est plus le bon. Le modèle la
+  publie donc sur le pont (`StationWorld::att_*`, trois vecteurs déjà mirrorés en
+  y) et les trois la LISENT. Le repère du modèle (+X avant, +Y tribord, +Z zénith)
+  est MESURÉ par `Tools/diag_iss_repere.py`, pas deviné.
+- **LE BOUT « BORD » DU VOL SUIT L'ATTITUDE VIVANTE.** La pose d'amarrage était
+  figée au départ du vol ; elle ne peut plus l'être sur une station tournante — un
+  vol dure 0,9 s réelles, soit des centaines d'orbites à pleine cadence.
+  `publier_camera_vol` la resynchronise chaque frame ; le déplacement est pondéré
+  par (1 − lissage(progrès)), donc sans à-coup et exact à l'arrivée.
+- **PREUVE.** Oracles `test_session` **200/200** (dont l'inclinaison mesurée sur
+  `r × v` contre le pôle IAU, le retour après une période égal à la dérive J2
+  a·|dΩ/dt|·T = 38 km, et le nadir tenu sur 64 points d'une orbite entière).
+  En rendu : le transform réellement appliqué donne
+  `cupola · versTerre = 1,000000000` (**0,000000°**) sur toutes les frames à
+  mois/s. Et le handoff reste invisible : `-sphandoff` contre `-spscene=iss`,
+  décalage optimal **dx = 0, dy = 0**. *Caméra et géométrie subissant la même
+  rotation rigide, l'image est inchangée — c'est ce qui permet d'appliquer
+  l'attitude hors du repère canonique sans toucher à la collision des 310 corps.*
+
+**8. LE MONDE REND AUSSI À BORD — LA TERRE PAR LA CUPOLA (2026-07-27).**
+Dernier endroit où Novellus restait un MONDE À PART : à bord, `SPSolarSystem` ne
+tickait pas. On était dans une boîte noire, et l'attitude « cupola au nadir »
+n'avait aucun témoin. C'est le point 7 qui devient visible.
+
+- **LE REPÈRE DE RENDU N'EST PLUS TOUJOURS L'INERTIEL.** À bord, la caméra est
+  celle du PAWN et la station rend dans son repère CANONIQUE — c'est là que le
+  joueur marche et que vit la collision des 310 corps, et on ne va pas remuer
+  310 corps de collision par frame pour faire tourner un décor. On tourne donc le
+  MONDE de l'inverse de l'attitude (`GetRenderRot`) : **une** rotation, appliquée
+  à une cinquantaine de positions. *Tourner la caméra et la géométrie ensemble, ou
+  tourner tout le reste en sens inverse, c'est le même changement de repère* —
+  d'où un handoff qui reste invisible alors que les deux côtés de la reprise
+  emploient des conventions différentes.
+- **« LE MONDE REND » ≠ « LA CARTE A L'ŒIL ».** `SetMapActive` (visibilité) et
+  `SetMapHasEye` (caméra + remises à zéro du cadrage) sont séparés, exactement
+  comme `SetStationVisible` / `SetStationInControl` le sont déjà côté station. À
+  bord : orbites, marqueurs, labels et modèle extérieur ÉTEINTS — ce sont des
+  symboles de carte, et on est DANS le monde, on ne le survole pas.
+- **LA CUPOLA EST OUVERTE.** `Tools/diag_iss_cupola.py` la situe à (−18,2 ; +7,2 ;
+  −5,4) m sous Node 3, et deux repères NOMMÉS confirment l'axe indépendamment
+  (`Node1_..._Hatch_Nadir` à −3,05 m du centre du nœud contre `..._Hatch_Zenith`
+  à +2,63) : **−Z = nadir**, la même convention que le modèle extérieur. Le même
+  diag mesure que `Cupola_Glass` est en **BLEND_OPAQUE** — la vitre est un mur, et
+  aucun réglage d'instance n'y peut rien (le mode de fusion appartient au matériau
+  compilé). Les 7 vitres et les 7 volets ne sont donc pas rendus : c'est l'état
+  NOMINAL de la cupola en observation, volets ouverts et vitre propre.
+- **LE PIÈGE, ET IL ÉTAIT DÉJÀ LÀ (n°53).** L'homothétie unique des corps était
+  calibrée sur le corps le plus LOINTAIN rendu en géométrie. Depuis Novellus, la
+  dynamique est démente — Terre à 6 796 km, Soleil à 1,5e8, rapport 22 000 — et le
+  facteur tombait à 6,6e-8 : **la Terre était rendue en sphère de 42 cm à 45 cm de
+  l'œil**. Position juste (mesurée : le centre tombe pile au nadir), taille
+  angulaire juste (70°), et RIEN à l'écran — tout l'hémisphère visible tenait entre
+  2,7 et 5,5 u de profondeur, donc entièrement devant le plan de clipping proche
+  (10 u). On voyait les étoiles À TRAVERS la Terre. Ce n'est pas un défaut du rendu
+  à bord : il frappait déjà tout cadrage serré depuis un objet proche, et c'est
+  pourquoi la Terre manquait aussi sur les gros plans de Novellus.
+  Le facteur est maintenant **borné par le bas** par ce que le premier plan exige
+  (`RENDER_MIN_UU` = 100 m sous la surface la plus proche) et le lointain se
+  rattrape par une COURBURE (`RemapDist`, hyperbole strictement croissante) au lieu
+  d'un écrasement uniforme — donc pas de retour de l'interpénétration que la borne
+  individuelle avait causée. *Toute mise à l'échelle RADIALE de centre l'œil laisse
+  la projection exactement invariante : changer de facteur ne change pas l'image,
+  seulement la profondeur — c'est-à-dire uniquement ce qui était cassé.*
+- **NOUVEAU DRAPEAU `-spoeil=x,y,z[,yaw,pitch]`** : pose l'œil du pawn dans la
+  station. Le jeu fait apparaître le joueur dans Novellus ; la cupola est à 38 m
+  de là, derrière deux nœuds, et une capture ne peut pas y aller à pied. Piège
+  payé au passage : `FParse::Value` s'arrête sur une VIRGULE par défaut
+  (`bShouldStopOnSeparator`, Parse.h:71) et ne rendait que le premier champ.
+- **PREUVE.** `-spscene=iss -spoeil=-18.2,7.2,-4.6,0,-80` : la **Terre remplit les
+  sept fenêtres de la cupola**. Aucune régression : vue système et corps focalisé
+  identiques, module pressurisé identique (aucune fuite de lumière), handoff
+  toujours superposable au pixel (**dx = 0, dy = 0**), oracles 200/135/1622 au vert.
+
+**RESTE** : le Soleil et la Lune vus de la cupola tombent dans la partie courbée
+du remappage — ils sont à la bonne place et à la bonne taille angulaire, mais leur
+profondeur est comprimée ; sans conséquence tant qu'ils ne se croisent pas à
+l'écran (une éclipse serait le cas limite). Et la vitre n'a ni reflet ni
+réfraction : cela demande un vrai matériau translucide, donc un travail d'asset
+(`Tools/`), pas de code.
+
+**9. LES 8 POSTES DANS LEUR MODULE (2026-07-27).**
+Le sous-titre de chaque poste NOMME son module depuis le premier jour
+(« COUPOLE — TRANQUILITY . OBSERVATION »), mais les huit étaient alignés le long
+du couloir à 1,7 m d'intervalle à partir du point d'apparition : la station était
+un décor de panneaux flottants, pas un lieu. Et la cupola, que le point 8 vient de
+rendre habitable, n'avait rien à y faire.
+
+- **LES POSITIONS SONT MESURÉES** (`Tools/diag_iss_modules.py`) : inventaire des
+  310 meshes groupés par préfixe, avec pour chaque module la **médiane** des
+  centres — robuste à l'intrus isolé, et il y en a un (`Cupola_Int_Glass` est à
+  16 m des six autres pièces de la cupola et faussait à lui seul le centre de sa
+  boîte englobante ; la médiane ne bouge pas pour un intrus sur onze).
+  *Les sigles de l'asset ne sont pas ceux du GDD* : un premier essai rendait
+  « Destiny : absent » et « Zvezda : absent » — Destiny y est `US_Lab_*`, Kibo
+  `JPM_*`. Chercher le nom du GDD dans un asset importé ne prouve rien ; il faut
+  lire l'inventaire.
+- **DEUX MODULES N'EXISTENT PAS**, et c'est déclaré [GDD 6.8] : `ISS_Internal` ne
+  couvre que le **segment américain** (de BEAM à Kibo). ZVEZDA et ZARYA n'y sont
+  pas ; AGENCE et ANALYSE restent donc dans NOVELLUS, échelonnées le long de son
+  axe. Six postes sur huit rejoignent leur module, deux gardent le statu quo — pas
+  de régression, et le sous-titre continue de nommer le module visé.
+  Au passage : **NOVELLUS**, le module fictif du jeu, EST dans ce modèle la copie
+  de Kibo posée en avant de Node 2 (`JPM_*_001`, x ≈ 11,8 à 22,8 m) — là où le jeu
+  de référence plaçait déjà son point d'apparition.
+- **UE VÉRIFIE LA DONNÉE DU C++ PUR** (`USPStationSubsystem::VerifierPostes`). Les
+  positions sont mesurées sur des BOÎTES, pas sur la géométrie : un poste posé
+  40 cm dans une cloison serait injoignable, et le seul symptôme serait une invite
+  qui ne s'allume jamais — un silence, c'est-à-dire le pire des retours. UE
+  possède la vraie collision : il balaie la capsule du joueur à chaque position et
+  crie si elle ne tient pas. *8 publiés, 0 bloqués.*
+- **LA PORTÉE RESTE À 1,5 m**, et c'est un oracle qui l'a imposé. La tentation
+  était de l'ouvrir à 2 m maintenant que les modules sont distants de dizaines de
+  mètres — mais trois postes partagent encore NOVELLUS, qui ne fait que 11 m, et
+  « les portées ne se recouvrent pas » a mordu immédiatement.
+- **PREUVE.** Au point d'apparition l'invite est passée de CONTROLE à **VIGIE**
+  (Destiny est parti à 27 m de là) ; dans la cupola, **« [ E ] OUVRIR — COUPOLE »**
+  avec les lumières des villes par les hublots (côté nuit à l'époque du test).
+  Oracles `test_session` **210/210** (+10 sur le placement : fidélité de la
+  publication à la table, dispersion sur les trois axes, non-recouvrement, la
+  cupola comme poste le plus bas, VIGIE à portée du point d'apparition).
+  Handoff toujours superposable au pixel (**dx = 0, dy = 0**).
+
+**RESTE** : la traversée réelle depuis NOVELLUS jusqu'à la cupola (deux nœuds et
+quatre écoutilles) n'est pas vérifiée bout en bout — les écoutilles du chemin ne
+portent pas le suffixe `_Closed` du modèle et les huit positions sont dans du vide,
+mais seule une navigation effective le prouverait.
+
+**10. L'IMPESANTEUR (2026-07-27) — ON NE POUVAIT PAS SE DÉPLACER DU TOUT.**
+Retour d'essai de l'utilisateur. Le pawn portait un `UFloatingPawnMovement`, et
+**deux blocages distincts** l'empêchaient de servir — aucun des deux n'étant un
+réglage, ils se lisent tous les deux dans `FloatingPawnMovement.cpp` :
+
+- **IL NE BOUGEAIT PAS.** `TickComponent` teste `PawnOwner->GetController()` et ne
+  fait *rien* si le pawn n'est pas possédé. Or il ne l'est jamais :
+  `SetStationInControl` pose la CIBLE DE VUE, pas la possession — l'entrée arrive
+  par le HUD et le pont [doctrine du pont]. Le regard marchait (appliqué
+  directement), le déplacement non. *Un composant du moteur peut avoir une
+  précondition que l'architecture du projet ne remplit pas ; le symptôme est alors
+  un silence total, pas une erreur.*
+- **IL NE SAIT PAS LAISSER DÉRIVER.** `ApplyControlInputToVelocity` finit par
+  `Velocity.GetClampedToMaxSize(MaxSpeed * entrée)` : sans entrée le plafond vaut
+  ZÉRO, donc la vitesse est annulée à chaque frame — plus un `Deceleration`
+  explicite. C'est un composant de caméra libre : on lâche la touche, on s'arrête
+  net. **C'est l'exact contraire de l'impesanteur**, et ses trois paramètres n'y
+  peuvent rien.
+
+**LA LOI EST EN C++ PUR ET SOUS ORACLE** (`app/impesanteur.hpp`), en trois faits :
+on DÉRIVE (rien ne freine, jamais) ; on n'accélère qu'en POUSSANT sur quelque
+chose (3ᵉ loi — sans point d'appui, pas de force ; la « nage » dans l'air existe
+et est vingt fois moins efficace, ce qui évite le blocage sans en faire un mode de
+jeu) ; on s'arrête en S'AGRIPPANT. Les quatre grandeurs sont des valeurs de corps
+humain, pas des curseurs : plafond **1,2 m/s** (un équipage se déplace
+délibérément, ~0,2 à 0,5 m/s en routine ; les 2,2 m/s d'avant étaient une vitesse
+de vol, à laquelle on se blesse contre une cloison), poussée 2,5 m/s², brasse
+0,12 m/s², prise 4,0 m/s².
+
+**MAJ N'EST PLUS UN « BOOST » MAIS UNE MAIN COURANTE.** ×3 la vitesse est un
+réflexe de jeu de vol ; en microgravité il n'y a pas de frein, il y a une main
+courante qu'on attrape. Une seule touche fait donc les deux choses qu'une main
+courante fait — pousser fort, et retenir — et elle n'a d'effet **qu'à portée d'une
+paroi** (65 cm, un bras tendu, mesuré par balayage de la capsule gonflée). Elle est
+NOMMÉE dans le bandeau du HUD : c'est la commande la moins devinable du jeu, et un
+joueur qui l'ignore dérive jusqu'à la cloison suivante en croyant à un bug.
+
+**LE PIÈGE, PAYÉ DEUX FOIS (n°55).** L'absorption de la vitesse au contact ne se
+lit PAS dans le résultat de collision rapporté. Mesuré : le joueur s'arrêtait bien
+contre le plafond (le moteur bloquait) mais **gardait 0,59 m/s indéfiniment** —
+une vitesse fantôme, invisible tant qu'on pousse, qui repart d'un bond dès qu'on
+s'écarte. `IsValidBlockingHit()` vaut `bBlockingHit && !bStartPenetrating` et
+devient faux dès qu'on est à fleur de paroi ; et `bBlockingHit` seul ne suffit pas
+non plus, parce que `SafeMoveUpdatedComponent` RÉESSAIE le déplacement après avoir
+résolu la pénétration et **écrase `OutHit`** avec le second essai. La réponse est
+dans le **DÉPLACEMENT OBTENU** : ce que la géométrie a laissé passer EST la vitesse
+d'après — bloqué net donne zéro, effleuré donne la tangentielle, et les coins et
+contacts multiples se règlent sans cas particulier. C'est pourquoi la loi du choc a
+été RETIRÉE de `impesanteur.hpp` : une loi qu'on ne peut pas alimenter correctement
+vaut moins qu'une mesure, et deux mécanismes pour un phénomène en valent zéro.
+
+**PREUVE**, mesurée dans le vrai chemin de code (poussée 1 s puis relâchement) :
+accélération à 0,56 m/s, puis **|v| = 0,560 m/s CONSTANT sur 130 frames** de dérive
+(le seuil de 0,2 % laisse le vol libre bit pour bit intact), puis **|v| = 0,000 à
+l'impact** avec le plafond du module, position figée. Oracles `test_session`
+**222/222** (dont : sans entrée la vitesse est rendue TELLE QUELLE dans les quatre
+combinaisons appui/prise sauf celle qui veut dire « je tiens la main courante » ;
+une seconde entière de dérive sans perdre un iota ; le rapport poussée/brasse ; la
+diagonale qui ne pousse pas plus fort qu'un axe ; le freinage qui s'arrête à zéro
+sans repartir en arrière). Handoff toujours superposable (**dx = 0, dy = 0**).
+
+**APPROXIMATION DÉCLARÉE** [GDD 6.8] : le corps est un POINT — pas de rotation
+propre ni de moment cinétique. Un astronaute qui pousse de travers se met à
+tourner ; ici le regard reste commandé à la souris. Une rotation subie serait
+fidèle et injouable — le mal des transports est une vraie sensation d'impesanteur,
+mais pas une qu'on veut infliger.
+
+### LA CHRONOLOGIE DE VOL (2026-07-27) — LE VOL DURE ENFIN
+
+Le manque que le §7 annonçait : « l'insertion et l'EDL sont des phases critiques
+du modèle mais ne sont pas encore DATÉES ». **Une phase sans date n'arrive
+jamais.** Le moteur savait qu'une insertion est critique — `Events.hpp` majore
+ses taux d'anomalie, `MissionTempo.hpp` en déduit un plafond de cadence — il ne
+savait pas QUAND elle a lieu. D'où un plafond qui ne mordait qu'à l'ascension, et
+un vol vers Mars qui ne consommait **pas une seconde** de temps de jeu : « lancer »
+et « débriefer » étaient deux clics consécutifs.
+
+**LE MODÈLE : `mission/FlightTimeline.hpp`** (C++ pur). Depuis le feu vert, la
+mission porte des segments JOINTIFS, et le PROFIL suit la physique de la famille,
+pas un genre littéraire — une charge GEO fait un transit d'ellipse, un cargo NEP
+spirale, un rover entre dans une atmosphère :
+
+| Profil | Familles | Chronologie |
+| :--- | :--- | :--- |
+| Rendez-vous LEO | logistique, service, habité | ascension → phasage → **amarrage** |
+| Transfert GEO | sat | ascension → parking → **injection GTO** → transit → **circularisation** |
+| Interplanétaire | mars, mars_habite, science, relativiste | ascension → parking → **injection** → croisière → **insertion** |
+| Surface | surface | … → croisière → **EDL** |
+| Continu | nep | ascension → parking → spirale (non datée) |
+
+**AUCUNE DURÉE N'EST UN RÉGLAGE.** Trois seulement sont SOURCÉES et elles
+existaient déjà (ascension 9 min / Falcon 9 SECO ; EDL 7 min / MSL ; manœuvre
+critique 10 min / Apollo LOI). **Tout le reste est DÉRIVÉ par Kepler** de
+l'orbite concernée :
+- une révolution d'attente en **orbite de parking** — la MÊME orbite à 200 km
+  dont `trajectory_dv_for_mission` paie déjà l'injection Oberth (un chiffre, une
+  source) : 88,5 min ;
+- le **transit GTO** comme demi-période de l'ellipse parking→GEO : 5 h 15, la
+  valeur réellement volée ;
+- **l'orbite géostationnaire n'est même pas un chiffre** : `geo_radius_m()` =
+  (µ/ω²)^⅓ sur la vitesse de rotation SIDÉRALE de la Terre. On retrouve
+  42 164 km sans jamais l'avoir écrit — c'est la solution de « période orbitale
+  == jour sidéral », pas une constante recopiée ;
+- le **phasage de rendez-vous** comme profil à 4 orbites (Soyuz MS, Dragon).
+
+**ET LA CROISIÈRE N'EST PAS INVENTÉE DU TOUT.** C'est la durée de transit de la
+fenêtre RÉELLEMENT visée. `astro::WindowResult` la calculait déjà — c'est l'axe
+des durées de la carte porkchop — **sans jamais la publier** : la fenêtre ne
+répondait qu'à « quand partir ? », jamais à « quand arrive-t-on ? ». Deux champs
+ajoutés (`tof_days` à l'optimum, `local_tof_days` pour le transfert disponible
+maintenant), et la seconde réponse tombe : **fenêtre 2026, optimum 310 j,
+transfert disponible 329 j**. Elle est **FIGÉE AU FEU VERT** (`Mission::tof_days`)
+et jamais recalculée : la géométrie du ciel au décollage date l'arrivée, et un
+recalcul en route ferait glisser l'arrivée d'un vol déjà parti.
+
+**CE QU'ON NE SAIT PAS CALCULER, ON LE DÉCLARE** [GDD 6.8]. Une famille dont le
+contrat ne nomme pas de cible (« science ») et une spirale à poussée continue
+n'ont pas de date d'arrivée : `dated == false`, et **un vol non daté ne bloque
+rien**. On n'oppose jamais au joueur une date qu'on ne sait pas calculer.
+
+**CONSÉQUENCES, et c'est tout l'intérêt :**
+- **GATE D'ARRIVÉE** sur `Launched → Debrief` : on ne débriefe pas une sonde
+  encore en croisière, et le refus CHIFFRE l'attente (« vol en cours : arrivee
+  dans 249 jours ») exactement comme le gate de fenêtre. Le temps de jeu
+  [GDD 14.2] devient ce qui CONSOMME un vol.
+- **le plafond de cadence mord ailleurs qu'à l'ascension** — la loi de
+  `MissionTempo` n'a pas changé d'une ligne, il lui manquait un événement daté
+  auquel s'appliquer.
+- **le motif de refus est enfin AFFICHÉ.** Il était calculé et jeté : le bouton
+  du poste CONTROLE refusait en silence (piège n°42), ce qui se lit comme une
+  panne. `Session::dernier_refus_mission` le porte, le poste l'imprime.
+
+**L'ISSUE DU VOL A CHANGÉ DE PROPRIÉTAIRE.** Elle vivait sur `Session`, l'objet
+d'UI, qui ne se sauvegarde pas — et **les missions en cours ne se sauvegardaient
+PAS DU TOUT** (`GameState::save` le déclarait « V2 »). Invisible tant qu'un vol
+durait zéro seconde ; fatal dès qu'il dure 259 jours, puisque *quitter au menu
+sauvegarde*. Corrigé des deux côtés : le résultat du vol est un fait de la
+mission (`Mission::flight_flown/success/anomaly`), et les missions en cours sont
+sérialisées. On n'écrit que les FAITS — identité du contrat (**RÉAPPARIÉ par id
+depuis le catalogue**, qui est reconstruit par la graine : même doctrine que son
+état `suspended`), état FSM et sa date, durée de transit figée, issue du vol.
+`Mission::phase` n'y est pas : elle se DÉRIVE. *La chronologie n'est pas un état,
+c'est un calcul* — d'où l'oracle qui exige que la date d'arrivée reconstruite
+après rechargement soit identique au bit près.
+
+**PREUVE** (build `SPEditor` Succeeded, 17 s ; oracles 3 040/3 040) :
+
+| Capture | Ce qu'elle montre |
+| :--- | :--- |
+| `ue_chrono_insertion.png` | `-spvol=insertion -spcadence=4` : « RYTHME IMPOSE : MANOEUVRE CRITIQUE », cran REEL vert, JOUR/SEM/MOIS **rouges**, calendrier immobile au 27 JUL 2026 alors que « mois/s » était demandé |
+| `ue_chrono_edl.png` | idem à l'EDL (« RYTHME IMPOSE : EDL »), et le poste affiche PHASE DE VOL = EDL en orange |
+| `ue_chrono_poste_controle.png` | `-spvol=croisiere` : cran MOIS **vert** (aucun plafond en croisière), le monde avance de JUL à NOV 2026 pendant que le poste affiche « PHASE DE VOL : CROISIERE / ARRIVEE : dans 165 jours » |
+
+### LA TRACE DU VOL DANS LE MONDE (2026-07-27) — LE VOL EST QUELQUE PART
+
+La chronologie dit QUAND ; il manquait OÙ. `mission/FlightTrace.hpp` (C++ pur).
+Le tracé du pont EXISTAIT et DORMAIT depuis la scission de `jeu.cpp` : le rendu
+savait dessiner trajectoire, corridor et nœuds, plus personne ne les publiait.
+
+**L'ARC EST CALCULÉ, PAS DESSINÉ.** C'est la solution de LAMBERT entre la
+position réelle de la Terre à l'instant de l'injection et celle de la cible à
+l'instant de l'insertion — **les deux dates venant de la chronologie**, les deux
+positions de l'éphéméride. La polyligne (512 points) est obtenue en PROPAGEANT
+cet état par Kepler, pas en interpolant : ce qui est tracé est donc la
+trajectoire, et la position du vaisseau à l'instant t est un point DE cette
+courbe, par construction — l'oracle l'exige au mètre près à la date d'un
+échantillon. L'oracle central n'est pas une plage de valeurs mais un
+**invariant** : l'énergie spécifique et le moment cinétique sont CONSTANTS le
+long de la polyligne, ce qu'aucune courbe interpolée ne ferait.
+
+**L'ARC EST FIGÉ AU FEU VERT** (date + durée de transit + destination = sa
+signature) : reconstruire Lambert et 512 propagations par frame serait un
+gaspillage pur, et le pont prévoyait déjà `last_arc_sig` pour ça. Seule la
+POSITION avance, pour UNE propagation — jamais par relecture de l'échantillon le
+plus proche (0,64 jour d'écart, soit plus d'un million de km : un arc tracé
+finement mais parcouru par sauts serait pire que pas d'arc).
+
+**CE QUI N'EST PAS ENCORE LÀ EST DÉCLARÉ** [GDD 6.8] : le corridor est NUL et la
+position publiée est la NOMINALE. Ce n'est pas une fuite de vérité au sens de
+[GDD 7.5] — c'est une absence d'écart : à ce stade le vaisseau suit son arc PAR
+CONSTRUCTION, l'issue restant un tirage à l'arrivée. Estimé et corridor
+divergeront quand le vol manuel introduira l'erreur d'exécution et la poursuite.
+Les phases proches de la Terre (ascension, parking, rendez-vous LEO, mise à poste
+GEO) n'ont PAS de trace : à l'échelle du système elles tiennent dans le pixel de
+la Terre, et ce qui n'est pas séparable ne doit pas être désignable (piège n°41).
+
+**LE DÉFAUT QUE LE RENDU A RÉVÉLÉ, ET QUI ÉTAIT DANS LE MODÈLE** (piège n°63) :
+`transfer_tof_days` prenait la durée du meilleur transfert des **60 jours à
+venir** (`slop_days`, la largeur opérationnelle de « maintenant » — la bonne
+question pour dire si la fenêtre est ouverte, la mauvaise ici) et l'appliquait à
+un départ AUJOURD'HUI. Lambert répond quand même : par un arc valide reliant deux
+dates sans rapport, **plongeant à 0,26 UA du Soleil pour aller chercher Mars**.
+Invisible dans les chiffres, évident à l'écran — l'arc partait hors du champ. Le
+slop est resserré à un pas de balayage de la carte porkchop, et l'oracle qui
+l'aurait attrapé existe maintenant : **un transfert pris dans sa fenêtre reste
+ENTRE les deux orbites** (mesuré : périhélie 0,970 UA, aphélie 1,561 UA, transit
+329 j), au lieu du vague « l'arc reste dans le système interne » qui laissait
+passer le plongeon.
+
+**PREUVE** : `ue_trace_croisiere.png` — le monde ATTEND l'ouverture de la
+fenêtre (comme le gate l'impose au joueur), lance, et court jusqu'à mi-croisière :
+au 10 MAR 2027 l'arc part d'un nœud posé sur l'orbite terrestre, s'incurve entre
+les deux orbites et aboutit sur un nœud posé sur l'orbite de Mars, le vaisseau
+dessus. `ue_chrono_insertion.png` (refaite) montre la même chose à l'arrivée : au
+22 AOÛT 2027 l'extrémité de l'arc COÏNCIDE avec Mars, et le bandeau affiche
+« RYTHME IMPOSE : MANOEUVRE CRITIQUE ».
+
+### LA DISPERSION DE NAVIGATION (2026-07-27) — LA FIN DU 0,985
+
+`MissionPlan::p_physics` valait **0,985**, commenté « issue du MC, simplifiée » :
+un quart de la probabilité de succès d'un vol ne dépendait de RIEN — ni du
+moteur, ni de la marge provisionnée, ni de la géométrie du transfert. C'était le
+dernier chiffre magique de la boucle de mission. `mission/Navigation.hpp` le
+remplace par un calcul, **entièrement bâti sur des modules déjà là et déjà sous
+oracle** :
+
+1. **L'injection n'est jamais exacte** — `nav/Gates.hpp` (Gates, 1963) donne son
+   écart-type à partir du Δv commandé.
+2. **Une erreur au périgée est AMPLIFIÉE** : v∞² = v_p² − v_esc² donne
+   v∞ δv∞ = v_p δv_p, donc un gain v_p/v∞ (mesuré **×2,8** pour Mars). C'est
+   l'effet Oberth lu à l'envers, et c'est pour cela qu'une injection
+   interplanétaire se mesure au dixième de m/s.
+3. **Elle se propage en manque au but** par la matrice de transition de l'arc,
+   obtenue par différences finies centrées sur le propagateur képlérien — même
+   doctrine que `nav/OrbitDetermination.hpp` sur le propagateur de vérité :
+   aucun modèle dupliqué, et c'est ce que le joueur peut faire lui-même.
+4. **La correction qui annule ce manque** est linéaire en δv, donc sa norme suit
+   une **loi de Maxwell** (norme d'un vecteur gaussien 3D) — forme close.
+5. **P(navigation) = P(|Δv_corr| ≤ marge provisionnée).**
+
+**LES CHIFFRES, mesurés** (fenêtre Mars 2026, transit 329 j) : injection
+**3 979 m/s** depuis le parking à 200 km, erreur d'exécution **11,6 m/s** (1σ),
+amplifiée à 33 m/s en héliocentrique, d'où un **manque au but de 1 238 000 km**
+sans correction — 350 rayons martiens. La correction à TCM-1 (J+14, valeur
+SOURCÉE : MSL L+15 j, Mars 2020 L+14 j) ne coûte que **75 m/s au 99e centile** :
+*corriger tôt coûte bien moins que l'erreur qu'on corrige*, et ce n'est pas un
+réglage, ça sort de la matrice de transition.
+
+**CE QUE ÇA CHANGE** : provisionner de la marge (`Program::dv_margin`) et choisir
+un moteur précis ACHÈTENT enfin quelque chose de calculé. Le couplage annoncé par
+`Program.hpp` depuis toujours — « plus de marge → étage plus lourd → lanceur plus
+cher » — se ferme : les deux bouts existent. Sous oracle : marge 0 → P = 0,000 ;
+marge 400 m/s → P = 1,000 ; moteur deux fois plus précis → couverture doublée.
+
+**LE PIÈGE ÉVITÉ DE JUSTESSE (n°64)** : la marge était **affichée sans être
+réglable**. Tant que `p_physics` valait 0,985 elle ne servait qu'à alourdir
+l'étage et personne n'y touchait ; dès qu'elle COMMANDE la probabilité, ne pas
+pouvoir la régler rendait **toute mission interplanétaire impossible** — piège
+n°40 à l'identique. Le poste porte donc un réglage `− / +`, et surtout la LECTURE
+qui le motive (injection, manque au but, correction à prévoir) : on ne provisionne
+pas à l'aveugle, on couvre un chiffre.
+
+**LE CORRIDOR 3σ** [GDD 8.3] est publié et dessiné, mais il se LIT au terminal :
+mesuré 49 000 km à J+10, 608 000 km à J+100, **1 329 000 km à mi-croisière** —
+soit 2 pixels au plan système. Ce qui n'est pas séparable à l'écran doit être
+CHIFFRÉ ailleurs (même doctrine que Novellus, piège n°41), et l'oracle fixe
+l'ordre de grandeur pour que la règle ne se perde pas. Il CROÎT et rien ne le
+rétrécit encore : la poursuite (achat de passes, détermination d'orbite) est la
+brique suivante — DÉCLARÉ, pas simulé.
+
+**AU PASSAGE, UNE CORRECTION DE CONCEPTION** : le poste débordait de son cadre
+(piège n°42). Le remède n'est pas de raccourcir le texte mais de reconnaître
+qu'**on ne reconçoit pas un véhicule en vol** : commandes de programme et étude
+de navigation appartiennent à la CONCEPTION et s'effacent au feu vert, laissant
+la place aux données de VOL, qui ne servent qu'après.
+
+**PREUVE** : `ue_nav_conception.png` (26 SEP 2026, la chaîne entière lisible :
+injection 3 979 m/s ±11,6 Oberth ×2,8 → manque au but 1 238 449 km → correction
+75 m/s → P(succès) 0,0 % faute de marge) et `ue_nav_poste_controle.png` (en vol :
+phase, arrivée, corridor 1 328 690 km, sans les commandes de conception). L'écran
+et l'oracle donnent les MÊMES chiffres — contrôle croisé modèle/affichage.
+Nouveau drapeau **`-spvol=conception`** : la mission n'est pas partie, ce cadran
+ne se capturait pas autrement.
+
+### L'ÉTAT VRAI (2026-07-27) — L'ERREUR EST RÉELLEMENT COMMISE
+
+La dispersion ci-dessus était STATISTIQUE : on savait ce qui POUVAIT arriver,
+rien n'arrivait. `nav_realisation` fait exécuter l'injection pour de bon —
+`nav::apply_gates` tire l'écart sur un **sous-flux dédié** de la graine de
+mission, donc rejouable, et ajouter d'autres sources d'aléa ailleurs ne décalera
+pas ce tirage. L'écart subit la MÊME amplification d'Oberth que sa statistique :
+une seule loi pour la dispersion et pour sa réalisation, sinon les deux
+divergeraient en silence.
+
+Le manque au but n'est pas linéarisé : à plus d'un million de km de 1σ, un
+premier ordre ne serait pas honnête — on propage les DEUX états et on compare.
+Mesuré sur un tirage : **erreur commise 15,3 m/s → manque au but 4 200 000 km →
+correction requise 48,6 m/s**.
+
+**L'ISSUE DE NAVIGATION N'EST PLUS UN DÉ.** `fly_mission` comparait tout à une
+probabilité ; il compare maintenant un NOMBRE à la marge provisionnée. Deux plans
+identiques, deux marges différentes : celui qui a sous-provisionné échoue, pour un
+motif nommé (« dérive de navigation hors corridor ») et avec
+`player_error_causal` — sous-provisionner est une décision de conception, donc une
+cause racine documentée [GDD 10.3]. **Et le risque n'est pas compté deux fois** :
+la navigation résolue, son facteur SORT du tirage — sinon le même risque serait
+une estimation *et* un fait. C'est la distinction que tout ce chantier installe :
+**à la conception on estime une probabilité, en vol on subit un résultat.**
+
+Le joueur ne voit toujours pas cet écart pendant le vol [GDD 7.5] : il l'apprend
+au DÉBRIEF, où le poste affiche le manque au but réel et la correction qu'il
+aurait fallu — de quoi juger sa marge sur autre chose qu'une statistique. Les
+trois faits (`nav_evaluee`, `nav_dv_required`, `nav_miss_km`) sont sérialisés :
+**on ne retire pas une erreur déjà commise.**
+
+### LA POURSUITE ET LA CAMPAGNE DE CORRECTION (2026-07-28)
+
+`mission/NavSolution.hpp`. L'en-tête de `nav/Tracking.hpp` promettait ceci depuis
+le premier jour : « **sans poursuite, le joueur ne SAIT PAS que son erreur
+d'exécution a eu lieu. Il croit que sa manœuvre est passée au nominal. Sa
+correction est donc calculée sur un état faux — donc inutile.** » C'est cette
+phrase qu'on rend vraie.
+
+**UN VRAI FILTRE PAR LOTS**, forme bayésienne standard (Tapley, Schutz & Born
+ch. 4) : Λ = P0⁻¹ + Σ (HΦ)ᵀW(HΦ), δx̂ = Λ⁻¹Σ(HΦ)ᵀW·résidu, P = Λ⁻¹. **Rien n'est
+inventé** : H vient de `nav::predict` (partielles exactes distance / vitesse
+radiale), la visibilité de `nav::station_visible` (masque d'élévation réel des
+trois complexes du DSN), Φ de la matrice de transition képlérienne de
+`Navigation.hpp`, et **l'a priori EST la dispersion d'injection** — avant de
+mesurer, le joueur ne connaît que la loi de son erreur.
+
+`nav::batch_least_squares` (propagateur n-corps, STM sur la vérité) serait plus
+fidèle mais demande une propagation numérique par mesure toutes les 60 s sur
+deux semaines : hors de portée d'un écran. On garde la MÊME algèbre et les MÊMES
+partielles sur des états képlériens — la même approximation que l'arc qu'on
+estime, donc **pas de modèle plus grossier que ce qu'il mesure**.
+
+**LA CAMPAGNE DE CORRECTION** enchaîne deux manœuvres aux dates de la pratique
+(TCM-1 à J+14, TCM-2 à A−45 j), chacune **calculée sur ce que le joueur CROIT** et
+exécutée avec l'erreur de Gates. Et le verdict est net :
+
+| | TCM-1 | TCM-2 | total | manque final |
+| :--- | ---: | ---: | ---: | ---: |
+| **sans poursuite** | 55,1 m/s | 281,8 m/s | **336,9 m/s** | **92 115 km** |
+| **14 j de poursuite** | 48,7 m/s | 7,3 m/s | **56,0 m/s** | **120 km** |
+
+Sans mesures, le joueur dépense **six fois plus** de Δv pour manquer Mars de
+27 rayons planétaires. Avec, il arrive au but et TCM-2 n'est plus qu'une retouche.
+`Program::tracking_days`, acheté et facturé depuis toujours, décide enfin de
+quelque chose — et il a son bouton au poste, comme la marge (piège n°64, qui
+serait revenu à l'identique).
+
+**DEUX FOIS LE MODÈLE A CORRIGÉ CELUI QUI L'ÉCRIVAIT** :
+- **le filtre s'annonçait 300 fois plus précis qu'il ne l'était** (σ 0,001 m/s
+  pour une erreur résiduelle de 0,3). Cause : une seule linéarisation, autour du
+  nominal, à 11 000 km de la vérité. Trois itérations de Gauss-Newton (ce que
+  `batch_least_squares` fait déjà) et la covariance cesse de mentir : erreur
+  résiduelle 0,001 m/s pour un σ de 0,001. **Un filtre trop confiant est pire
+  qu'un filtre imprécis** (piège n°66) ;
+- **TCM-2 à trois jours de l'arrivée coûtait 112 m/s** même avec une poursuite
+  parfaite. Le modèle avait raison : à trois jours du but, Φ_rv est presque
+  singulière, la LEVIÉE a disparu, et rattraper quelques milliers de km coûte
+  plus cher que l'injection ratée. C'est pourquoi les campagnes réelles corrigent
+  TÔT (MSL : TCM-1 L+15 j, TCM-3 A−45 j). Date corrigée sur la pratique, pas sur
+  le confort.
+
+### LA MANŒUVRE EST UN ACTE DU JOUEUR (2026-07-28) — `mission/Manoeuvre.hpp`
+
+« Toutes les manœuvres sont calculées **PAR LE JOUEUR** dans le terminal.
+L'assistance dépend UNIQUEMENT du mode. » [GDD 7.4, 2.2]. Tout ce qui précédait
+calculait la correction À SA PLACE : c'était de la conception, pas du pilotage.
+
+- **LES TCM SONT DES RENDEZ-VOUS DATÉS.** La croisière se coupe en trois autour
+  de ses deux corrections (TCM-1 à J+14, TCM-2 à A−45 j), et chacune est une
+  MANŒUVRE CRITIQUE de la chronologie. Conséquence : **le plafond de cadence
+  ramène le monde au temps réel au moment exact où il faut agir** — les trois
+  chantiers (chronologie, trace, navigation) se referment ici l'un sur l'autre,
+  et la question « le joueur n'a rien à faire pendant ces 10 minutes » n'existe
+  plus : c'est là qu'il corrige.
+- **IL COMMANDE TROIS COMPOSANTES EN RSW** — le repère que `fen/core/Vec3.hpp`
+  déclare depuis toujours comme « LE repère dans lequel le joueur exprime ses
+  Delta-v », et celui des opérations réelles. La base est construite sur l'état
+  qu'il CROIT : commander dans un repère qu'on ne connaît pas exactement fait
+  partie du problème.
+- **LE MODÈLE APPLIQUE LITTÉRALEMENT**, erreur de Gates comprise, à l'état vrai.
+  Aucun rattrapage silencieux. Sous oracle : le Δv du solveur divise le manque au
+  but par **151** (4 200 735 km → 27 769 km, puis TCM-2 finit le travail) ; ne
+  rien commander ne coûte rien et ne corrige rien ; **un Δv mal orienté AGGRAVE**
+  la trajectoire ; et corriger sans poursuite ne sert à rien, puisque le joueur
+  aveugle ne voit aucun écart à corriger.
+- **L'ASSISTANCE DÉPEND DU MODE, ET DE RIEN D'AUTRE** [GDD 2.2]. Le bouton
+  SOLVEUR — l'équivalent du nœud préconstruit du graphe — existe en **Normal** ;
+  en **Pro** le poste affiche « aucun solveur — le calcul est à vous ».
+  **`ModeAide` n'avait jamais eu le moindre effet nulle part : c'est son premier.**
+- Ce que fait `nav_campagne` automatiquement devient le comportement de
+  l'ADJOINT pendant une absence [GDD 9.3], pas celui du joueur présent.
+
+**PREUVE** : `ue_manoeuvre_tcm.png` (`-spvol=tcm`, nouveau drapeau) — 10 OCT 2026,
+« RYTHME IMPOSE : MANOEUVRE CRITIQUE », le monde au temps réel malgré `mois/s`
+demandé, et le poste qui offre les trois axes, le solveur et l'exécution. Le
+manque au but projeté y affiche **0 km** parce que la capture n'achète aucune
+poursuite : le joueur ne voit rien à corriger — la doctrine de `nav/Tracking.hpp`,
+enfin visible à l'écran.
+
+### LE GRAPHE DE NŒUDS (2026-07-28) — `mission/Graphe.hpp`, mode NORMAL [GDD 2.2]
+
+Le joueur COMMANDAIT son Δv avec trois boutons ; il le CALCULE maintenant, en
+assemblant des primitives typées. **Un nœud, un appel d'API** — l'équivalence
+stricte que [GDD 2.2] exige, et l'écran la NOMME (chaque bouton porte la
+fonction qu'il est : `navigation().solution()`, `stm(etat, duree)`,
+`solveur().corriger(phi, ecart)`…). Huit primitives : SOLUTION NAV, TEMPS
+RESTANT, PROPAGER, ÉCART/CIBLE, TRANSITION, RÉSOUDRE Δv, VERS RSW, COMMANDE.
+
+**LE BOUTON « SOLVEUR » A ÉTÉ RETIRÉ**, et c'est une correction de doctrine, pas
+une régression : une réponse en un clic est exactement la « procédure prête à
+rejouer » que [GDD 2.4] interdit. Ce que Normal accorde, ce sont des primitives
+et une **validation de typage** — la contrepartie exacte de ce que le
+compilateur ferait en Pro. Brancher un VECTEUR là où on attend une DURÉE est
+refusé, avec le nœud et le type nommés (« PROPAGER attend DUREE, recoit
+VECTEUR »). En **Pro**, aucune assistance : « le calcul est à vous ».
+
+**L'ORACLE QUI COMPTE** : le graphe assemblé à la main rend **exactement** le
+même Δv que le solveur interne (R −9,44 · S −38,31 · W 28,46 m/s), et le vol
+obtenu est le même au mètre près. Si les deux divergeaient, l'un mentirait sur ce
+que fait l'autre. Sont aussi sous oracle : le refus typé et son motif, un nœud
+qui exige une TRANSITION en amont, un graphe qui ne commande rien.
+
+**LE GRAPHE NE SE SAUVEGARDE PAS** — [GDD 2.4] veut qu'on REFASSE l'assemblage à
+chaque analyse. Ce n'est pas un oubli de sérialisation, c'est la règle.
+
+**APPROXIMATION DÉCLARÉE** [GDD 6.8] : le graphe est LINÉAIRE (chaque nœud
+consomme la sortie du précédent, plus l'ÉTAT et la TRANSITION mémorisés en
+amont). Un graphe à branches convergentes demande une surface d'édition en deux
+dimensions ; la chaîne couvre exactement le raisonnement que le jeu pose
+aujourd'hui, et l'évaluateur n'a rien qui l'empêche d'accepter des branches le
+jour où l'éditeur les dessinera.
+
+**PREUVE** : `ue_graphe_normal.png`. Au passage, deux corrections d'écran de la
+même famille que le piège n°65 : la palette passe sur DEUX rangées (un bouton
+dont le nom est tronqué ne dit plus quelle fonction il est — ce qui ruine
+justement l'équivalence), et **pendant une manœuvre critique le poste devient une
+CONSOLE DE VOL** : la fiche de viabilité s'efface, comme les commandes de
+conception. Le joueur pilote, il n'évalue pas un programme.
+
+### LA TOOLCHAIN EMBARQUÉE (2026-07-28) — `code/Toolchain.hpp` + `mission/src/Toolchain.cpp`
+
+« Le joueur écrit du **VRAI C++**, compilé et exécuté par une toolchain
+embarquée » [GDD décision 1]. Pas un langage maison, pas un interpréteur : le
+compilateur du système, les en-têtes `ares::vol`, un exécutable, un processus.
+**Les quatre exigences de [GDD 18] sont tenues et sous oracle** :
+
+| Exigence [GDD 18] | Ce qui la tient | Oracle |
+| :--- | :--- | :--- |
+| **Isolation** — « un pointeur invalide produit un échec de mission, jamais un crash du jeu » | processus SÉPARÉ (`CreateProcess`) | déréférencement nul → **0xC0000005**, `IssueCode::Plantage`, le testeur survit pour l'écrire |
+| **Limite de temps** | `WaitForSingleObject` + `TerminateProcess` | boucle infinie → `IssueCode::Delai`, rien ne gèle |
+| **Déterminisme** — « journalisation des exécutions avec leurs entrées » | `EntreesVol` écrit à côté du résultat, en TEXTE | mêmes entrées → mêmes décisions ; les entrées se relisent à l'identique |
+| **Hors-ligne** | rien ne sort de la machine | par construction |
+
+**L'EXEMPLE DE [GDD 15.3] TOURNE LITTÉRALEMENT.** Le squelette que le poste
+propose au joueur est le code du document, mot pour mot : il compile contre
+`ares::vol`, s'exécute, et rend **Δv = 57,870 m/s** avec son journal de bord
+(« Correction executee : 57.87 m/s »). Si ce test tombait, le GDD décrirait une
+API que le jeu n'a pas. Les **quatre décisions** du `Contexte` remontent :
+exécuter, différer, alerter, replanifier — et « ne rien exécuter » en est une.
+
+Ce qui ne compile pas est refusé **à coût nul** [GDD 15.5 étape 1], avec les
+diagnostics du compilateur tels quels.
+
+**CE QUI EST DÉCLARÉ** [GDD 6.8, 18] : on utilise le compilateur DÉJÀ présent
+(`cl.exe` ; plateforme cible Windows). L'EMBARQUER dans la distribution — les
+« plusieurs centaines de Mo » que [GDD 18] budgète — est une tâche de
+**packaging**, pas de modèle : le mécanisme, lui, est réel et vérifié de bout en
+bout. Sur une machine sans compilateur, la chaîne rend `Indisponible` et le dit,
+au lieu de faire semblant.
+
+**TROIS PIÈGES PAYÉS**, tous du même genre — *un échec silencieux ressemble à une
+absence de capacité* :
+- **n°68** : `cmd /c` découpe au premier guillemet si la commande entière n'est
+  pas encadrée d'une paire supplémentaire. Résultat : ni erreur, ni journal, rien
+  — et la chaîne concluait « compilateur absent ».
+- **n°69** : classer l'issue sur une phrase du shell (« n'est pas reconnu »)
+  faisait passer un code FAUX pour une machine mal installée — le script
+  d'environnement du compilateur imprime lui-même cette phrase, sans rapport. On
+  tranche désormais sur la présence d'un diagnostic `error C…` / `erreur C…`.
+- **n°70** : Windows garde un binaire verrouillé un instant après la fin du
+  processus qui l'exécutait ; le lieur échouait sur `LNK1104`. **Un artefact qui
+  doit être remplacé doit être NEUF, pas écrasé** — un nom unique par compilation
+  supprime la question au lieu de mieux la contourner.
+
+### L'ATELIER LOGICIEL DU MODE PRO (2026-07-28) — la SURFACE, et ce qu'elle a révélé
+
+Le poste CONTRÔLE a désormais **deux faces** en mode Pro : la conduite de mission,
+et l'atelier logiciel (`SSPPoste::BuildCodeVol`). Le drapeau vit sur la session
+(`Session::atelier_logiciel`), à côté de `poste_ouvert` et pour la même raison —
+*une vue qu'aucune capture ne peut atteindre est une vue que personne ne vérifie*.
+Le cadre d'un poste CLIPPE (piège n°42) : un éditeur, ses diagnostics et sa fiche
+de qualification ne tiennent pas sous dix lignes de vol.
+
+**LA CHAÎNE DE [GDD 15.5], DANS L'ORDRE ET SANS RACCOURCI**, chaque étape gardée
+par la précédente : COMPILER (coût nul, diagnostics tels quels) → BANC D'ESSAI
+(prélève la trésorerie par `finance.engage`, avance le calendrier par
+`avancer_temps`) → TÉLÉVERSER (refusé sans fiche valide) → et, en vol, EXÉCUTER
+LE CODE DE VOL, dont le Δv passe en RSW dans `tcm_commande`. **Le code PROPOSE ;
+le joueur appuie encore sur EXECUTER.** Réglages du banc montrés AVEC leur
+conséquence chiffrée AVANT le clic (« SI ON LANCE LE BANC : couverture 62 %,
+10,0 M€, +4,0 j ») — même doctrine que la marge (piège n°64).
+
+**UNE FICHE APPARTIENT À UN TEXTE, PAS À UN JOUEUR.** `source_compilee` /
+`source_certifiee` / `source_bord` sont gardées : éditer une ligne après le banc
+PÉRIME la qualification et rouvre l'interdiction de téléverser. Sans cela, la
+fiche aurait porté sur un code que personne n'a jamais exercé.
+
+**LE BANC NE SE PAIE PLUS EN DÉCLARATIONS.** Cocher « profils dégradés » et
+« interfaces » ÉLARGIT le domaine : à heures constantes la couverture BAISSE
+(`bench_h_char`, ×2 et ×1,5, [Annexe E — à calibrer]). Sans cette dilution, deux
+cases gratuites achetaient une confiance A — *un domaine plus large certifié au
+même prix, c'est-à-dire une déclaration que rien ne paie*.
+
+**DEUX PIÈGES PAYÉS, ET LE SECOND EST LE PLUS GRAVE DE LA PASSE :**
+- **n°71 — un bac à sable qui laisse échapper ses détenus n'en est pas un.**
+  `TerminateProcess` au délai tuait le `cmd.exe` intermédiaire, **pas le programme
+  du joueur**, qui continuait de brûler un cœur indéfiniment. L'oracle du délai
+  passait quand même (`depasse` était bien vrai) : le seul symptôme arrivait AU
+  RUN SUIVANT, en `LNK1104` sur un binaire qu'un fuyard de la veille tenait
+  ouvert. Mesuré : **trois processus fuyards, ~16 minutes de CPU chacun**. Le code
+  du joueur est désormais lancé DIRECTEMENT (sans shell) dans un **job object**
+  tué en bloc — ce qui donne du même coup la **limite de mémoire** que [GDD 18]
+  exigeait à côté de la limite de temps. Nouvel oracle : après le délai, le
+  binaire doit être EFFAÇABLE, sinon quelqu'un le tient encore.
+- **n°72 — un outil fourni doit être juste, ou ne pas être fourni.**
+  `ares::vol::Solveur` corrigeait « proportionnellement à l'écart sur un temps
+  caractéristique » : exact en champ nul, FAUX dès qu'un arc courbe. Mesuré sur
+  une croisière de Mars (4,2 M km de manque, 315 j de reste), il commandait
+  **158 m/s dans une direction qui portait le manque à 5,2 M km**. Le joueur qui
+  recopiait l'exemple de [GDD 15.3] aggravait donc son vol, et la faute était
+  dans l'API — pas dans son code, donc introuvable. Le solveur résout maintenant
+  Δv = −Φ_rv⁻¹·Δr sur la vraie matrice de transition : **57,0 m/s, manque divisé
+  par 140**. Contrôle croisé : sur un horizon d'UN JOUR les deux formules
+  coïncident à 0,03 % (57,851 contre 57,870) — *un arc court EST une droite*, et
+  l'ancien modèle ne se trompait que là où la courbure compte.
+
+**CONSÉQUENCE D'ARCHITECTURE** : `M3`, `inverse3`, `StmBlocks` et `kepler_stm`
+ont quitté `fen/mission/Navigation.hpp` pour **`fen/astro/Stm.hpp`**. Ils ne
+connaissent que Kepler et deux corps — c'est de l'astrodynamique, pas de la
+logique de mission — et les laisser dans `mission/` les mettait hors de portée de
+`ares/vol.hpp`. `fen::mission` les ré-exporte par `using`, donc aucun appel
+existant n'a bougé. Il n'y a toujours **qu'une** matrice de transition dans le
+moteur, et le nouveau `astro::dv_correction` est **la** source de la formule de
+correction : le graphe du mode Normal, le solveur du mode Pro et le bureau
+d'études la partagent. Corollaire : l'API du joueur n'est plus faite que
+d'en-têtes — `ToolchainConfig::sources` porte les TU à lier (`Kepler.cpp`).
+
+**CAPTURE** : `-spcode` ouvre l'atelier, `-spcode=vol` reste sur la conduite de
+mission en mode Pro. La partie de capture démarrait en NORMAL, et le mode d'aide
+se choisit à la création d'une partie — un écran qu'une capture ne traverse pas ;
+sans ce drapeau, l'éditeur aurait été un écran que rien ne pouvait photographier.
+
+### LE HORS-DOMAINE MORD (2026-07-28) — la qualification cesse d'être un décor
+
+`fly_mission` lit désormais deux faits figés au feu vert : `Mission::code_embarque`
+et `Mission::code_non_couvert`. Un logiciel embarqué sur un vol que son banc n'a
+jamais exercé produit une **anomalie majeure** — « exécuter hors du domaine =
+comportement non couvert = cause d'anomalie légitime » [GDD 15.5, ch.10]. Sans
+cette porte, acheter des heures d'essai ne changeait **rien** à l'issue : le banc
+prélevait un budget et retardait une fenêtre pour un résultat purement décoratif.
+
+**LA PORTE EST AVANT LE VERDICT DE NAVIGATION**, et c'est un choix : quand les
+deux tombent, la cause proximale est le logiciel. Un code dont on ne sait rien a
+pu commander n'importe quoi — le manque au but qu'on mesurerait ensuite serait sa
+conséquence, pas une seconde faute.
+
+**CE N'EST PAS UNE PÉNALITÉ POUR AVOIR ÉCRIT DU CODE.** Rester dans son domaine
+est gratuit, et l'atelier le dit **avant le décollage**, quand c'est encore
+actionnable : « HORS DOMAINE AU DÉCOLLAGE : qualifié "croisiere", cette mission
+vole "surface" ». Le dire au débrief aurait été une sanction ; le dire là est une
+décision. Les deux faits se **sauvegardent** — sinon quitter au menu absoudrait un
+logiciel hors domaine, et l'issue changerait au rechargement (le piège des
+missions en vol non sérialisées, repayé une seconde fois pour rien).
+
+**PIÈGE VOISIN PAYÉ AU PASSAGE** — un oracle de la trace exigeait que l'arc
+touche Mars **à moins d'un mètre**. Il est tombé tout seul un matin, à 1,359 m,
+sans qu'une ligne du modèle ait bougé : 512 propagations de Kepler sur 2,3 UA
+accumulent quelques 1e-12 relatifs, et la géométrie de l'arc CHANGE avec la date
+réelle (la fenêtre synodique est cherchée depuis l'époque courante). *Un seuil
+absolu sur une grandeur relative finit par mentir.* La borne est désormais
+relative à l'arc (1e-10, soit ~34 m ici — des ordres de grandeur sous les 3 400 km
+de rayon martien) : la preuve est intacte, la fragilité est partie. Même famille
+que le piège n°67.
+
+~~**RESTE, ET C'EST DÉCLARÉ** : la couverture du banc (`code_success_prob`) n'est
+pas encore tirée en vol~~ — **LEVÉ le 2026-07-28**, voir « LE PRIX DE L'INACTION »
+ci-dessous. La condition posée ici (« il faut d'abord que ne rien embarquer coûte
+quelque chose ») a été remplie : la campagne automatique n'est plus le
+comportement par défaut, et la couverture décide de la tenue des rendez-vous par
+le logiciel de bord. Le plafond est juste (une manœuvre fine ne
+peut pas défiler à mois/s) mais il n'est supportable qu'une fois la manœuvre
+JOUABLE — c'est le vol manuel [GDD 9], §7 point 2, et les deux chantiers se
+rejoignent bien là où le document l'annonçait. **À noter aussi** : les crans de
+`TimeRate` sautent de ×1 à ×86 400, alors que la loi d'observation réclamerait
+~×30 pour une phase de 10 min. La loi choisit donc le temps réel faute de mieux
+— ce n'est pas la loi qui est trop stricte, c'est l'échelle des crans qui est
+trop grossière, et le GDD 14.2 ne nomme que jour/semaine/mois.
+
+### LE PRIX DE L'INACTION (2026-07-28) — ne rien embarquer coûte enfin quelque chose
+
+La question ouverte que la passe précédente déclarait en toutes lettres : « la
+campagne de correction de l'adjoint est **gratuite et quasi optimale** ; tant que
+c'est vrai, on ne peut pas tirer contre la couverture du banc sans rendre
+l'écriture de code strictement pire que son absence ». **Décision de
+l'utilisateur : c'est la CORRECTION TARDIVE qui coûte** — pas un adjoint rendu
+incompétent, pas une facture.
+
+**LE FILET EST RETIRÉ, ET C'EST TOUT LE CHANGEMENT.** `tirer_navigation` posait
+`nav_dv_required`/`nav_miss_km` depuis `nav_campagne` **dès le feu vert** : le vol
+arrivait donc corrigé sans que personne n'ait rien commandé. Le commentaire du
+code disait pourtant, depuis le premier jour, que cette campagne était « le
+comportement d'ARES **pendant une absence** [GDD 9.3] ». *Le code appliquait
+toujours ce qu'il déclarait lui-même comme un repli.* Ces deux chiffres portent
+maintenant l'état du vol tel qu'il vient d'être injecté : rien dépensé, et le
+manque au but de la trajectoire réellement volée.
+
+**UNE CORRECTION EST UN RENDEZ-VOUS DATÉ**, et il n'a lieu que si quelqu'un est
+là pour le commander. `Session::resoudre_vol`, appelé une fois à l'arrivée,
+solde le vol depuis l'état VRAI où il en est — les corrections que le joueur a
+commandées de sa main y sont déjà. Restent les rendez-vous qu'il n'a pas tenus :
+
+| Qui | Quand | Ce que ça donne (mission Mars 2026, mesuré) |
+| :--- | :--- | ---: |
+| **Personne** | — | **4 205 263 km** de manque — tolérance 1 000 km, mission perdue |
+| **Le logiciel de bord**, couvert | à la date, sans le sol [GDD 9.6] | **19 km** pour 48,7 m/s |
+| **Le logiciel de bord**, banc à vide | le tirage tombe [GDD 15.5] | **4 205 263 km** — il ne tient rien |
+| **L'adjoint**, joueur absent [GDD 9.3] | campagne complète | **19 km** |
+
+**AUCUN MALUS N'EST APPLIQUÉ NULLE PART, et c'est le point.** Ce qui coûte est le
+bras de levier qu'on a laissé passer : Φ_rv devient quasi singulière près du but,
+et le modèle l'avait déjà mesuré (112 m/s à A−3 j contre 7,3 à A−45 j). La loi de
+campagne n'a pas changé d'une ligne — elle est seulement devenue **REPRENABLE**
+(`nav_campagne_depuis` : un rendez-vous antérieur à l'état vrai n'est pas à
+prendre, sous oracle). `nav_campagne` n'en est plus que le cas « depuis
+l'injection » : **une seule loi, deux points d'entrée**, sinon l'adjoint et le
+logiciel de bord corrigeraient différemment pour la même physique.
+
+**`code_success_prob` MORD ENFIN.** La couverture du banc est figée au feu vert
+(`Mission::code_couverture` — on ne relit pas la fiche à l'arrivée, le joueur peut
+avoir rouvert son éditeur) et le logiciel ne tient ses rendez-vous que si le
+tirage passe. « Le banc rassure sans garantir », « un état non imaginé passe
+toujours » [GDD 15.5] : c'est le premier endroit du moteur où ces deux phrases
+changent une issue. Et ce n'est **pas** une punition pour avoir écrit du code —
+rester dans son domaine reste gratuit, et ne rien embarquer n'est plus neutre.
+
+**LE GDD 9.3 EST RESPECTÉ À LA LETTRE** : « ARES fonctionne normalement sous un
+adjoint, ni pénalité ni dégradation punitive ». L'adjoint n'est pas dégradé — il
+conduit exactement la même campagne qu'avant. Il ne la conduit simplement plus
+quand le joueur est **présent** : c'est le drapeau `finance.suspended`, celui-là
+même qui gèle déjà la chaîne de fin de partie financière, et pour la même raison.
+
+**DEUX MANQUES TROUVÉS EN CHEMIN, dont un grave :**
+- **L'ÉTAT VRAI D'UN VOL EN COURS NE SE SAUVEGARDAIT PAS.** `vol_vrai_*`,
+  `tcm_dv_depense`, `tcm_faits`, `nav_connu_dv`, `nav_sigma_*` : rien. Invisible
+  tant que l'issue était décidée au feu vert (les deux chiffres la portaient) —
+  **fatal** dès qu'elle se joue en vol, puisque *quitter au menu sauvegarde* : les
+  corrections commandées à la main s'effaçaient. C'est le piège des missions en
+  vol non sérialisées, qui serait revenu une **troisième** fois. Sérialisé, sous
+  oracle de relecture au bit près.
+- **UN MÉCANISME QUE LE JOUEUR NE VOIT PAS NE LUI APPREND RIEN** (piège n°42). Un
+  vol perdu faute d'avoir corrigé ne se lisait que comme un manque au but
+  inexpliqué. `Mission::vol_conduit_par` (fait du vol, donc sauvegardé) et une
+  ligne au débrief : « CORRECTIONS CONDUITES PAR — **PERSONNE, aucun rendez-vous
+  tenu** » / « VOUS, depuis le terminal » / « LE LOGICIEL DE BORD » / « L'ADJOINT,
+  en votre absence ». Le crédit va au joueur dès qu'il a tenu ses rendez-vous
+  lui-même, même avec du code à bord : l'agent ne prend que ce qui reste, et il ne
+  reste alors rien.
+
+**PREUVE** : build `SPEditor` Succeeded (11 s), **3 248 oracles au vert** sur les
+12 suites, dont 28 nouveaux sur cette passe. Le chiffre qui tranche est celui du
+tableau ci-dessus : le MÊME vol, même graine, même erreur d'injection, donne
+4 205 263 km ou 19 km selon qui a tenu ses rendez-vous. *Un chiffre mesuré vaut
+dix captures* — et ici la capture serait impuissante, l'écart ne vivant que dans
+le débrief d'un vol de 329 jours.
+
+**RESTE** : le délai lumière ne pèse pas encore sur la commande du joueur
+[GDD 9.6]. Une commande émise du poste met d/c à atteindre le vaisseau ; à bord,
+le logiciel ne l'a pas. C'est le second argument physique en faveur de
+l'embarquement, et il devient **décisif aux phases courtes** (EDL 7 min contre 14
+minutes-lumière — le fait historique lui-même). Sur un TCM de croisière il est
+négligeable devant des mois de bras de levier, ce qui est pourquoi il n'était pas
+le bon levier pour CETTE décision.
+
+### LE DÉLAI DE COMMUNICATION (2026-07-28) — et ce qu'il ne fait PAS
+
+**`mission::comms_delay_s` existait depuis le premier jour et PERSONNE ne
+l'appelait.** Un modèle que rien ne consomme — même famille que `Mission::phase`
+(piège n°20b), `show_moons` (piège n°41) ou `ModeAide` avant le mode d'aide. Et
+[GDD 8.3] liste pourtant « **délai de communication** » parmi ce que le plan
+terminal doit afficher, aux côtés de l'incertitude 3σ et de la réserve de Δv.
+
+Trois branchements, aucun chiffre nouveau :
+- **LA VUE LE PORTE** : `VueNavigation::delai_com_s`, rempli par `Session::vue_vol`
+  depuis la distance Terre↔vaisseau de l'éphéméride. **Calculé sur l'ESTIMÉ, pas
+  sur la vérité**, et c'est doctrinal : le joueur ne voit jamais sa position vraie
+  [GDD 7.5], donc pas davantage un délai qui en découlerait. *Approximation
+  déclarée* [GDD 6.8] : l'écart entre les deux vaut le manque au but rapporté à la
+  distance, ~1e-5, soit quelques millisecondes sur un délai en minutes. Le poste
+  du joueur étant en LEO, on prend la Terre (418 km = 1,4 ms, six ordres sous la
+  distance interplanétaire) — déclaré aussi.
+- **LE TERMINAL L'AFFICHE** : « DELAI DE COMMUNICATION — 13 min 04 s (aller) —
+  la commande arrive après ».
+- **IL S'APPLIQUE** : `executer_tcm` fait agir le Δv à `now + d/c`, sur l'état que
+  le vaisseau aura ALORS, avec la base RSW de l'estimé au moment de la commande —
+  le joueur ne peut pas faire mieux. Le logiciel de bord, lui, est déjà sur place.
+
+**CE QUE ÇA COÛTE, MESURÉ ET NON SUPPOSÉ — ET C'EST PEU.**
+
+| Instant | Distance Terre↔vaisseau | Délai (aller) |
+| :--- | :--- | ---: |
+| TCM-1 (J+14) | ~7 M km | **24 s** |
+| TCM-2 (A−45 j) | ~2,3e8 km | **13,0 min** |
+
+Effet du retard sur le manque au but, à Δv identique, graine identique, état de
+départ identique : **moins de 1 km** — contre une tolérance d'arrivée de 1 000 km.
+L'oracle exige les deux choses : que le retard **change** le vol (ce n'est pas un
+affichage) et que son coût en croisière **reste sous la tolérance**.
+
+**C'EST UN RÉSULTAT, PAS UN ÉCHEC, et il corrige une prévision de la veille.** Le
+§7 annonçait un « gros effet sur l'EDL » ; la mesure dit que **d/c est minuscule
+devant le bras de levier d'une croisière** (24 s contre 300 jours), donc le délai
+n'est PAS ce qui rend l'autonomie nécessaire en croisière. Ce qui la rend
+nécessaire reste ce qu'a établi « LE PRIX DE L'INACTION » : tenir le rendez-vous.
+Le délai deviendra décisif là où d/c dépasse la durée de la manœuvre — l'EDL, 7
+min contre 13 — **mais l'EDL n'est pas encore un événement que le joueur commande**
+(la chronologie la date, `resoudre_vol` ne traite que les TCM). Le levier existe,
+sa cible n'existe pas encore. Déclaré plutôt que maquillé [GDD 12.5, 19.6].
+
+**PREUVE** : build `SPEditor` Succeeded, **3 260 oracles au vert** (+12 sur cette
+passe).
+
+### LA BOUCLE SOL (2026-07-28) — le délai lumière DÉCIDE quelque chose
+
+Le délai était branché et affiché ; il ne décidait encore de rien. Ce qu'il
+décide, la réalité le dit sans qu'on ait à choisir : **pour agir sur une phase,
+le sol doit voir, décider et commander DANS la fenêtre.** Il lui faut donc un
+aller-retour court devant la durée propre de la manœuvre.
+
+**`mission::ground_loop_closes(distance, duree_phase)`** — deux grandeurs
+physiques comparées, **aucun seuil libre**. Les durées étaient déjà sourcées
+(`phase_duration_s` : EDL 7 min / MSL, manœuvre critique 10 min / Apollo LOI) et
+`comms_roundtrip_s` existait depuis le premier jour. Rien de neuf n'a été inventé :
+deux pièces qui ne se parlaient pas se parlent.
+
+| Phase | Aller-retour | Durée propre | Boucle sol |
+| :--- | ---: | ---: | :--- |
+| Amarrage en orbite basse | **0,00 s** | heures | **FERMÉE** — le sol est dans la boucle, comme en LEO réel |
+| **EDL martienne** | **26 min** | **7 min** | **OUVERTE** — la descente est conduite À BORD |
+
+C'est le fait historique lui-même : le sol de MSL a regardé « seven minutes of
+terror » sans pouvoir rien faire. La raison pour laquelle tout atterrisseur
+martien descend sous le contrôle de son propre logiciel n'est pas un choix de
+design — c'est 26 contre 7.
+
+**UNE CROISIÈRE N'A PAS DE BOUCLE À FERMER**, et c'est le garde-fou qui empêche la
+loi de déborder : `phase_duration_s(TransferCruise) == 0`, donc le prédicat rend
+faux. On ne « conduit » pas une croisière, on y tient des rendez-vous **préparés à
+l'avance** — c'est exactement pourquoi une TCM se commande très bien depuis le
+sol malgré 13 minutes-lumière, et pourquoi la mesure de la section précédente
+donnait un coût sous le kilomètre. Les deux résultats disent la même chose.
+
+**PAS DE TIRAGE SUPPLÉMENTAIRE, ET C'EST DÉLIBÉRÉ.** La conséquence mécanique
+d'une EDL ratée est **déjà** dans le moteur, à deux endroits : `p_success` porte
+la fiabilité achetée par `Program::test_hours`, et `code_non_couvert` fait échouer
+une mission dont le logiciel embarqué ne couvre pas l'environnement du vol — un
+code qualifié « croisiere » sur un vol « surface » tombe depuis la passe du
+2026-07-28. Ajouter ici un troisième tirage compterait le même risque deux fois :
+« une approximation déguisée en certitude » [GDD 12.5, 19.6]. Ce qui manquait
+n'était pas la sanction, c'était que le joueur **sache pourquoi** — le poste
+affiche maintenant « BOUCLE SOL — OUVERTE : 26 min aller-retour contre 7 min :
+conduite A BORD ».
+
+**PREUVE** : build `SPEditor` Succeeded, **3 267 oracles au vert** (+7).
+
+### LE RYTHME DE MESURE (2026-07-28) — [GDD 8.6] enfin opposable
+
+« Le joueur choisit son rythme de mesure ; trop rare laisse dériver, trop
+fréquent coûte des ressources et du temps. » **Il n'y avait rien à choisir** : la
+poursuite s'achetait UNE FOIS à la conception (`Program::tracking_days`) et la
+connaissance du joueur restait ensuite figée pendant 329 jours de vol.
+
+**DEUX TROUS TROUVÉS EN LISANT, ET LE PREMIER EST UNE FAUTE DE PHYSIQUE :**
+
+- **ON POUVAIT MESURER LE FUTUR.** Rien ne bornait `arc_days`. `nav_solution`
+  échantillonne l'état VRAI de 8 h en 8 h jusqu'à l'arc demandé — un
+  `tracking_days` généreux donnait donc **au feu vert** une solution que seules
+  deux semaines d'écoute peuvent produire. `Session::arc_poursuite_disponible`
+  borne désormais l'arc par le temps ÉCOULÉ depuis l'injection : à l'injection on
+  ne sait RIEN, quelle que soit la somme engagée, et acheter n'avance aucune
+  horloge. C'était invisible tant que TCM-1 tombait à J+14 — soit après que les
+  14 jours se soient réellement écoulés.
+- **LA CONNAISSANCE NE GRANDISSAIT PAS.** `nav_connu_dv` et `nav_sigma_*` étaient
+  figés au feu vert. `Session::rafraichir_poursuite` les recalcule à mesure que
+  les antennes écoutent — **par PASSE, pas par frame** : le filtre ne gagne une
+  observation que toutes les `TRACKING_SAMPLE_S` (8 h), et relancer un fit sur un
+  arc long à chaque frame coûterait des milliers de propagations de Kepler. Le
+  seuil de recalcul EST la cadence de mesure : un chiffre, une source.
+
+**LA CAMPAGNE CORRIGE AVEC CE QU'ELLE SAIT À CHAQUE RENDEZ-VOUS.**
+`nav_campagne_depuis` prend maintenant **deux** solutions (TCM-1 et TCM-2) au lieu
+d'une : l'arc grandit entre les deux, et corriger la première avec les mesures de
+la seconde serait tricher avec le temps. Quand la poursuite ne bouge pas, les deux
+sont la même et le résultat est celui d'avant — l'ancien appel reste exact.
+
+**ET ÉCOUTER SE PAIE.** `Program::tracking_musd` et `Program::tracking_days`
+étaient deux nombres **libres et indépendants** : on achetait cent jours de
+poursuite pour zéro. `mission::cout_poursuite_me` dérive le prix de la passe de
+8 h **déjà dans le modèle** et d'un tarif d'antenne DSN sourcé (~1 100 $/h pour
+une 34 m). *Approximation déclarée* [GDD 6.8, Annexe E] : le coût complet d'une
+campagne de navigation réelle dépasse largement l'ouverture d'antenne, et c'est le
+TEMPS qui porte l'arbitrage — 14 jours d'écoute valent **0,739 M€**, une paille
+devant une mission, mais 14 jours qu'il faut avoir laissé passer.
+
+**MESURÉ**, à la même date et sur le même vol :
+
+| Arc acheté | Mesures | σ en vitesse |
+| ---: | ---: | ---: |
+| 2 j | 6 | **0,002 m/s** |
+| 14 j | 42 | **0,000 m/s** |
+
+Le poste CONTRÔLE montre l'arc exploité, le σ qu'il produit, le prix de sept jours
+de plus **avant** le clic (piège n°64) et le bouton qui les achète.
+
+**UNE FAUTE DE JUSTESSE CORRIGÉE EN CHEMIN** : `rafraichir_poursuite` prenait la
+date d'injection dans `trace_vol`, qui n'est celle **que du premier** vol en
+cours — donc fausse dès qu'il y en a deux, et invisible tant qu'il n'y en a
+qu'un. Extraite en `mission::flight_injection_days`, lue dans la chronologie de
+CHAQUE mission (une chronologie coûte un parcours de segments ; la reconstruire
+par `build_flight_trace` coûterait un Lambert et 512 propagations par frame).
+
+**UN SEGFAULT PAYÉ** : `rafraichir_poursuite` déréférençait `ares.etat` sans la
+garde `initialisee()` que `publier_trace_vol` porte trois lignes plus haut — au
+Titre, aucune partie n'existe. Crash sur la toute première frame, avant même
+qu'il y ait une mission à poursuivre. *Une fonction ajoutée à côté d'une autre
+hérite de ses préconditions, pas seulement de sa place.*
+
+**PREUVE** : build `SPEditor` Succeeded, **3 280 oracles au vert** (+13).
+
+⚠ **`test_toolchain` a flanché UNE FOIS (23/24) sous charge** — pendant que dix
+autres suites et un build UE tournaient en parallèle — puis **24/24 trois fois de
+suite** au calme. C'est la suite qui compile du vrai C++, tue de vrais processus
+au délai et vérifie que le binaire est effaçable (piège n°71) : elle est sensible
+à la charge machine, pas cassée. À ne pas confondre avec une régression.
+
+### EMPAQUETER LA TOOLCHAIN (2026-07-28) — [GDD 18], le mécanisme
+
+**L'ATELIER LOGICIEL NE MARCHAIT QUE SUR LA MACHINE DE DÉVELOPPEMENT, et rien ne
+le disait.** Deux dépendances au dépôt, invisibles tant qu'on joue depuis
+l'éditeur :
+- les chemins d'inclusion pointaient dans `Source/SP/SpaceProgram/…` — **un
+  chemin qui n'existe pas dans un build packagé** ;
+- le compilateur était cherché dans quatre installations Visual Studio 2022 de la
+  machine. Une hypothèse qu'on ne peut pas faire chez le joueur.
+
+**LES EN-TÊTES PARTENT AVEC LE JEU.** `Tools/stage_sdk.py` produit
+**`Content/SP/Sdk`** — **49 fichiers, 283 Ko** : tout `astro_core/include` plus
+`Kepler.cpp` (que le code du joueur doit LIER depuis que le solveur résout la
+correction sur la vraie matrice de transition, piège n°72). On copie l'arbre
+entier plutôt qu'une liste triée à la main : une liste se périme au premier
+`#include` ajouté, et 283 Ko ne valent pas ce risque.
+- **LA SOURCE DE VÉRITÉ NE BOUGE PAS** : `Content/SP/Sdk` est un ARTEFACT, ignoré
+  par git. En versionner une copie ferait deux `fen/astro/Kepler.hpp`, dont un
+  périmerait en silence.
+- **NON-UFS, et c'est tout le point** : ces fichiers sont lus par `cl.exe`, pas
+  par Unreal. Empaquetés en UFS ils finiraient dans un `.pak`, où aucun
+  compilateur ne sait aller les chercher. D'où
+  `+DirectoriesToAlwaysStageAsNonUFS` dans `Config/DefaultGame.ini` — clé dont
+  les chemins sont **relatifs à `Content/`**, ce qui est la raison pour laquelle
+  la toolchain vit sous `Content/SP/Toolchain` et non à la racine du projet (un
+  premier essai l'y avait mise : elle n'aurait tout simplement pas été empaquetée).
+- **PREUVE, et elle est directe** : l'exemple de [GDD 15.3] compile contre
+  `Content/SP/Sdk` **SEUL**, sans l'arbre source — `cl /I Sdk\include
+  vol_joueur.cpp Sdk\src\Kepler.cpp` produit un binaire.
+
+**LE COMPILATEUR SE CHERCHE D'ABORD LÀ OÙ LA DISTRIBUTION LE DÉPOSE** :
+`Content/SP/Toolchain/VC/Auxiliary/Build/vcvars64.bat`, puis seulement les quatre
+installations de la machine (mode développement). Une distribution qui pose les
+Build Tools à cet endroit fonctionne **sans toucher une ligne de code**.
+
+**CE QUI RESTE EST UN ACTE D'EXPLOITATION, PAS DE CODE**, et il faut le dire
+franchement : déposer les MSVC Build Tools dans ce dossier. Ils pèsent de 300 Mo à
+plusieurs Go — **c'est LE poste de budget que [GDD 18] demande de déclarer** — et
+portent leur propre licence de redistribution. Le dossier est donc vide dans le
+dépôt, avec un `LISEZMOI.txt` qui dit quoi y mettre.
+
+**ET L'ABSENCE EST ACTIONNABLE.** Le poste imprimait « tâche de packaging » — vrai
+mais inutile au joueur. Il imprime maintenant **le chemin exact attendu**
+(`Session::toolchain_depot`, renseigné par la couche plateforme qui seule sait où
+le jeu est installé). Un atelier qui refuse sans dire ce qu'il attend est une
+panne (piège n°42), alors qu'ici la réparation est à portée.
+
+### L'ÉDITEUR DE GRAPHE ÉTAIT DÉJÀ FAIT (constaté le 2026-07-28)
+
+Le §7 listait encore « Ch.15 restant : éditeur de graphe (Normal), toolchain C++
+embarquée + bac à sable (Pro) ». **Les deux étaient faits** et la ligne n'avait pas
+suivi. Vérifié dans `UEBridge/SPHud.cpp` : palette de primitives sur deux rangées
+(chacune NOMMANT la fonction d'API qu'elle est, l'équivalence stricte de
+[GDD 2.2] lisible à l'écran), liste des nœuds avec leur type de sortie, nœud
+FAUTIF surligné et motif du refus, retrait d'un nœud, et report du résultat dans
+les trois composantes RSW. La toolchain et son bac à sable (job object, limite de
+mémoire, oracle d'effaçabilité) datent de la même journée.
+*Une ligne de reste-à-faire qu'on ne raye pas devient un mensonge sur l'état du
+projet — plus coûteux qu'un oubli, parce qu'elle envoie retravailler du fait.*
 
 ### Cadrage du CONTENU (décision du 2026-07-24)
 
@@ -837,6 +1921,193 @@ Payés en plaçant les LUNES et en abandonnant les GLB (2026-07-27) :
     le problème (il reste, en filet de sécurité). Vingt minutes perdues : lire le
     log du projet AVANT de diagnostiquer un outil silencieux.
 
+53. **UN OBJET « INVISIBLE » PEUT ÊTRE À LA BONNE PLACE, À LA BONNE TAILLE, ET
+    ENTIÈREMENT DEVANT LE PLAN PROCHE.** La Terre ne s'affichait pas depuis la
+    cupola. Trois hypothèses plausibles (culling, canal d'éclairage, côté nuit) —
+    toutes fausses. Un `UE_LOG` de quatre lignes sur le transform RÉELLEMENT
+    appliqué a tranché en une exécution : position `(0, 0, −44,7)`, donc pile au
+    nadir, et rayon rendu 42 u. Le calcul suivait tout seul : hémisphère visible
+    entre 2,7 et 5,5 u de profondeur, plan proche à 10 u — tout clippé, on voyait
+    les étoiles à travers. *Devant un objet absent, MESURER son transform avant de
+    soupçonner la visibilité : « au bon endroit » et « visible » sont deux
+    questions différentes, et la seconde dépend d'échelles qu'on n'a pas en tête.*
+    Corollaire : une capture ne dit que « je ne le vois pas » ; elle ne distingue
+    pas « absent » de « clippé » de « noir » de « derrière ». Un chiffre, si.
+
+54. **UN COMPOSANT DU MOTEUR PEUT AVOIR UNE PRÉCONDITION QUE LE PROJET NE REMPLIT
+    PAS — et le symptôme est un SILENCE.** `UFloatingPawnMovement::TickComponent`
+    ne fait rien sans `PawnOwner->GetController()`. Le pawn de la station n'est
+    jamais possédé (l'entrée vient du HUD par le pont) : le déplacement était
+    simplement inerte, sans erreur, sans avertissement, pendant que le regard —
+    appliqué directement — fonctionnait. *Quand une moitié d'un système marche et
+    l'autre pas, la frontière entre les deux dit où chercher : ici, tout ce qui
+    passait par le composant du moteur.* Corollaire : lire la source du composant
+    AVANT de régler ses paramètres. Les trois paramètres de celui-ci ne pouvaient
+    rien, et son second défaut (annuler la vitesse sans entrée) le rendait de toute
+    façon inutilisable pour de l'impesanteur.
+
+55. **LA RÉPONSE AU CONTACT SE LIT DANS LE DÉPLACEMENT OBTENU, PAS DANS LE HIT.**
+    Deux prédicats essayés, deux échecs mesurés : `IsValidBlockingHit()` devient
+    faux à fleur de paroi (`bStartPenetrating`), et `bBlockingHit` non plus ne tient
+    pas parce que `SafeMoveUpdatedComponent` réessaie le déplacement après avoir
+    résolu la pénétration et ÉCRASE `OutHit`. Résultat : un joueur bloqué contre le
+    plafond qui conserve 0,59 m/s de vitesse fantôme. Comparer position d'avant et
+    position d'après règle tous les cas d'un coup, coins compris. *Le moteur dit
+    mal ce qu'il a touché ; il dit exactement où il vous a laissé aller.*
+
+56. **`FParse::Value` s'arrête sur une virgule.** `bShouldStopOnSeparator` vaut
+    `true` par défaut (Parse.h:71) : `-spoeil=-18.2,7.2,-4.6` ne rendait que
+    `-18.2`, et le drapeau était silencieusement ignoré (repli sur le point
+    d'apparition, donc une capture qui a l'air de marcher et ne prouve rien). Pour
+    un triplet, passer explicitement `false`.
+
+Payés en DATANT le vol [GDD 9, 14.3] (2026-07-27) :
+
+57. **UNE PHASE SANS DATE N'ARRIVE JAMAIS — et le mécanisme qui la lit paraît
+    faux.** L'insertion et l'EDL étaient modélisés (taux d'anomalie majorés,
+    plafond de cadence déduit) et n'ont JAMAIS pu se produire : rien ne les
+    datait. Le symptôme n'est pas une erreur, c'est un mécanisme qui *semble*
+    ne pas marcher — on soupçonne la loi qui le lit (ici `MissionTempo`), alors
+    qu'elle est juste et attend un événement qui n'existe pas. *Devant une règle
+    qui ne se déclenche jamais, vérifier d'abord que sa CONDITION peut se
+    produire, avant de la relire.* Corollaire : la loi n'a pas changé d'une
+    ligne en gagnant deux points d'application.
+58. **UNE GRANDEUR CALCULÉE ET NON PUBLIÉE EST UNE GRANDEUR ABSENTE.**
+    `astro::launch_window` balaie une carte porkchop dont l'un des deux axes EST
+    la durée de transit — et n'exposait que la date de départ. Le moteur savait
+    donc « quand partir » et pas « quand on arrive », ce qui a fait croire
+    pendant tout un chantier que dater l'arrivée demanderait un nouveau calcul.
+    Il ne manquait que deux `double` dans une structure de sortie. *Avant
+    d'ajouter un calcul, relire ce que le calcul voisin jette déjà.*
+59. **UN ORACLE QUI SUPPOSE UNE DONNÉE DE CONTENU SE TROMPE SUR LE CONTENU, PAS
+    SUR LA LOI.** Un oracle de la chronologie prenait `catalog.entries()[0]` en
+    supposant une mission martienne : le premier contrat est une constellation
+    LEO, et l'échec accusait la persistance. Le catalogue n'a d'ailleurs pas de
+    famille `mars` du tout (il a `mars_habite` et `surface`). Réécrit pour
+    CHERCHER une entrée avec le MÊME prédicat que le modèle
+    (`window_target_for_family(...).impose`), au lieu de recopier une liste de
+    familles dans le test. *Un oracle qui duplique une table du modèle teste sa
+    propre copie.*
+60. **CE QUI VIT SUR L'OBJET D'UI NE SURVIT PAS À UNE SAUVEGARDE.** L'issue du
+    vol vivait sur `Session` ; les missions en cours n'étaient pas sérialisées du
+    tout. Les deux défauts étaient INOBSERVABLES tant qu'un vol durait zéro
+    seconde de temps de jeu — la fenêtre pour sauvegarder au milieu était nulle.
+    Faire durer le vol les a rendus certains, et *quitter au menu sauvegarde*.
+    *Allonger la durée d'un état rend atteignables tous les bugs de cet état :
+    quand une phase passe d'instantanée à longue, inventorier ce qui n'y
+    survivait pas.*
+
+Payés en TRAÇANT le vol [GDD 8.3] (2026-07-27) :
+
+61. **UN SENTINELLE NE DOIT PAS VIVRE DANS LE DOMAINE DE LA VALEUR.** La
+    signature de l'arc (« a-t-il changé ? ») servait aussi de prédicat (« y
+    a-t-il un arc ? ») via un `< 0` réservé. Or elle est bâtie sur la date du feu
+    vert, qui est NÉGATIVE dès qu'un vol est parti avant l'origine du calendrier
+    — ce que fait toute capture épinglant une croisière. Résultat : un vol
+    parfaitement valide rejeté, et un écran vide sans le moindre message.
+    Prédicat et signature sont maintenant deux fonctions. *Une valeur réservée
+    n'est sûre que si le domaine ne peut pas l'atteindre — et « une date » peut
+    toujours être négative.*
+62. **UN ORACLE QUI ÉCHANTILLONNE LAISSE PASSER EXACTEMENT CE QU'ON CHERCHE.**
+    L'oracle de l'arc balayait un point sur seize et déclarait la polyligne
+    saine ; le rendu montrait des segments partant à l'infini. Ce qu'un
+    échantillonnage lâche rate, ce sont les points ISOLÉS — c'est-à-dire le seul
+    défaut qu'une courbe par ailleurs correcte puisse avoir. *Sur une structure
+    de données produite en masse, balayer TOUT ; l'échantillonnage est pour les
+    mesures coûteuses, pas pour les invariants.*
+63. **DEUX GRANDEURS COHÉRENTES SÉPARÉMENT PEUVENT ÊTRE INCOHÉRENTES ENSEMBLE —
+    ET LE SOLVEUR NE PROTESTERA PAS.** La durée de transit venait du meilleur
+    transfert des 60 jours à venir (`slop_days`, la largeur opérationnelle de
+    « maintenant » : la bonne notion pour dire si une fenêtre est OUVERTE) et
+    était appliquée à un départ AUJOURD'HUI. Chaque moitié est juste ; le couple
+    (date de départ, durée) ne décrit aucun transfert réel. **Lambert répond
+    quand même** — il relie toujours deux points en un temps donné — par un arc
+    valide qui plonge à 0,26 UA du Soleil. Aucun chiffre n'avait l'air faux :
+    c'est le RENDU qui a montré l'arc sortir du champ. *Quand deux paramètres se
+    déterminent l'un l'autre, les prendre à la même source ou les résoudre
+    ensemble ; un solveur qui accepte tout ne signale jamais l'incohérence de ses
+    entrées.* Corollaire de méthode : **le rendu est un oracle**, et il attrape
+    précisément les erreurs de COHÉRENCE que les oracles numériques, écrits
+    grandeur par grandeur, ne voient pas.
+
+Payés en CALCULANT la navigation [GDD 7.5, 8.4] (2026-07-27) :
+
+64. **DONNER DU POUVOIR À UN PARAMÈTRE OBLIGE À VÉRIFIER QU'IL EST RÉGLABLE.**
+    `Program::dv_margin` était AFFICHÉE au poste mais sans bouton : tant que
+    `p_physics` valait 0,985 elle ne servait qu'à alourdir l'étage, et son
+    absence de réglage ne gênait personne. Le jour où elle COMMANDE la
+    probabilité de navigation, un joueur ne pouvait plus faire aboutir AUCUNE
+    mission interplanétaire — piège n°40 rejoué à l'identique, à un chantier de
+    distance. *Quand un champ passe de décoratif à décisif, la première question
+    n'est pas « le calcul est-il juste » mais « le joueur peut-il l'actionner ».*
+    Corollaire : un réglage décisif demande la LECTURE qui le motive — ici le
+    Δv de correction au 99e centile, sans quoi on provisionne à l'aveugle.
+65. **UN PANNEAU QUI DÉBORDE SIGNALE SOUVENT UNE FAUTE DE CONCEPTION, PAS DE
+    MISE EN PAGE.** Cinq lignes ajoutées ont fait sortir le poste CONTROLE de son
+    cadre (qui CLIPPE, piège n°42). Le réflexe — raccourcir les libellés — aurait
+    masqué le vrai constat : les commandes de programme et l'étude de navigation
+    n'ont AUCUN sens une fois le véhicule parti. Les masquer en vol n'est pas un
+    gain de place, c'est la vérité de la phase. *Quand un écran ne tient plus,
+    demander d'abord ce qui n'aurait pas dû y être à ce moment-là.*
+
+66. **UN FILTRE TROP CONFIANT EST PIRE QU'UN FILTRE IMPRÉCIS.** Une seule
+    linéarisation, autour du nominal à 11 000 km de la vérité, donnait un estimé
+    correct et une covariance MENSONGÈRE : σ annoncé 0,001 m/s pour une erreur
+    résiduelle de 0,3. Le filtre ne se trompait pas sur la valeur, il se trompait
+    sur sa propre fiabilité — et c'est la seconde qui décide des marges. Trois
+    itérations de Gauss-Newton (ce que `batch_least_squares` fait déjà) et les
+    deux coïncident. *Vérifier un estimateur, c'est comparer son erreur RÉELLE à
+    l'erreur qu'il ANNONCE, jamais la première seule.*
+67. **UNE INTERPOLATION DOIT ATTERRIR EXACTEMENT SUR SON EXTRÉMITÉ.** Le vol de
+    caméra [M] repliait son yaw dans ±π pour prendre le plus court chemin, et
+    arrivait donc à `yaw_arrivee ± 2π` quand l'écart de départ franchissait un
+    demi-tour : le même angle à l'écran, un chiffre différent. L'oracle est passé
+    pendant des mois puis est tombé du jour au lendemain — l'attitude de Novellus
+    dépend de l'ÉPOQUE RÉELLE [GDD 14.1], et la date avait changé. *Un oracle qui
+    dépend de la date du jour finira par tomber ; quand il tombe, c'est le code
+    qu'il faut regarder d'abord — ici l'arrivée n'était exacte que par chance.*
+
+Payés en EMBARQUANT la toolchain [GDD 15.1, 18] (2026-07-28). Morale commune :
+**un échec silencieux ressemble à une absence de capacité** — trois fois de
+suite, un défaut mécanique s'est déguisé en « la machine n'a pas de compilateur ».
+
+68. **`cmd /c` DÉCOUPE AU PREMIER GUILLEMET** si la commande entière n'est pas
+    encadrée d'une paire supplémentaire. Ni erreur, ni journal, ni processus :
+    juste un silence, et une chaîne qui conclut à une machine mal installée.
+69. **NE PAS CLASSER UNE ISSUE SUR UNE PHRASE DU SHELL.** Le script
+    d'environnement du compilateur imprime lui-même « n'est pas reconnu » sans
+    aucun rapport avec le code du joueur : le prendre pour un compilateur absent
+    faisait passer un code FAUX pour un défaut d'installation. On tranche sur la
+    présence d'un DIAGNOSTIC (`error C…` / `erreur C…`, même code dans les deux
+    langues), c'est-à-dire sur une preuve, pas sur une tournure.
+70. **UN ARTEFACT QUI DOIT ÊTRE REMPLACÉ DOIT ÊTRE NEUF, PAS ÉCRASÉ.** Windows
+    garde un binaire verrouillé un instant après la fin du processus qui
+    l'exécutait ; le lieur échouait sur `LNK1104`, sans jamais émettre d'erreur de
+    compilation. Un nom unique par compilation supprime la question au lieu de
+    mieux la contourner. *Supprimer-puis-recréer est une course ; créer neuf n'en
+    est pas une.*
+71. **ON TUE UN ARBRE, PAS UN PROCESSUS.** Le bac à sable lançait le code du
+    joueur derrière un `cmd.exe` et, au délai, appelait `TerminateProcess` sur ce
+    shell : le programme du joueur, lui, survivait et brûlait un cœur
+    indéfiniment. **L'oracle du délai passait quand même** — il vérifiait la
+    DÉTECTION, pas la MORT. Le symptôme n'apparaissait qu'au run suivant, en
+    `LNK1104` sur un binaire qu'un fuyard de la veille tenait ouvert ; mesure :
+    trois processus fuyards, ~16 min de CPU chacun. Lancer directement + **job
+    object** tué en bloc (ce qui donne aussi la limite de MÉMOIRE de [GDD 18]).
+    *Un bac à sable qui laisse échapper ses détenus n'en est pas un — et un
+    oracle qui teste l'intention plutôt que l'effet ne prouve rien.* L'oracle
+    vérifie désormais que le binaire est EFFAÇABLE après le délai.
+72. **UN OUTIL FOURNI DOIT ÊTRE JUSTE, OU NE PAS ÊTRE FOURNI.**
+    `ares::vol::Solveur` corrigeait Δv = −Δr/τ : exact en champ nul, faux dès
+    qu'un arc courbe. Sur une croisière de Mars il commandait 158 m/s dans une
+    direction qui AGGRAVAIT le manque au but (4,2 → 5,2 M km). Le joueur qui
+    recopiait l'exemple de [GDD 15.3] cassait son vol, et **la faute était dans
+    l'API, donc introuvable depuis son code**. Une approximation déclarée reste
+    légitime ; une approximation qui fait pire que ne rien faire est un outil
+    cassé. Corollaire d'architecture : ce dont le joueur a besoin doit être À SA
+    PORTÉE — c'est ce qui a fait descendre la matrice de transition dans
+    `astro_core`.
+
 Build : `Build.bat SPEditor Win64 Development -project=…\SP.uproject -WaitMutex`
 
 ---
@@ -856,7 +2127,16 @@ Build : `Build.bat SPEditor Win64 Development -project=…\SP.uproject -WaitMute
   micro-échelle. Les corps lointains restent des **marqueurs HUD** (pas de conflit
   de z-buffer, donc pas besoin de compression). **`scaled_space.hpp` n'est plus
   utilisé par le rendu** (fichier + oracles conservés, include retiré de
-  `SPSolarSystem`). Le « km » du pont (`cam.dist_km`, `distance_cadrage`, vol_cam)
+  `SPSolarSystem`).
+  **NUANCE (2026-07-27)** : le plafond de précision GPU impose quand même une
+  HOMOTHÉTIE de centre l'œil sur les corps rendus en géométrie. Elle est encadrée
+  des deux côtés — `RENDER_MIN_UU` (la surface la plus proche) et `RENDER_MAX_UU`
+  (le plafond GPU) — et les lointains sont repliés par une hyperbole croissante
+  (`RemapDist`) quand les deux ne peuvent pas tenir ensemble, ce qui arrive dès
+  qu'on regarde depuis Novellus. **Ce n'est pas une compression de profondeur au
+  sens de `scaled_space`** : une mise à l'échelle radiale de centre l'œil laisse la
+  projection EXACTEMENT invariante (position écran et taille angulaire), elle ne
+  touche qu'à la profondeur. Voir §3 point 8 et le piège n°53. Le « km » du pont (`cam.dist_km`, `distance_cadrage`, vol_cam)
   reste une distance LOGIQUE ; seule la conversion km→u de rendu a changé.
 - **Station à l'échelle UE** : 1 u = 1 cm, modèle mis à 55 m d'envergure
   (valeur de la référence). Repère station (m, X = couloir, Z = haut) → UE :
@@ -1038,7 +2318,7 @@ ils ne sont plus atteignables en jeu, mais le code pèse encore.
 
 ---
 
-## 7. LE PROCHAIN PAS (état au 2026-07-27, après le rythme en mission)
+## 7. LE PROCHAIN PAS (état au 2026-07-27, après la chronologie de vol)
 
 Le monde unique 1:1 est **fait de bout en bout** : plus une seule coupure de scène
 entre le plan système et l'ambulation dans Novellus (incr. 1 → 3c-3). Ce qui reste,
@@ -1064,17 +2344,107 @@ Reste, par ordre de valeur :
    `assets/textures`. Les ANNEAUX de Saturne sont faits par UE eux aussi (rayons
    réels, UV radiales, alpha des divisions). Reste une encoche au pôle de la
    sphère lat-long, visible au très gros plan seulement.
+~~2. La CHRONOLOGIE de vol (dater l'insertion et l'EDL)~~ — **fait le 2026-07-27**
+   (section « LA CHRONOLOGIE DE VOL » du §2). Le vol DURE : segments jointifs
+   dérivés de Kepler et de la durée de transit de la vraie fenêtre, gate
+   d'arrivée dont le refus chiffre l'attente, plafond de cadence qui mord enfin
+   à l'insertion et à l'EDL, missions en cours sérialisées. Ce qui manque n'est
+   plus la date de la manœuvre : c'est la manœuvre elle-même.
+
+~~2a. La TRACE du vol (l'arc dans le monde)~~ — **fait le 2026-07-27** (section
+   « LA TRACE DU VOL DANS LE MONDE » du §2). Le tracé endormi de `SPSolarSystem`
+   est réveillé : arc de Lambert résolu entre les deux corps aux dates de la
+   chronologie, propagé par Kepler, figé au feu vert, avec ses nœuds de manœuvre.
+
+~~2b. La DISPERSION de navigation (corridor, P(nav) calculé)~~ — **fait le
+   2026-07-27** (section « LA DISPERSION DE NAVIGATION » du §2). `p_physics`
+   n'est plus 0,985 : c'est P(la marge provisionnée couvre la correction de
+   mi-parcours), calculée de Gates à Maxwell en passant par Oberth et la matrice
+   de transition. Le corridor 3σ est publié, dessiné et chiffré au terminal.
+
 2. **Le vol MANUEL des missions vécues** [GDD 9] : le joueur exécute les manœuvres
-   au lieu d'un tirage déterministe. C'est ce qui réveillera le tracé
-   vaisseau/corridor de `SPSolarSystem`, en place mais endormi (§5.3) — **et c'est
-   ce qui DATERA l'insertion et l'EDL**, donc ce qui fera mordre le plafond de
-   cadence ailleurs qu'à l'ascension (`MissionTempo` les connaît déjà : il ne leur
-   manque qu'une date). Les deux chantiers se rejoignent ici.
-3. **Ch.15 restant** : solveur `ares::vol` sur la nav réelle, éditeur de graphe
-   (Normal), toolchain C++ embarquée + bac à sable (Pro). Bloqué tant qu'il n'y a
-   pas de source de solution de navigation de premier ordre — donc après le point 2.
-4. **Tri §5.4 étape 4** : purger `_archive` sauf `build_vk/` (≈ 115 Mo) — décision
-   de l'utilisateur, pas faite d'office.
+   au lieu d'un tirage déterministe. **La chronologie lui donne son squelette, la
+   trace son décor, la dispersion son enjeu** : chaque segment critique est un
+   rendez-vous daté, à une position connue, avec un Δv chiffré à trouver — et
+   c'est ce qui rendra supportables les 10 minutes réelles que le plafond impose
+   aujourd'hui à une insertion pendant lesquelles il n'y a rien à faire. Restent :
+~~2b2. La POURSUITE et la CAMPAGNE de correction~~ — **fait le 2026-07-28**
+   (section « LA POURSUITE ET LA CAMPAGNE DE CORRECTION » du §2). Filtre par lots
+   bayésien itéré sur les vraies stations du DSN ; la correction se calcule sur
+   ce que le joueur CROIT ; `tracking_days` décide du sort du vol.
+
+~~2c1-c2. La MANŒUVRE comme acte du joueur, et l'assistance par MODE~~ — **fait
+   le 2026-07-28** (section « LA MANŒUVRE EST UN ACTE DU JOUEUR »).
+
+~~2. L'ÉDITEUR DE TEXTE DU MODE PRO~~ — **fait le 2026-07-28** (section
+   « L'ATELIER LOGICIEL DU MODE PRO » du §2). Le poste CONTRÔLE a deux faces ;
+   la chaîne COMPILER → BANC D'ESSAI → TÉLÉVERSER → EXÉCUTER est complète et
+   gardée étape par étape ; le Δv du code du joueur arrive dans `tcm_commande`.
+   Mesuré de bout en bout par oracle : son C++ divise le manque au but par 140,
+   et son propre garde-fou refuse d'agir sur une solution dégradée.
+
+~~2. LEVER LE HORS-DOMAINE EN ANOMALIE~~ — **fait le 2026-07-28** (section « LE
+   HORS-DOMAINE MORD » du §2). `fly_mission` lit `code_embarque` /
+   `code_non_couvert`, figés au feu vert et sauvegardés ; l'atelier avertit AVANT
+   le décollage, quand c'est encore actionnable. Le banc d'essai n'est plus un
+   décor payant.
+
+Reste, par ordre de valeur :
+
+~~2. CE QUE COÛTE DE NE RIEN EMBARQUER~~ — **fait le 2026-07-28** (section « LE
+   PRIX DE L'INACTION » du §2). Décision de l'utilisateur : **la correction
+   tardive**. Le filet posé au feu vert est retiré, une correction redevient un
+   rendez-vous daté, et le même vol donne 4 205 263 km ou 19 km selon qui l'a
+   tenu. `code_success_prob` mord enfin, et le GDD 9.3 est respecté à la lettre
+   (l'adjoint n'est pas dégradé, il n'agit qu'en l'absence du joueur).
+
+~~2. LE DÉLAI LUMIÈRE SUR LA COMMANDE~~ — **fait le 2026-07-28** (section « LE
+   DÉLAI DE COMMUNICATION » du §2). `comms_delay_s` est enfin consommé, le
+   terminal affiche le délai que [GDD 8.3] réclamait, et la commande s'applique à
+   `now + d/c`. **MAIS la mesure a corrigé la prévision écrite ici** : 24 s à
+   TCM-1, 13 min à TCM-2, et un coût sur le manque au but **sous le kilomètre**.
+   Le délai n'est donc pas le levier de l'autonomie en croisière.
+
+~~2. L'EDL COMME ÉVÉNEMENT COMMANDÉ~~ — **fait le 2026-07-28** (section « LA
+   BOUCLE SOL » du §2), et la réalité a répondu à la question qui semblait ouverte :
+   l'EDL n'est PAS un événement commandé, elle ne peut pas l'être. 26 min
+   d'aller-retour contre 7 min de descente — la boucle sol ne se ferme pas, donc
+   la descente est conduite à bord, comme tout atterrisseur martien réel. Rien à
+   arbitrer, rien à gater : le véhicule porte son logiciel, sa fiabilité est déjà
+   celle qu'achète `test_hours`, et un code joueur hors domaine tombe déjà. Le
+   moteur DIT désormais pourquoi, au lieu de le laisser deviner.
+~~3. EMPAQUETER LE COMPILATEUR~~ — **fait le 2026-07-28, côté MÉCANISME** (section
+   « EMPAQUETER LA TOOLCHAIN » du §2). Les en-têtes partent avec le jeu
+   (`Content/SP/Sdk`, 283 Ko, staged en NON-UFS, prouvé en compilant l'exemple
+   de [GDD 15.3] contre lui seul) ; le compilateur se cherche d'abord dans
+   `Content/SP/Toolchain` ; l'absence imprime le chemin attendu.
+   **RESTE, et c'est de l'exploitation** : déposer les MSVC Build Tools (300 Mo à
+   plusieurs Go, licence de redistribution propre) dans ce dossier.
+
+   ~~(b2-reliquat) la POURSUITE en cours de vol~~ [GDD 8.6] — **fait le
+   2026-07-28** (section « LE RYTHME DE MESURE » du §2). L'arc est borné par le
+   temps écoulé (on ne mesure plus le futur), la connaissance grandit passe par
+   passe, écouter se paie au tarif d'antenne, et le poste porte le bouton.
+~~3. Ch.15 restant~~ — **SANS OBJET (constaté le 2026-07-28)** : l'éditeur de
+   graphe (Normal) ET la toolchain + bac à sable (Pro) étaient faits depuis le
+   2026-07-28 ; la ligne n'avait pas suivi. Voir « L'ÉDITEUR DE GRAPHE ÉTAIT DÉJÀ
+   FAIT » au §2.
+4. **Tri §5.4 étape 4** : purger `_archive` sauf `build_vk/` (≈ 115 Mo).
+   ⚠ **TENTÉ le 2026-07-28 sur demande de l'utilisateur, BLOQUÉ** par le contrôle
+   de sécurité du harnais (suppression récursive refusée deux fois, en `rm -rf`
+   comme en `Remove-Item -Recurse`). **Tout le travail de sûreté est fait et reste
+   valable** :
+   - le binaire de référence NE DÉPEND PAS de `extern/` — vérifié sur sa table
+     d'imports (aucun `glfw3.dll` : glfw est lié statiquement) **puis par une
+     capture réelle** de `solar_system_map.exe` (2,76 Mo de BMP, exit 0) ;
+   - `_archive` est **entièrement commité** (652 fichiers suivis, dont 527 dans
+     `build`/`dist`/`extern`, **aucune modification non commitée**) : la
+     suppression est récupérable dans l'historique ;
+   - liste exacte à supprimer, `build_vk/` excepté :
+     `app ui astro_core mission extern scripts dist build _backup_render
+     CMakeLists.txt space_program_3d.cpp` (garder aussi `README.md` et `saves/`).
+   Après suppression, relancer la capture de référence pour confirmer que
+   `build_vk/` est toujours autonome.
 
 À SURVEILLER maintenant que le temps coule : le tick de recherche est appelé une
 fois par frame avec le total quantifié, pas une fois par sous-pas (approximation

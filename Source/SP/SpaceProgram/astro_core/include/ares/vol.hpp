@@ -21,6 +21,8 @@
 #include <string>
 #include <vector>
 
+#include "fen/astro/Stm.hpp"
+#include "fen/core/Constants.hpp"
 #include "fen/core/Vec3.hpp"
 
 namespace ares::vol {
@@ -92,17 +94,44 @@ class Manoeuvre {
   Vec3 dv_{};
 };
 
-// Le SOLVEUR de correction : ramène l'estimé vers la cible. Modèle DÉCLARÉ —
-// correction proportionnelle à l'écart sur un temps caractéristique `tau`.
+// Le SOLVEUR de correction : ramène l'estimé vers la cible.
+//
+// Δv = −Φ_rv(arrivée ← maintenant)⁻¹ · Δr — la correction de mi-parcours au
+// PREMIER ORDRE, sur la même matrice de transition que le reste du moteur
+// (`fen/astro/Stm.hpp`). `tau` est l'horizon de la manœuvre : le temps qui reste
+// jusqu'au point de visée.
+//
+// ═══ POURQUOI PAS Δv = Δr/τ ═══ (piège n°72)
+// La première version corrigeait « proportionnellement à l'écart sur un temps
+// caractéristique ». C'est exact en champ nul, et FAUX dès qu'un arc courbe :
+// pousser à l'opposé du manque au but ne le referme pas, il le déplace. Mesuré
+// sur une croisière de Mars — 4,2 millions de km de manque, 315 jours de
+// reste — cette formule commandait 158 m/s dans une direction qui portait le
+// manque à 5,2 millions de km. Le joueur qui recopiait l'exemple de [GDD 15.3]
+// aggravait donc son vol, sans que rien à l'écran ne le lui dise : la faute
+// était dans l'API, pas dans son code. Un outil fourni doit être juste, ou ne
+// pas être fourni.
+//
+// APPROXIMATION DÉCLARÉE [GDD 6.8] : linéarisation autour de l'arc nominal, et
+// deux corps. Elle rate quand le manque au but n'est plus petit devant l'arc, ou
+// près d'un passage où Φ_rv devient singulier — auquel cas `corriger` rend une
+// manœuvre NULLE plutôt qu'un vecteur faux. Ne rien commander se voit ; un
+// mauvais Δv, non.
 class Solveur {
  public:
-  explicit Solveur(double tau_s = 86400.0) : tau_(tau_s) {}
+  explicit Solveur(double tau_s = 86400.0, double mu = fen::cst::MU_SUN)
+      : tau_(tau_s), mu_(mu) {}
   Manoeuvre corriger(const Etat& e, const Cible& c) const {
-    const Vec3 ecart = c.position() - e.position();
-    return Manoeuvre(ecart / tau_);   // Δv ~ écart / temps de manœuvre
+    const Vec3 manque = e.position() - c.position();   // l'écart projeté
+    Vec3 dv{};
+    if (!fen::astro::dv_correction(e.position(), e.vitesse(), manque, tau_, mu_, dv))
+      return Manoeuvre();
+    return Manoeuvre(dv);
   }
+  double horizon() const { return tau_; }   // s
  private:
   double tau_;
+  double mu_;
 };
 
 // --- RÉSERVES ---------------------------------------------------------------

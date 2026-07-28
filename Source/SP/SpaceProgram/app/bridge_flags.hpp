@@ -63,7 +63,13 @@ struct RenderBridge {
     std::atomic<float> up{0.0f};       // espace / ctrl (l'ISS est en apesanteur)
     std::atomic<float> look_dx{0.0f};  // delta souris consommé par le pawn
     std::atomic<float> look_dy{0.0f};
-    std::atomic<bool>  boost{false};   // maj : déplacement rapide
+    // MAJ : S'AGRIPPER À LA MAIN COURANTE (2026-07-27). C'était un « boost »
+    // (×3 la vitesse) — un réflexe de jeu de vol, pas d'impesanteur. En
+    // microgravité il n'y a pas de frein : il y a une main courante qu'on
+    // attrape. Cette touche fait donc les deux choses qu'une main courante fait
+    // — pousser fort, et RETENIR — et elle n'a d'effet qu'à portée d'une paroi.
+    // La loi vit dans `app/impesanteur.hpp`, sous oracle.
+    std::atomic<bool>  agrippe{false};
   } station_in;
 
   // --- L'INTÉRIEUR DE L'ISS : état publié par UE -----------------------------
@@ -108,6 +114,20 @@ struct RenderBridge {
   std::atomic<int>  cadence_max{4};
   std::atomic<int>  tempo_phase{0};
   std::atomic<bool> tempo_contraint{false};
+
+  // LE VOL EN COURS [GDD 4.1, 9] — la chronologie de la mission conduite.
+  // Le vol DURE désormais (fen/mission/FlightTimeline.hpp) : entre le feu vert
+  // et le débrief il y a des mois de croisière, et une phase critique à
+  // l'arrivée. Sans ces deux chiffres à l'écran, le joueur voit un bouton qui
+  // refuse et une mission qui ne bouge plus.
+  //   vol_actif      : une mission est en état EXPLOITATION ;
+  //   vol_phase      : `fen::mission::FlightPhase` courante (dérivée) ;
+  //   vol_arrivee_datee / vol_reste_jours : la date d'arrivée est-elle
+  //                    calculable (cible nommée), et dans combien de jours.
+  std::atomic<bool>   vol_actif{false};
+  std::atomic<int>    vol_phase{0};
+  std::atomic<bool>   vol_arrivee_datee{false};
+  std::atomic<double> vol_reste_jours{0.0};
 
   // NB : `show_moons` a été SUPPRIMÉ (2026-07-27). C'était un booléen que RIEN
   // n'écrivait : il valait false pour toujours, et éteignait la Lune et Titan,
@@ -205,11 +225,36 @@ struct RenderBridge {
   // monde unique, en orbite LEO autour de la Terre (418 km). Publiée ici pour
   // que le rendu la place comme tout autre objet du monde — première brique du
   // passage au monde unique (incr.3 : Novellus littéralement dans la scène 1:1).
-  // Orbite circulaire, plan écliptique : cercle DÉCLARÉ, même approximation que
-  // la flotte [GDD 6.8].
+  // Orbite CIRCULAIRE d'éléments moyens, inclinée de 51,64° sur l'équateur
+  // terrestre, nœud en régression J2 : le modèle vit dans `app/novellus_orbite.hpp`
+  // et ses approximations y sont déclarées [GDD 6.8].
   struct StationWorld {
     std::atomic<bool> valid{false};
     double rel_m[3]{};          // position rel. à la Terre (écliptique, m)
+    // VITESSE, et pourquoi elle est PUBLIÉE (2026-07-27). Novellus a maintenant une
+    // ATTITUDE : cupola au nadir, axe de vol le long de la trajectoire (le vol
+    // « XVV » réel de l'ISS). Le nadir se déduit de la position seule, mais pas
+    // l'axe de vol — il demande la direction du mouvement. Le rendu POURRAIT la
+    // deviner en dérivant la position d'une frame à l'autre : ce serait FAUX aux
+    // cadences rapides (à mois/s, une frame avance de ~12 h, soit près de huit
+    // orbites LEO — la corde entre deux échantillons ne dit plus rien de la
+    // tangente, et la station se mettrait à tomber en vrille). Elle est donc
+    // calculée là où vit le modèle, par le MÊME helper que la position, et
+    // traversée ici. Le rendu ne dérive rien [doctrine du pont].
+    double vel_ms[3]{};         // vitesse rel. à la Terre (écliptique, m/s)
+    // ═══ L'ATTITUDE, PUBLIÉE PARCE QU'ELLE A TROIS CONSOMMATEURS ═══ (2026-07-27)
+    // Cupola au nadir, axe de vol dans la vitesse. Les trois vecteurs sont les
+    // IMAGES des axes du modèle (+X avant, +Y tribord, +Z zénith), DÉJÀ dans le
+    // repère de rendu (miroir en y). Le rendu n'a plus qu'à en faire les lignes
+    // d'une matrice — il ne calcule rien [doctrine du pont].
+    // Trois consommateurs, et c'est la raison d'être de ce champ : le modèle
+    // EXTÉRIEUR (SPSolarSystem), la géométrie INTÉRIEURE (SPStation) et la pose de
+    // caméra du handoff (`Session::pose_bord`). S'ils divergeaient d'un iota, la
+    // bascule de LOD à la traversée de la coque ferait SAUTER l'orientation de la
+    // station à l'écran. Une seule source, sous oracle.
+    double att_avant[3]{1.0, 0.0, 0.0};
+    double att_tribord[3]{0.0, 1.0, 0.0};
+    double att_zenith[3]{0.0, 0.0, 1.0};
     double altitude_km{0.0};    // altitude au-dessus de la surface (HUD)
     double envergure_m{0.0};    // taille du modèle (échelle du rendu proche)
   } station;

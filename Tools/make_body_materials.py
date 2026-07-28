@@ -107,6 +107,18 @@ def neuf(mat, cls, x, y):
     return LIB.create_material_expression(mat, cls, x, y)
 
 
+# UNE LIAISON QUI RATE NE DIT RIEN, ET C'EST LE PIEGE (2026-07-27).
+# `connect_material_expressions` renvoie False quand le nom de broche ne
+# correspond a rien — un nom d'entree change entre versions d'UE, par exemple —
+# et le materiau se compile quand meme, avec la branche non cablee. Le defaut ne
+# se voit alors qu'a l'ecran, des semaines plus tard. On exige donc le retour.
+def relier(de, sortie, vers, entree):
+    if not LIB.connect_material_expressions(de, sortie, vers, entree):
+        unreal.log_error(
+            "[corps] LIAISON REFUSEE : {} [{}] -> {} [{}] (nom de broche inconnu ?)".format(
+                type(de).__name__, sortie or "<defaut>", type(vers).__name__, entree))
+
+
 def creer_materiau_corps(defaut):
     """Materiau maitre ECLAIRE : albedo + nuages + jour/nuit."""
     chemin = "{}/M_SP_Body".format(DEST)
@@ -126,18 +138,54 @@ def creer_materiau_corps(defaut):
     nua.set_editor_property("parameter_name", "Clouds")
     if defaut:
         nua.set_editor_property("texture", defaut)
+
+    # ═══ L'ATMOSPHERE TOURNE, ET PAS A LA VITESSE DU SOL ═══ (2026-07-27)
+    # Le voile etait une carte FIGEE sur la surface : une planete dont
+    # l'atmosphere est solidaire de son sol au metre pres. C'est faux pour les
+    # deux corps qui en ont une ici, et spectaculairement faux pour Venus, dont
+    # les nuages font le tour en ~4,4 jours quand le sol en met 243.
+    # MECANIQUE : un simple decalage de la coordonnee U (la longitude) du
+    # sampler des nuages. Le C++ ecrit `CloudSpin` a chaque frame depuis
+    # l'EPOQUE DE JEU et le vent zonal REEL du corps (fen::ephem::
+    # cloud_zonal_wind_ms) : la derive suit donc la cadence du temps, ce qui est
+    # le comportement juste — a l'echelle du temps reel, un nuage ne fait pas le
+    # tour de la Terre en une seconde.
+    # PAS DE frac() ICI, ET C'EST VOULU : le decalage est une CONSTANTE sur tout
+    # le maillage, donc U reste aussi continu qu'avant (delta -> 1+delta) et les
+    # derivees d'UV ne sautent nulle part. Un frac() dans le materiau creerait
+    # une couture de mip la ou il replie, en travers du disque.
+    uv = neuf(mat, unreal.MaterialExpressionTextureCoordinate, -1400, 100)
+    uv.set_editor_property("coordinate_index", 0)
+    spin = neuf(mat, unreal.MaterialExpressionScalarParameter, -1400, 260)
+    spin.set_editor_property("parameter_name", "CloudSpin")
+    spin.set_editor_property("default_value", 0.0)
+    zero_v = neuf(mat, unreal.MaterialExpressionConstant, -1400, 380)
+    zero_v.set_editor_property("r", 0.0)
+    decalage = neuf(mat, unreal.MaterialExpressionAppendVector, -1150, 300)
+    relier(spin, "", decalage, "A")      # U : la longitude
+    relier(zero_v, "", decalage, "B")    # V : la latitude ne bouge pas
+    uv_nua = neuf(mat, unreal.MaterialExpressionAdd, -1050, 130)
+    relier(uv, "", uv_nua, "A")
+    relier(decalage, "", uv_nua, "B")
+    # « UVs » ET PAS « Coordinates » : l'entree du sampler s'appelle Coordinates
+    # dans le C++, mais `connect_material_expressions` compare au nom RACCOURCI de
+    # la broche du graphe (`UMaterialGraphNode::GetShortenPinName` : Coordinates ->
+    # UVs, TextureObject -> Tex). Avec « Coordinates », la liaison est REFUSEE en
+    # silence et le voile ne bouge pas — pris sur le fait par `relier`.
+    relier(uv_nua, "", nua, "UVs")
+
     qte_nua = neuf(mat, unreal.MaterialExpressionScalarParameter, -900, 380)
     qte_nua.set_editor_property("parameter_name", "CloudAmount")
     qte_nua.set_editor_property("default_value", 0.0)
     masque_nua = neuf(mat, unreal.MaterialExpressionMultiply, -600, 200)
-    LIB.connect_material_expressions(nua, "R", masque_nua, "A")
-    LIB.connect_material_expressions(qte_nua, "", masque_nua, "B")
+    relier(nua, "R", masque_nua, "A")
+    relier(qte_nua, "", masque_nua, "B")
     blanc = neuf(mat, unreal.MaterialExpressionConstant3Vector, -600, 380)
     blanc.set_editor_property("constant", unreal.LinearColor(1.0, 1.0, 1.0, 1.0))
     melange = neuf(mat, unreal.MaterialExpressionLinearInterpolate, -300, 0)
-    LIB.connect_material_expressions(alb, "RGB", melange, "A")
-    LIB.connect_material_expressions(blanc, "", melange, "B")
-    LIB.connect_material_expressions(masque_nua, "", melange, "Alpha")
+    relier(alb, "RGB", melange, "A")
+    relier(blanc, "", melange, "B")
+    relier(masque_nua, "", melange, "Alpha")
     LIB.connect_material_property(melange, "", unreal.MaterialProperty.MP_BASE_COLOR)
 
     # --- jour / nuit ---------------------------------------------------------
@@ -156,19 +204,19 @@ def creer_materiau_corps(defaut):
     soleil.set_editor_property("default_value", unreal.LinearColor(1.0, 0.0, 0.0, 0.0))
     normale = neuf(mat, unreal.MaterialExpressionPixelNormalWS, -900, 1300)
     dot = neuf(mat, unreal.MaterialExpressionDotProduct, -600, 1200)
-    LIB.connect_material_expressions(normale, "", dot, "A")
-    LIB.connect_material_expressions(soleil, "", dot, "B")
+    relier(normale, "", dot, "A")
+    relier(soleil, "", dot, "B")
     zero = neuf(mat, unreal.MaterialExpressionConstant, -600, 1400)
     zero.set_editor_property("r", 0.0)
     masque_nuit = neuf(mat, unreal.MaterialExpressionMax, -400, 1250)
-    LIB.connect_material_expressions(dot, "", masque_nuit, "A")
-    LIB.connect_material_expressions(zero, "", masque_nuit, "B")
+    relier(dot, "", masque_nuit, "A")
+    relier(zero, "", masque_nuit, "B")
     m1 = neuf(mat, unreal.MaterialExpressionMultiply, -200, 900)
-    LIB.connect_material_expressions(nuit, "RGB", m1, "A")
-    LIB.connect_material_expressions(masque_nuit, "", m1, "B")
+    relier(nuit, "RGB", m1, "A")
+    relier(masque_nuit, "", m1, "B")
     m2 = neuf(mat, unreal.MaterialExpressionMultiply, 0, 900)
-    LIB.connect_material_expressions(m1, "", m2, "A")
-    LIB.connect_material_expressions(qte_nuit, "", m2, "B")
+    relier(m1, "", m2, "A")
+    relier(qte_nuit, "", m2, "B")
     LIB.connect_material_property(m2, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
 
     # --- rugosite : une planete n'est pas un miroir --------------------------
@@ -198,8 +246,8 @@ def creer_materiau_etoile(tex):
     force.set_editor_property("parameter_name", "Intensity")
     force.set_editor_property("default_value", 8.0)
     prod = neuf(mat, unreal.MaterialExpressionMultiply, -300, 0)
-    LIB.connect_material_expressions(ech, "RGB", prod, "A")
-    LIB.connect_material_expressions(force, "", prod, "B")
+    relier(ech, "RGB", prod, "A")
+    relier(force, "", prod, "B")
     LIB.connect_material_property(prod, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
     LIB.recompile_material(mat)
     unreal.EditorAssetLibrary.save_asset(chemin)
@@ -250,8 +298,8 @@ def creer_materiau_anneau(tex):
     diff.set_editor_property("parameter_name", "RingScatter")
     diff.set_editor_property("default_value", 0.45)
     emis = neuf(mat, unreal.MaterialExpressionMultiply, -300, 100)
-    LIB.connect_material_expressions(ech, "RGB", emis, "A")
-    LIB.connect_material_expressions(diff, "", emis, "B")
+    relier(ech, "RGB", emis, "A")
+    relier(diff, "", emis, "B")
     LIB.connect_material_property(emis, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
     LIB.recompile_material(mat)
     unreal.EditorAssetLibrary.save_asset(chemin)

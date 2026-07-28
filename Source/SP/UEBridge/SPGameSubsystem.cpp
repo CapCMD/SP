@@ -75,7 +75,13 @@ void USPGameSubsystem::ArmerCapture()
 	const int Scene = SPCapture::RequestedScene();
 	if (Scene < 1) return;
 	fen::app::Session& S = Holder->Session;
-	S.nouvelle_partie("CAPTURE", fen::app::ModeAide::Normal);
+	// `-spcode` : la partie démarre en PRO, et le poste CONTRÔLE s'ouvre sur sa
+	// face ATELIER LOGICIEL [GDD 15.1]. Le mode d'aide se choisit à la création
+	// d'une partie — un écran qu'une capture ne traverse pas ; sans ce drapeau,
+	// l'éditeur de code serait un écran que rien ne peut photographier.
+	S.nouvelle_partie("CAPTURE", SPCapture::RequestedCode() ? fen::app::ModeAide::Pro
+	                                                       : fen::app::ModeAide::Normal);
+	S.atelier_logiciel = SPCapture::RequestedCodeAtelier();
 	// -spscene=iss|map : même monde, cadrage différent (map=2 -> plan système).
 	S.scene = fen::app::SceneJeu::Monde;
 	S.cadrage = (Scene == 2) ? fen::app::Cadrage::Systeme : fen::app::Cadrage::Bord;
@@ -103,14 +109,98 @@ void USPGameSubsystem::ArmerCapture()
 		S.jeu.ares.assurer(S.jeu.agence, S.jeu.epoch_courant());
 		if (S.jeu.ares.initialisee())
 		{
+			using fen::mission::FlightPhase;
 			auto& G = *S.jeu.ares.etat;
+			const FString Ph = FString(SPCapture::RequestedVolPhase()).ToLower();
+
+			// La FAMILLE décide du profil de vol : une charge GEO n'a ni croisière
+			// interplanétaire ni EDL. On prend donc celle qui PORTE la phase visée.
 			fen::mission::Mission M;
 			M.contract.id = "CAP-VOL";
 			M.contract.title = "Capture : mission en vol";
-			M.contract.family = "sat";
-			M.state = fen::mission::MissionState::Launched;
-			M.state_entered_days = G.clock.now_days();
-			G.missions.push_back(std::move(M));
+			M.contract.family = (Ph == TEXT("edl")) ? "surface"
+			                  : (Ph == TEXT("ascension") || Ph == TEXT("parking")) ? "sat"
+			                  : "mars_habite";
+			// `-spvol=conception` : la mission N'EST PAS PARTIE. C'est la phase où
+			// vit l'étude de navigation (dispersion d'injection, correction à
+			// prévoir) — on ne reconçoit pas un véhicule en vol, donc ce cadran ne
+			// se capture pas autrement.
+			const bool bConception = (Ph == TEXT("conception"));
+			M.state = bConception ? fen::mission::MissionState::Design
+			                      : fen::mission::MissionState::Launched;
+
+			// La phase visée dans la chronologie. « injection » = la PREMIÈRE
+			// manœuvre critique, « insertion » = la DERNIÈRE : le même nom de
+			// phase désigne deux instants du vol.
+			const FlightPhase Cible = (Ph == TEXT("parking"))   ? FlightPhase::LeoOps
+			                        : (Ph == TEXT("injection") || Ph == TEXT("insertion") ||
+			                           Ph == TEXT("tcm") || Ph == TEXT("tcm2"))
+			                              ? FlightPhase::CriticalManeuver
+			                        : (Ph == TEXT("croisiere")) ? FlightPhase::TransferCruise
+			                        : (Ph == TEXT("edl"))       ? FlightPhase::Edl
+			                                                    : FlightPhase::Launch;
+			// « injection » = la 1re manœuvre critique, « tcm » = la 2e (TCM-1),
+			// « tcm2 » = la 3e, « insertion » = la dernière. Le même nom de phase
+			// désigne quatre instants d'un vol interplanétaire.
+			const int Occurrence = (Ph == TEXT("tcm")) ? 1 : (Ph == TEXT("tcm2")) ? 2 : 0;
+			const bool bDerniere = (Ph == TEXT("insertion"));
+
+			// ON FAIT AVANCER LE MONDE, ON NE RECULE PAS LA MISSION. Reculer la
+			// date du feu vert produisait un vol PARTI HORS FENÊTRE — légal pour
+			// Lambert, mais qu'aucune mission ne volerait, et l'arc plongeait à
+			// 0,26 UA du Soleil (piège n°63). Le jeu, lui, interdit de lancer hors
+			// fenêtre (`launch_window_gate`) : la capture suit donc le MÊME
+			// chemin — le monde attend l'ouverture, on lance, puis le monde avance
+			// jusqu'à la phase voulue. C'est ce que fait le joueur, en accéléré.
+			auto AvancerMonde = [&S](double Jours)
+			{
+				if (Jours <= 0.0) return;
+				S.jeu.avancer_temps(Jours);
+				S.jeu.ares.assurer(S.jeu.agence, S.jeu.epoch_courant());
+			};
+
+			// 1) attendre l'ouverture de la fenêtre (familles à fenêtre synodique).
+			const auto WT = fen::mission::window_target_for_family(M.contract.family);
+			if (WT.impose)
+			{
+				const auto W = fen::astro::launch_window(
+					S.jeu.eph, WT.dep, WT.arr, fen::Epoch{S.jeu.epoch_courant()});
+				if (W.ok && !W.open && W.next_open_days > 0.0) AvancerMonde(W.next_open_days);
+			}
+			// 2) FEU VERT ICI : la durée de transit est celle de la géométrie du
+			//    ciel au moment où le vol part — la règle du modèle, pas une
+			//    commodité de capture.
+			auto& G2 = *S.jeu.ares.etat;
+			M.state_entered_days = G2.clock.now_days();
+			M.tof_days = fen::mission::transfer_tof_days(
+				M, fen::Epoch{S.jeu.epoch_courant()}, S.jeu.eph);
+			// 3) laisser le monde courir jusqu'au MILIEU du segment visé. Le jour
+			//    où une durée de phase change, la capture suit toute seule.
+			if (!bConception)
+			{
+				const fen::mission::FlightTimeline TL = fen::mission::build_flight_timeline(M);
+				int Idx = -1, Restant = Occurrence;
+				for (int i = 0; i < TL.n; ++i)
+					if (TL.seg[i].phase == Cible && TL.seg[i].t1_days > TL.seg[i].t0_days)
+					{
+						Idx = i;
+							if (!bDerniere && --Restant < 0) break;
+					}
+				if (Idx >= 0) AvancerMonde(0.5 * (TL.seg[Idx].t0_days + TL.seg[Idx].t1_days));
+			}
+
+			auto& G3 = *S.jeu.ares.etat;
+			// L'ÉTAT VRAI DU VOL doit exister, sinon le poste n'a rien à montrer :
+			// c'est ce que le feu vert fait dans une vraie partie. On passe par la
+			// MÊME porte (`tirer_navigation`), jamais par une pose directe — sinon
+			// la capture prouverait l'existence du drapeau, pas celle du modèle.
+			if (!bConception) S.tirer_navigation(M);
+			UE_LOG(LogTemp, Log,
+			       TEXT("[SPCapture] vol epingle : phase=%s famille=%hs tof=%.0f j "
+			            "arrivee dans %.2f j"),
+			       *Ph, M.contract.family.c_str(), M.tof_days,
+			       fen::mission::flight_arrival(M, G3.clock.now_days()).reste_jours);
+			G3.missions.push_back(std::move(M));
 		}
 	}
 	// `-spcadence=N` : fait COULER le temps d'emblée [GDD 14.2], pour vérifier de

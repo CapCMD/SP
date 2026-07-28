@@ -109,6 +109,98 @@ inline double prime_meridian_deg(Body b, Epoch t) {
   return w;
 }
 
+// ═══ LE REPÈRE LIÉ AU CORPS — CE QUI MANQUAIT ═══ (2026-07-27)
+//
+// `spin_axis_ecliptic` + `prime_meridian_deg` donnent l'AXE et l'ANGLE, mais
+// l'angle se mesure DEPUIS QUELQUE PART, et ce quelque part n'était nulle part.
+// Le rendu composait « inclinaison » (rotation minimale de +Z vers le pôle, via
+// `FQuat::FindBetweenNormals`) puis « rotation propre de W autour du pôle ». Or la
+// rotation minimale a une composante azimutale ARBITRAIRE : W était donc compté
+// depuis une origine quelconque. Conséquence : axe juste, VITESSE juste, PHASE
+// FAUSSE. Invisible sur Jupiter (des bandes zonales n'ont pas de « face »),
+// FLAGRANT sur la Lune — elle montrait la mauvaise face, ce qui a révélé le
+// défaut. C'est le même défaut pour la Terre (mauvais méridien face au Soleil) et
+// pour Mars (mauvais hémisphère), simplement moins reconnaissable.
+//
+// L'IAU définit l'origine sans ambiguïté : W est compté depuis le NŒUD Q de
+// l'équateur du corps sur l'équateur ICRF (ascension droite α0 + 90°), dans le
+// sens de la rotation. Le repère se construit donc entièrement :
+//   Z = pôle,  Q = nœud,  X = Q tourné de W autour de Z,  Y = Z × X.
+// VÉRIFIÉ à la main sur la Terre : AD(méridien de Greenwich) = 90° + W, soit
+// 280,15° à J2000 — le temps sidéral de Greenwich y valait 280,46°, l'écart
+// étant la précession que la table WGCCRE néglige (déclaré en tête de fichier).
+//
+// CONVENTION DE LONGITUDE : (X, Y, Z) est droitier, donc la longitude croît
+// d'X vers Y, c'est-à-dire vers l'EST. C'est le repère des cartes modernes
+// (planétocentriques est-positives, nord en haut), donc celui que les
+// équirectangulaires du projet attendent — et ce que le rendu consomme.
+struct BodyFrame {
+  Vec3 x;   // longitude 0, latitude 0 : le MÉRIDIEN ORIGINE
+  Vec3 y;   // longitude +90° est, sur l'équateur
+  Vec3 z;   // pôle nord (= spin_axis_ecliptic)
+};
+
+inline BodyFrame body_frame_ecliptic(Body b, Epoch t) {
+  const RotationElements e = rotation_elements(b);
+  const double a = e.ra0_deg * cst::DEG, d = e.dec0_deg * cst::DEG;
+  const double w = prime_meridian_deg(b, t) * cst::DEG;
+  // Équatorial ICRF : le pôle, le nœud (à α0 + 90°), et le quadrant suivant.
+  const Vec3 pole{ std::cos(d) * std::cos(a), std::cos(d) * std::sin(a), std::sin(d) };
+  const Vec3 node{ -std::sin(a), std::cos(a), 0.0 };
+  const Vec3 quad = cross(pole, node);          // 90° après le nœud, sens de rotation
+  const Vec3 prime = node * std::cos(w) + quad * std::sin(w);
+  // -> écliptique. La conversion est une rotation : elle conserve le produit
+  // vectoriel, donc y se déduit après coup (un cross de moins, et strictement
+  // orthonormal quoi que fasse l'arrondi).
+  BodyFrame f;
+  f.z = unit(equatorial_to_ecliptic(pole));
+  f.x = unit(equatorial_to_ecliptic(prime));
+  f.y = unit(cross(f.z, f.x));
+  return f;
+}
+
+// ═══ LE VOILE NUAGEUX NE TOURNE PAS AVEC LE SOL ═══ (2026-07-27)
+//
+// Tout ce qui précède oriente le CORPS SOLIDE. Or deux des corps rendus portent
+// une couche visible qui a sa propre rotation, et l'ignorer était un tell : le
+// voile était peint sur la surface, donc solidaire d'elle au mètre près.
+//
+// Vent zonal MOYEN du voile visible, RELATIF À LA SURFACE [m/s], positif vers
+// l'EST (le sens des longitudes croissantes). Ce n'est pas un réglage
+// d'apparence : c'est la grandeur mesurée, et la période apparente s'en déduit
+// (`cloud_deck_period_s` : 2πR/|v|), au lieu d'être saisie.
+//   . TERRE : +10 m/s. Moyenne d'un écoulement zonal qui va de ~−5 m/s (alizés
+//     d'est, tropiques) à ~+30 m/s (jet des moyennes latitudes) — un seul
+//     nombre pour un défilement rigide est forcément un compromis, DÉCLARÉ
+//     [GDD 6.8]. Il donne un tour en ~46 jours : invisible au temps réel (c'est
+//     JUSTE : un nuage ne fait pas le tour du globe en une seconde), net aux
+//     cadences jour/s et au-delà.
+//   . VÉNUS : −100 m/s. La SUPER-ROTATION, l'un des faits les plus marquants du
+//     système solaire : le sommet des nuages boucle en ~4,4 jours (le sol met
+//     243 jours, dans le même sens rétrograde). Le signe négatif EST cette
+//     rétrogradation. Le sol de Vénus tournant 55 fois moins vite, le vent
+//     relatif et le vent absolu se confondent à 2 % près.
+// Les autres corps rendent 0 : soit ils n'ont pas d'atmosphère, soit leur
+// structure visible EST la surface (les bandes de Jupiter et Saturne tournent
+// avec le corps ; leur rotation différentielle — le Système I équatorial devance
+// le Système III de 7,4°/jour — demanderait un cisaillement en latitude, pas un
+// défilement rigide, et n'est PAS faite ici).
+inline double cloud_zonal_wind_ms(Body b) {
+  switch (b) {
+    case Body::EarthBary: return  10.0;
+    case Body::Venus:     return -100.0;
+    default:              return 0.0;
+  }
+}
+
+// Période apparente du voile relativement à la surface [s], signée comme le vent
+// (positive = vers l'est). 0 si le corps n'a pas de voile animé.
+inline double cloud_deck_period_s(Body b) {
+  const double v = cloud_zonal_wind_ms(b);
+  if (v == 0.0) return 0.0;
+  return cst::TWO_PI * body_radius(b) / v;
+}
+
 // LATITUDE SUB-SOLAIRE [rad] : la « déclinaison du Soleil » vue du corps, à
 // partir de sa position héliocentrique écliptique. = arcsin( û_soleil . axe ),
 // où û_soleil = direction corps->Soleil = -r/|r|. C'est le moteur des saisons

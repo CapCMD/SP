@@ -24,6 +24,7 @@
 #include "fen/astro/Transfers.hpp"
 #include "fen/core/Constants.hpp"
 #include "fen/core/Rng.hpp"
+#include "fen/mission/FlightTimeline.hpp"
 #include "fen/mission/MissionFsm.hpp"
 #include "fen/mission/Program.hpp"
 #include "fen/mission/Severity.hpp"
@@ -174,15 +175,62 @@ inline double trajectory_dv_for_mission(const Mission& m, Epoch now,
   if (!w.ok) return trajectory_dv_for_family(m.contract.family);   // repli prudent
 
   // Le VÉHICULE part d'une orbite de parking (le lanceur l'y a mis) : il paie
-  // l'injection réduite par Oberth, pas le v_inf nu.
+  // l'injection réduite par Oberth, pas le v_inf nu. MÊME orbite de parking que
+  // celle dont la chronologie de vol tire la durée d'attente avant injection
+  // (FlightTimeline.hpp) : un chiffre, une source.
   const double injection = astro::injection_dv_from_circular(
-      w.vinf_dep, cst::R_EARTH + 200.0e3, cst::MU_EARTH);
+      w.vinf_dep, parking_radius_m(), cst::MU_EARTH);
   // Insertion à Mars : capture elliptique (rp bas, ra très haut) — le choix réel,
   // bien moins cher qu'une circularisation basse.
   const double insertion = astro::capture_dv_to_ellipse(
       w.vinf_arr, cst::R_MARS + 400.0e3, cst::R_MARS + 30000.0e3, cst::MU_MARS);
   const double midcourse = 150.0;   // corrections de mi-parcours [7.5], DÉCLARÉ
   return injection + insertion + midcourse;
+}
+
+// LA DURÉE DE TRANSIT VISÉE, à capturer AU FEU VERT [GDD 7.3, 9]. C'est ce qui
+// DATE l'arrivée, donc l'insertion et l'EDL — les phases critiques que le moteur
+// savait modéliser sans savoir quand elles ont lieu. On prend la durée du
+// meilleur transfert de la fenêtre COURANTE (`local_tof_days`), pas celle de
+// l'optimum synodique : le vol part maintenant, il vole le transfert de
+// maintenant. 0 = famille sans cible nommée (croisière non datée, déclaré).
+// ═══ LA DURÉE DOIT ALLER AVEC LA DATE DE DÉPART ═══
+// `slop_days` par défaut vaut 60 j : c'est la largeur opérationnelle de
+// « maintenant » pour décider si la fenêtre est OUVERTE — la bonne question là,
+// la mauvaise ici. Le meilleur transfert de ces 60 jours peut partir 6 semaines
+// plus tard ; appliquer SA durée à un départ aujourd'hui donne un couple
+// (départ, arrivée) que rien ne relie, et Lambert répond quand même : par un arc
+// valide mais absurde, qui plonge à 0,26 UA du Soleil pour rejoindre Mars.
+// Trouvé en RENDU, l'arc partant hors du champ (piège n°63). On resserre donc le
+// slop à un pas de balayage de la carte porkchop : la durée rendue est celle
+// d'un transfert qui part BIEN au moment du feu vert.
+inline double transfer_tof_days(const Mission& m, Epoch now,
+                                const ephem::IEphemeris& eph) {
+  const WindowTarget wt = window_target_for_family(m.contract.family);
+  if (!wt.impose) return 0.0;
+  astro::WindowParams p;
+  p.slop_days = p.horizon_days / static_cast<double>(p.n_dep);   // un pas de balayage
+  const astro::WindowResult w = astro::launch_window(eph, wt.dep, wt.arr, now, p);
+  return w.ok ? w.local_tof_days : 0.0;
+}
+
+// ═══ LE GATE D'ARRIVÉE ═══ [GDD 4.1, 9]
+// « Lancer » n'a jamais voulu dire « avoir réussi » : entre le feu vert et le
+// débrief il y a un VOL, et il dure. Tant que la chronologie n'est pas arrivée à
+// sa manœuvre d'arrivée, le débrief est refusé — et comme le gate de fenêtre, le
+// refus CHIFFRE l'attente au lieu de la subir. Une croisière non datée (cible
+// non nommée, poussée continue) ne bloque rien : on n'oppose pas une date qu'on
+// ne sait pas calculer.
+inline GateResult arrival_gate(const Mission& m, double now_days) {
+  const ArrivalStatus a = flight_arrival(m, now_days);
+  if (!a.dated || a.arrived) return {true, ""};
+  GateResult r;
+  r.allowed = false;
+  char buf[112];
+  std::snprintf(buf, sizeof buf, "vol en cours : arrivee dans %.0f jours",
+                a.reste_jours);
+  r.reason = buf;
+  return r;
 }
 
 // ═══ L'ISSUE DU VOL ═══ — déterministe, tirée contre la P(succès) évaluée.
@@ -194,6 +242,16 @@ struct FlightOutcome {
   bool         has_anomaly{false};
 };
 
+// TOLÉRANCE D'ARRIVÉE : le point de visée doit être atteint pour que la capture
+// soit possible. 1 000 km est un ordre de grandeur de couloir de capture ; à
+// CALIBRER [GDD Annexe E]. Repère : une campagne bien poursuivie arrive à
+// ~100 km, une campagne aveugle à ~90 000 km — le seuil sépare deux régimes, il
+// n'arbitre pas un cas limite.
+// AU NIVEAU DE L'ESPACE DE NOMS, et non plus dans le corps de `fly_mission` : la
+// tolérance que le code de vol du joueur reçoit dans ses entrées [GDD 15.3] doit
+// être CELLE-CI, pas une copie. Un chiffre, une source.
+inline constexpr double ARRIVEE_TOLERANCE_KM = 1000.0;
+
 // `seed` : combine la graine d'agence et l'identité de la mission -> rejouable.
 inline FlightOutcome fly_mission(const Mission& m, const MissionPlan& plan,
                                  std::uint64_t seed) {
@@ -201,8 +259,77 @@ inline FlightOutcome fly_mission(const Mission& m, const MissionPlan& plan,
   const Assessment& a = plan.assessment;
   Rng rng(seed);
 
-  // 1) LA MISSION RÉUSSIT-ELLE ? Tirage contre la P(succès) évaluée.
-  if (rng.uniform01() <= a.p_success) {
+  // ═══ 0 bis) EXÉCUTER HORS DU DOMAINE DE VALIDITÉ ═══ [GDD 15.5, ch.10]
+  // « Un code qualifié en orbite basse n'est PAS qualifié pour Mars ; exécuter
+  // hors du domaine = comportement NON COUVERT = cause d'anomalie légitime. »
+  // C'est ce qui donne son prix au banc d'essai : sans cette porte, acheter des
+  // heures d'essai ne changeait rien à l'issue et la qualification n'était qu'un
+  // décor payant.
+  //
+  // AVANT le verdict de navigation, et pas après : quand les deux tombent, la
+  // cause PROXIMALE est le logiciel. Un code dont on ne sait rien a pu commander
+  // n'importe quoi — le manque au but qu'on mesurerait ensuite serait sa
+  // conséquence, pas une seconde faute.
+  //
+  // CE N'EST PAS UNE PÉNALITÉ POUR AVOIR ÉCRIT DU CODE. Rester dans son domaine
+  // est gratuit, visible au poste avant le feu vert, et le joueur peut toujours
+  // élargir la plage exercée (en payant des heures) ou ne rien embarquer. Ce qui
+  // se paie ici, c'est d'avoir embarqué un logiciel sur un vol qu'il n'a jamais
+  // vu au banc.
+  if (m.code_embarque && m.code_non_couvert) {
+    AnomalyEvent ev;
+    ev.mission_id = m.contract.id;
+    ev.date_days = m.state_entered_days;
+    ev.what = "logiciel de vol execute hors de son domaine de validite";
+    ev.severity = Severity::Major;
+    ev.modifiers.primary_objective_lost = true;
+    // Cause racine documentée [GDD 10.3] : la fiche disait ce qu'elle couvrait.
+    ev.modifiers.player_error_causal = true;
+    if (m.contract.crewed) ev.modifiers.human_lethal_exposure = true;
+    out.cause = "comportement non couvert du logiciel de vol";
+    out.severity = ev.severity;
+    out.anomaly = ev;
+    out.has_anomaly = true;
+    out.success = false;
+    return out;
+  }
+
+  // ═══ 0) LA NAVIGATION N'EST PLUS UN DÉ ═══ [GDD 8.1, 8.4]
+  // Quand le vol a une navigation calculée, l'erreur d'injection a été TIRÉE au
+  // feu vert et le Δv de correction qu'elle exige est un NOMBRE. La question
+  // devient donc factuelle : la marge provisionnée le couvre-t-elle ? C'est la
+  // différence entre estimer un risque (à la conception) et subir un résultat
+  // (en vol) — et c'est ce qui fait qu'une marge trop courte se paie, au lieu
+  // de se diluer dans une probabilité.
+  if (m.nav_evaluee && (m.nav_dv_required > plan.program.dv_margin ||
+                        m.nav_miss_km > ARRIVEE_TOLERANCE_KM)) {
+    AnomalyEvent ev;
+    ev.mission_id = m.contract.id;
+    ev.date_days = m.state_entered_days;
+    ev.what = (m.nav_dv_required > plan.program.dv_margin)
+                  ? "campagne de correction au-dela de la marge provisionnee"
+                  : "point de visee manque : capture impossible";
+    ev.severity = Severity::Major;
+    ev.modifiers.primary_objective_lost = true;
+    // Le joueur a sous-provisionné : c'est une décision de conception, donc une
+    // cause racine documentée [GDD 10.3].
+    ev.modifiers.player_error_causal = true;
+    if (m.contract.crewed) ev.modifiers.human_lethal_exposure = true;
+    out.cause = "derive de navigation hors corridor";
+    out.severity = ev.severity;
+    out.anomaly = ev;
+    out.has_anomaly = true;
+    out.success = false;
+    return out;
+  }
+
+  // 1) LA MISSION RÉUSSIT-ELLE ? Tirage contre la P(succès) évaluée. Quand la
+  // navigation est résolue, elle ne doit plus peser une SECONDE fois dans le
+  // tirage : on retire son facteur, sinon le même risque serait compté deux
+  // fois — une estimation ET un fait.
+  const double p_tirage =
+      (m.nav_evaluee && a.p_physics > 0.0) ? a.p_success / a.p_physics : a.p_success;
+  if (rng.uniform01() <= p_tirage) {
     out.success = true;
     out.severity = Severity::Minor;
     out.cause = "mission nominale";

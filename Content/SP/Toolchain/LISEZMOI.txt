@@ -1,0 +1,38 @@
+TOOLCHAIN EMBARQUEE — mode PRO [GDD 15.1, 18]
+=============================================
+
+« Le joueur ecrit du VRAI C++, compile et execute par une toolchain embarquee. »
+[GDD decision 1]. « Embarquer compilateur, en-tetes et outils associes — plusieurs
+centaines de Mo a budgeter explicitement dans la distribution. » [GDD 18]
+
+CE DOSSIER EST LE POINT DE DEPOT DU COMPILATEUR.
+Il est VIDE dans le depot, et c'est deliberé : les MSVC Build Tools pesent de
+300 Mo a plusieurs Go et portent leur propre licence de redistribution. Ils se
+DEPOSENT au moment de fabriquer la distribution ; ils ne se versionnent pas.
+
+CE QU'IL FAUT Y METTRE
+----------------------
+Une installation des « Build Tools for Visual Studio » (charge de travail
+« Developpement Desktop en C++ »), de sorte que le chemin suivant existe :
+
+    Content/SP/Toolchain/VC/Auxiliary/Build/vcvars64.bat
+
+C'est le SEUL chemin que le jeu cherche ici. Rien d'autre n'est impose : le
+script d'environnement se charge de placer cl.exe, link.exe, le CRT et le SDK
+Windows dans le PATH du processus fils.
+
+CE QUE LE JEU FAIT SANS LUI
+---------------------------
+Il cherche alors une installation de Visual Studio 2022 sur la machine (Community,
+Professional, Enterprise, BuildTools). C'est le mode DEVELOPPEMENT : pratique ici,
+mais on ne peut pas en faire une hypothese chez le joueur.
+
+Si aucune des deux n'existe, la chaine rend `Indisponible` et le poste CONTROLE
+le DIT en toutes lettres, avec ce chemin. Elle ne fait jamais passer une machine
+mal outillee pour un code faux (piege n°69) : un compilateur absent est un defaut
+d'installation, un code faux est le jeu — deux fautes distinctes, deux messages.
+
+LES EN-TETES, EUX, SONT DEJA LA
+-------------------------------
+Content/SP/Sdk/ porte l'API du joueur (283 Ko), generee depuis l'arbre source par
+Tools/stage_sdk.py. A relancer apres toute modification de astro_core/.

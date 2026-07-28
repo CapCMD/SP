@@ -72,9 +72,36 @@ public:
 		return true;
 	}
 
+	// L'ATTITUDE de Novellus (cupola au nadir), telle que la dernière frame l'a
+	// posée sur le MODÈLE EXTÉRIEUR. SPStation applique la MÊME à la géométrie
+	// intérieure : les deux se relaient à la traversée de la coque (bascule de
+	// LOD), et une orientation qui diffère d'une frame ferait pivoter la station
+	// à l'écran pile à cet instant. Elle vient d'ici — et non du pont directement —
+	// pour être prise DANS LA MÊME FRAME que la position ci-dessus, quel que soit
+	// l'ordre de Tick entre subsystems.
+	FQuat GetNovellusAttitude() const { return NovellusAttitude; }
+
+	// ═══ LE REPÈRE DE RENDU N'EST PLUS TOUJOURS L'INERTIEL ═══ (2026-07-27)
+	// À BORD, la caméra est celle du pawn et la station rend dans son repère
+	// CANONIQUE (non tourné) — c'est là que le joueur marche et que vit la
+	// collision des 310 corps, et on ne va pas remuer 310 corps de collision par
+	// frame pour faire tourner un décor. On tourne donc le MONDE de l'inverse de
+	// l'attitude : une seule rotation, appliquée dans `R()` à une cinquantaine de
+	// positions. L'image est rigoureusement la même — tourner la caméra et la
+	// géométrie ensemble, ou tourner tout le reste en sens inverse, c'est le même
+	// changement de repère. C'est aussi ce qui garde le handoff invisible : de part
+	// et d'autre de la reprise, les deux conventions donnent le même écran.
+	// Identité partout ailleurs : le plan système rend dans l'inertiel, comme avant.
+	FQuat GetRenderRot() const { return RenderRot; }
+
 private:
 	void BuildScene();                    // meshes GLB (ou sphères) + lumière + caméra
-	void SetMapActive(bool bActive);      // bascule caméra + visibilité
+	void SetMapActive(bool bActive);      // la géométrie du monde rend-elle ?
+	// LA CARTE A-T-ELLE L'ŒIL ? Distinct de « le monde rend » depuis que le monde
+	// rend AUSSI à bord : là, c'est le pawn qui tient la caméra (SPStation), et le
+	// plan système n'est qu'un décor autour de lui. C'est le MÊME découplage que
+	// SPStation fait déjà entre `SetStationVisible` et `SetStationInControl`.
+	void SetMapHasEye(bool bHasEye);
 	// Novellus vu de PRÈS : charge le modèle ISS extérieur (multi-mesh) à la
 	// demande, quand la caméra en approche assez pour qu'il dépasse le marqueur
 	// (LOD par taille apparente [GDD v1.2 17.4, ch.18]).
@@ -129,6 +156,19 @@ private:
 	// lunaire (384 000 km) se serait détaché de sa planète, de plusieurs fois son
 	// propre diamètre. `ParentBody` = `fen::ephem::Body` (int : le header du jeu
 	// n'a pas à remonter jusqu'ici).
+	// ═══ LA TRACE EST UNE TRAÎNÉE, PAS UN ANNEAU ═══ (2026-07-27)
+	// Les points ne couvrent plus « une période à partir de maintenant » mais une
+	// FENÊTRE DE TEMPS explicite, échantillonnée uniformément — ce qui permet de
+	// retrouver chaque frame, sans aucun calcul d'éphéméride, l'indice où se
+	// trouve le corps (`(t - WindowStartS) / pas`) et donc d'allumer la portion
+	// DERRIÈRE lui. Deux régimes, tous deux exacts :
+	//   . bCycle (modèle exactement périodique = les lunes de `Satellites.hpp`,
+	//     cercles parfaits) : la fenêtre vaut UNE période, l'indice boucle ;
+	//   . sinon (planètes, Lune, grosses lunes) : la fenêtre est le PASSÉ réel
+	//     [t0 − traînée, t0 + péremption du cache], jamais rebouclée — la trace
+	//     est alors la trajectoire VÉCUE, sans hypothèse de périodicité. C'est ce
+	//     qui supprime le défaut de fermeture mesuré à l'oracle (16 % du rayon
+	//     pour la Lune, 0,3 % pour Neptune : une cassure pile sur le corps).
 	struct FOrbitCache
 	{
 		FLinearColor    Color;
@@ -137,6 +177,10 @@ private:
 		int             Body = 0;      // `fen::ephem::Body` : met en avant survol/focus
 		int             ParentBody = 0;
 		double          RadiusKm = 0.0;
+		double          WindowStartS = 0.0;   // époque du point 0 (s TDB)
+		double          WindowS = 0.0;        // durée couverte par la polyligne (s)
+		double          TrailS = 0.0;         // longueur allumée derrière le corps (s)
+		bool            bCycle = false;       // fenêtre = une période exacte -> indice modulo
 	};
 	TArray<FOrbitCache> OrbitCache;
 
@@ -150,9 +194,16 @@ private:
 	// figé sur une direction écrite en dur — donc faux dès que le temps coule.
 	UPROPERTY() TArray<TObjectPtr<UMaterialInstanceDynamic>> BodyMids;
 
-	// Novellus dans le repère de rendu (voir GetNovellusRenderUU).
+	// Novellus dans le repère de rendu (voir GetNovellusRenderUU/Attitude).
 	FVector NovellusRenderUU = FVector::ZeroVector;
+	FQuat   NovellusAttitude = FQuat::Identity;
 	bool    bNovellusRenderValid = false;
+	// Repère de rendu courant (voir GetRenderRot) et l'état qui le décide : la
+	// caméra est-elle au plan BORD ? Posés en tête de Tick, lus par UpdateScene,
+	// SPStation et SPSky.
+	FQuat RenderRot = FQuat::Identity;
+	bool  bBord = false;
+	bool  bWasEyeOnMap = false;
 
 	double LastOrbitEpoch = -1.0e300;
 	bool bBuilt = false;

@@ -73,6 +73,23 @@ inline constexpr double BENCH_COVERAGE_CEILING = 0.98;  // plafond < 1 [15.5]
 inline constexpr double BENCH_COST_ME_PER_H = 0.05;     // coût du banc (M€/h)
 inline constexpr double BENCH_DAYS_PER_H = 0.02;        // délai (retarde la fenêtre)
 
+// ═══ ÉLARGIR LE DOMAINE DILUE LA COUVERTURE ═══ [GDD 15.5, Annexe E — à calibrer]
+// Déclarer qu'on a exercé les profils DÉGRADÉS et les INTERFACES agrandit
+// l'espace d'état que le banc prétend couvrir. À heures constantes, la même
+// campagne s'étale alors sur plus grand : la couverture BAISSE.
+// Sans cela, cocher les deux cases serait une montée en confiance GRATUITE —
+// un domaine plus large certifié au même prix, c'est-à-dire une déclaration
+// que rien ne paie. La rigueur s'achète en heures, comme le reste.
+inline constexpr double BENCH_ELARG_DEGRADE = 2.0;      // les profils dégradés
+inline constexpr double BENCH_ELARG_INTERFACES = 1.5;   // les interfaces inter-modules
+
+inline double bench_h_char(const ValidityDomain& d) {
+  double h = BENCH_H_CHAR;
+  if (d.degraded_profiles) h *= BENCH_ELARG_DEGRADE;
+  if (d.interfaces_tested) h *= BENCH_ELARG_INTERFACES;
+  return h;
+}
+
 // LE BANC D'ESSAI. Rejoue le code contre un environnement simulé sous le domaine
 // visé, produit une certification. Le code doit d'abord COMPILER (étape 1) — un
 // code qui ne compile pas n'est jamais certifié.
@@ -87,8 +104,10 @@ inline Certification run_test_bench(const std::string& code_id, bool compiled,
   c.budget_spent_me = BENCH_COST_ME_PER_H * c.test_hours;
   if (!compiled) { c.certified = false; return c; }   // ne compile pas -> rien
 
-  // COUVERTURE : saturation sous le plafond. Sans essai, couverture nulle.
-  c.coverage = BENCH_COVERAGE_CEILING * (1.0 - std::exp(-c.test_hours / BENCH_H_CHAR));
+  // COUVERTURE : saturation sous le plafond, sur l'étendue RÉELLEMENT visée
+  // (voir `bench_h_char`). Sans essai, couverture nulle.
+  c.coverage = BENCH_COVERAGE_CEILING *
+               (1.0 - std::exp(-c.test_hours / bench_h_char(target_domain)));
   c.certified = true;
 
   // La CONFIANCE suit la couverture ET le fait d'avoir exercé les profils

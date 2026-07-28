@@ -4,9 +4,17 @@
 #   UnrealEditor-Cmd.exe SP.uproject -run=pythonscript -script="Tools/make_sky.py"
 #
 # Produit :
-#   /Game/SP/T_Starfield     texture 8K equirectangulaire (groupe Skybox)
+#   /Game/SP/T_Starfield     8k_stars_milky_way.jpg, 8K equirectangulaire (Skybox)
 #   /Game/SP/M_SP_Starfield  materiau NON ECLAIRE, DEUX FACES, parametres
 #                            "Texture" (la carte du ciel) et "Intensity".
+#
+# UNE SEULE CARTE, ET C'EST DELIBERE (2026-07-27). Le depot en livre deux ;
+# verifie pixel par pixel, `8k_stars.jpg` est LE MEME champ d'etoiles que
+# `8k_stars_milky_way.jpg`, aux memes positions, simplement SANS la nebulosite
+# (luminance moyenne 0,22 contre 1,22, meme proportion de pixels brillants). Elle
+# a ete essayee en seconde couche additive puis retiree : mesure faite sur la
+# capture, l'ecart etait nul — les etoiles vives sont deja proches de la
+# saturation et le tonemapper ecrase ce qu'on empile au-dessus.
 #
 # Pourquoi des assets plutot qu'un decodage a la volee : le premier portage
 # creait la texture avec CreateTransient (8192 x 4096). Le dome etait bien
@@ -16,11 +24,10 @@
 import os
 import unreal
 
-SRC = os.path.join(
-    unreal.SystemLibrary.get_project_directory(),
-    "Space Program", "assets", "textures", "8k_stars_milky_way.jpg")
+TEXTURES = os.path.join(
+    unreal.SystemLibrary.get_project_directory(), "Space Program", "assets", "textures")
 DEST = "/Game/SP"
-TEX_NAME = "T_Starfield"
+TEX_CIEL = ("T_Starfield", "8k_stars_milky_way.jpg")   # (nom d'asset, fichier source)
 MAT_NAME = "M_SP_Starfield"
 
 
@@ -45,8 +52,9 @@ def regler_texture(tex, chemin):
     unreal.EditorAssetLibrary.save_asset(chemin)
 
 
-def importer_texture():
-    chemin = "{}/{}".format(DEST, TEX_NAME)
+def importer_texture(nom, fichier):
+    chemin = "{}/{}".format(DEST, nom)
+    src = os.path.join(TEXTURES, fichier)
     if unreal.EditorAssetLibrary.does_asset_exist(chemin):
         # RE-APPLIQUER LES REGLAGES, ne pas juste renvoyer l'asset : la version
         # precedente sortait ici, si bien qu'un changement de reglage (la
@@ -57,14 +65,14 @@ def importer_texture():
             regler_texture(tex, chemin)
         unreal.log("[SPSky] texture deja presente, reglages reappliques : {}".format(chemin))
         return tex
-    if not os.path.isfile(SRC):
-        unreal.log_error("[SPSky] source introuvable : {}".format(SRC))
+    if not os.path.isfile(src):
+        unreal.log_error("[SPSky] source introuvable : {}".format(src))
         return None
 
     task = unreal.AssetImportTask()
-    task.filename = SRC
+    task.filename = src
     task.destination_path = DEST
-    task.destination_name = TEX_NAME
+    task.destination_name = nom
     task.automated = True
     task.save = True
     task.replace_existing = True
@@ -72,10 +80,10 @@ def importer_texture():
 
     tex = unreal.EditorAssetLibrary.load_asset(chemin)
     if tex is None:
-        unreal.log_error("[SPSky] import de la texture echoue")
+        unreal.log_error("[SPSky] import de la texture echoue : {}".format(src))
         return None
     regler_texture(tex, chemin)
-    unreal.log("[SPSky] texture importee : {}".format(chemin))
+    unreal.log("[SPSky] texture importee : {} <- {}".format(chemin, fichier))
     return tex
 
 
@@ -105,14 +113,9 @@ def creer_materiau(tex):
     echant.set_editor_property("parameter_name", "Texture")
     if tex is not None:
         echant.set_editor_property("texture", tex)
-    # BIAIS DE MIP NEGATIF (2026-07-27) : la voute est une sphere ENORME et la
-    # carte est equirectangulaire ; les derivees d'UV y sont grandes, donc UE
-    # choisissait un mip grossier et le ciel sortait FLOU alors que la texture est
-    # bien en 8K, mip 0, jamais streamee (verifie). On force un cran plus net.
-    # RESTE, et c'est GEOMETRIQUE, pas un reglage : 8192 px etales sur 360 deg font
-    # ~23 px/degre, quand l'ecran en affiche ~43 a 45 deg de champ. Le ciel est
-    # donc AGRANDI ~2x : au-dela de ce biais, il faudrait une source plus definie
-    # (ou des etoiles en points plutot qu'en texture).
+    # BIAIS DE MIP NEGATIF : la voute est une sphere ENORME et la carte est
+    # equirectangulaire, donc les derivees d'UV y sont grandes et UE choisit un
+    # mip trop grossier. On force un cran plus net.
     echant.set_editor_property("mip_value_mode", unreal.TextureMipValueMode.TMVM_MIP_BIAS)
     echant.set_editor_property("const_mip_value", -1.0)
 
@@ -133,7 +136,7 @@ def creer_materiau(tex):
 
 
 def main():
-    creer_materiau(importer_texture())
+    creer_materiau(importer_texture(*TEX_CIEL))
 
 
 main()

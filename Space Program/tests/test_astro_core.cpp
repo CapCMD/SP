@@ -5,6 +5,7 @@
 //
 // Un test qui passe pour une mauvaise raison est pire que pas de test.
 // Chaque cas ci-dessous dit POURQUOI il ne peut pas passer par accident.
+#include <algorithm>
 #include <cstdio>
 #include <cmath>
 #include <vector>
@@ -692,6 +693,27 @@ static void test_launch_window() {
               dt / DAY, S / DAY);
   CHECK(std::fabs(dt - S) < 70.0 * DAY,
         "la fenetre se reproduit a la periode synodique (779.9 j)");
+
+  // 5) LA DUREE DE TRANSIT — c'est elle qui DATE l'arrivee d'une mission, donc
+  // l'insertion et l'EDL [GDD 9, 14.3]. La fenetre la calculait deja (c'est
+  // l'axe des durees de la carte porkchop) sans jamais la publier : elle ne
+  // repondait qu'a « quand partir ? ». Un transfert de type Hohmann vers Mars
+  // dure 6 a 10 mois — l'oracle le verifie contre la geometrie, pas contre une
+  // constante recopiee.
+  std::printf("     duree de transit a l'optimum : %.0f j (local %.0f j)\n",
+              probe.tof_days, probe.local_tof_days);
+  CHECK(probe.tof_days > 150.0 && probe.tof_days < 400.0,
+        "la duree de transit de l'optimum Terre-Mars est une Hohmann (150-400 j)");
+  CHECK(probe.local_tof_days > 0.0,
+        "la duree du transfert disponible MAINTENANT est publiee aussi");
+  CHECK(ouvert.tof_days > 150.0 && ouvert.tof_days < 400.0,
+        "toute fenetre ouverte porte sa duree de transit");
+  // COHERENCE INTERNE : la duree publiee est bien celle du couple (depart,
+  // arrivee) retenu — l'arrivee tombe donc apres le depart, et la date
+  // d'arrivee de l'optimum est calculable. Un TOF nul ou negatif signerait un
+  // point de porkchop invalide passe au travers.
+  CHECK(probe.tof_days > 0.0 && probe.best_dep_tdb + probe.tof_days * DAY > probe.best_dep_tdb,
+        "l'arrivee de l'optimum se date : depart + duree de transit");
 }
 
 // ---------------------------------------------------------------------------
@@ -773,6 +795,187 @@ static void test_body_orientation() {
 }
 
 // ---------------------------------------------------------------------------
+// LE REPÈRE LIÉ AU CORPS [IAU WGCCRE] — L'ORACLE DE LA *PHASE*.
+//
+// `spin_axis_ecliptic` et `prime_meridian_deg` étaient déjà sous oracle : un AXE
+// et un ANGLE, tous deux justes. Ce qui n'était pas testé, c'est l'ORIGINE depuis
+// laquelle l'angle se compte — et c'est précisément ce que le rendu inventait (il
+// prenait la rotation minimale du +Z du mesh vers le pôle, dont la composante
+// azimutale est arbitraire). Résultat : la Lune montrait la mauvaise face, la
+// Terre le mauvais méridien face au Soleil.
+//
+// Les deux oracles couronnes ci-dessous NE PEUVENT PAS passer par accident, et
+// c'est le point : ils mesurent la phase contre deux faits observables et
+// indépendants du modèle de rotation.
+//   . LA LUNE MONTRE SA FACE VISIBLE. Une phase fausse la fait tourner comme un
+//     phare : l'écart au point sous-terrestre monterait à 180°. La libration
+//     optique réelle vaut ±8° en longitude / ±6,9° en latitude ; l'oracle exige
+//     que l'écart maximal tombe DANS cette bande, ni plus (phase fausse) ni
+//     moins (libration perdue = corps figé sur sa moyenne).
+//   . MIDI TOMBE SUR GREENWICH. À 12 h, la longitude sous-solaire de la Terre
+//     doit valoir 0 à l'ÉQUATION DU TEMPS près, qui est bornée (|EoT| <= 16,5 min
+//     -> 4,13°) — plus la simplification de W0 par la table WGCCRE (0,31° mesurés
+//     à J2000 contre le temps sidéral de Greenwich). Une origine décalée de
+//     quelques degrés seulement s'y voit.
+static void test_body_frame() {
+  section("Repere lie au corps : la PHASE (IAU)");
+  using namespace fen::ephem;
+  const StandishEphemeris eph;
+
+  const Body corps[] = {Body::Sun, Body::Mercury, Body::Venus, Body::EarthBary,
+                        Body::Moon, Body::Mars, Body::Jupiter, Body::Saturn,
+                        Body::Titan, Body::Uranus, Body::Neptune, Body::Pluto};
+
+  // --- 1. Le repère EST un repère : orthonormé, DIRECT, et son z est le pôle ---
+  // Trois époques très écartées : un repère qui ne se dégrade qu'avec le temps
+  // (accumulation dans W, fmod raté) ne passerait pas les trois.
+  for (const double jours : {-7000.0, 0.0, 9000.0}) {
+    const Epoch t{jours * DAY};
+    for (const Body b : corps) {
+      const BodyFrame f = body_frame_ecliptic(b, t);
+      CHECK_NEAR(norm(f.x), 1.0, 1e-12, "repere corps : x unitaire");
+      CHECK_NEAR(norm(f.y), 1.0, 1e-12, "repere corps : y unitaire");
+      CHECK_NEAR(norm(f.z), 1.0, 1e-12, "repere corps : z unitaire");
+      CHECK_NEAR(dot(f.x, f.y), 0.0, 1e-12, "repere corps : x perp y");
+      CHECK_NEAR(dot(f.x, f.z), 0.0, 1e-12, "repere corps : x perp z (le meridien est sur l'equateur)");
+      CHECK_NEAR(dot(f.y, f.z), 0.0, 1e-12, "repere corps : y perp z");
+      // DIRECT (x cross y == z) : c'est ce qui fait que la longitude croit vers
+      // l'EST, la convention des equirectangulaires du projet. Un repere indirect
+      // rendrait la carte EN MIROIR — defaut jumeau de la mauvaise face.
+      const Vec3 xy = cross(f.x, f.y);
+      CHECK_NEAR(norm(xy - f.z), 0.0, 1e-12, "repere corps : DIRECT (x ^ y = z), longitude vers l'est");
+      // Le nouveau repere ne doit pas contredire l'ancienne fonction de pole.
+      const Vec3 ax = spin_axis_ecliptic(b);
+      CHECK_NEAR(norm(f.z - ax), 0.0, 1e-12, "repere corps : z == spin_axis_ecliptic");
+    }
+  }
+
+  // --- 2. ANCRE CALCULABLE A LA MAIN : l'AD du meridien de Greenwich ----------
+  // W est compte depuis le noeud de l'equateur du corps sur l'equateur ICRF, a
+  // l'AD alpha0 + 90 deg. Pour la Terre (alpha0 = 0, delta0 = 90) cela donne
+  // AD(Greenwich) = 90 + W, soit 280,147 deg a J2000. Le temps sideral de
+  // Greenwich y valait 280,46 deg : l'ecart de 0,31 deg EST la precession que la
+  // table WGCCRE neglige (declaree en tete de BodyOrientation.hpp). C'est cette
+  // ancre qui verrouille le « + 90 deg » — l'oublier decalerait TOUT d'un quart de
+  // tour, sur tous les corps a la fois.
+  {
+    auto ecl_vers_eq = [](const Vec3& v) {          // inverse de equatorial_to_ecliptic
+      const double e = cst::OBLIQUITY_J2000, c = std::cos(e), s = std::sin(e);
+      return Vec3{v.x, c * v.y - s * v.z, s * v.y + c * v.z};
+    };
+    const BodyFrame f = body_frame_ecliptic(Body::EarthBary, Epoch{0.0});
+    const Vec3 g = ecl_vers_eq(f.x);
+    double ad = std::atan2(g.y, g.x) / DEG;
+    if (ad < 0.0) ad += 360.0;
+    const double dec = std::asin(std::clamp(g.z, -1.0, 1.0)) / DEG;
+    std::printf("     Greenwich a J2000 : AD = %.3f deg (attendu 90 + W0 = 280.147), dec = %+.3f deg\n",
+                ad, dec);
+    CHECK_NEAR(ad, 280.147, 0.01, "Terre : AD du meridien origine = 90 deg + W0 (le noeud est a alpha0+90)");
+    CHECK_NEAR(dec, 0.0, 1e-9, "Terre : le meridien origine est SUR l'equateur (dec = 0)");
+    const double tsg_j2000 = 280.46;               // temps sideral de Greenwich a J2000
+    CHECK(std::fabs(ad - tsg_j2000) < 0.5,
+          "Terre : ...et il tombe sur le temps sideral reel a 0,5 deg (precession negligee)");
+  }
+
+  // --- 3. SENS DE ROTATION : le meridien avance vers l'est si W croit ---------
+  // Le signe du taux de W doit se retrouver dans le MOUVEMENT du repere, pas
+  // seulement dans la table. Venus et Uranus doivent sortir NEGATIFS sans aucun
+  // cas particulier. C'est l'oracle qui interdit une inversion de signe silencieuse
+  // (celle-la meme qui ferait tourner toutes les planetes a l'envers).
+  for (const Body b : corps) {
+    const Epoch t0{epoch_from_iso("2026-07-27T00:00:00").tdb};
+    const BodyFrame f0 = body_frame_ecliptic(b, t0);
+    const BodyFrame f1 = body_frame_ecliptic(b, Epoch{t0.tdb + 600.0});
+    const double sens = dot(f1.x, f0.y);           // > 0 : le meridien part vers +y (est)
+    const bool retro = rotation_elements(b).w_rate_deg_per_day < 0.0;
+    CHECK(retro ? (sens < 0.0) : (sens > 0.0),
+          retro ? "rotation RETROGRADE : le meridien recule (Venus, Uranus)"
+                : "rotation directe : le meridien avance vers l'est");
+  }
+
+  // --- 4. ORACLE COURONNE A : LA LUNE MONTRE SA FACE VISIBLE ------------------
+  // Point sous-terrestre = direction Lune -> Terre lue dans le repere de la Lune.
+  // Il doit rester au voisinage de (lon 0, lat 0) : c'est la definition meme du
+  // verrouillage par la maree, et c'est un FAIT observable, independant de la
+  // table de rotation. Balaye sur ~22 ans pour couvrir plusieurs cycles de
+  // libration et le cycle nodal de 18,6 ans.
+  {
+    double ecart_max = 0.0, lon_max = 0.0, lat_max = 0.0;
+    for (int j = 0; j < 8000; j += 7) {
+      const Epoch t{j * DAY};
+      const BodyFrame f = body_frame_ecliptic(Body::Moon, t);
+      const Vec3 vers_terre = unit(-eph.state(Body::Moon, Body::EarthBary, t).r);
+      const double lon = std::atan2(dot(vers_terre, f.y), dot(vers_terre, f.x)) / DEG;
+      const double lat = std::asin(std::clamp(dot(vers_terre, f.z), -1.0, 1.0)) / DEG;
+      const double ecart = std::acos(std::clamp(dot(vers_terre, f.x), -1.0, 1.0)) / DEG;
+      if (ecart > ecart_max) ecart_max = ecart;
+      lon_max = std::max(lon_max, std::fabs(lon));
+      lat_max = std::max(lat_max, std::fabs(lat));
+    }
+    std::printf("     Lune : point sous-terrestre au plus %.2f deg du centre "
+                "(libration lon %.2f / lat %.2f deg)\n", ecart_max, lon_max, lat_max);
+    CHECK(ecart_max < 11.0, "LA LUNE MONTRE SA FACE VISIBLE (ecart <= libration optique)");
+    CHECK(ecart_max > 3.0, "...et elle LIBRE vraiment (une phase moyennee figee donnerait ~0)");
+    CHECK(lon_max > 4.0 && lon_max < 10.0, "Lune : libration en longitude ~ +/-8 deg (excentricite)");
+    CHECK(lat_max > 4.0 && lat_max < 9.0, "Lune : libration en latitude ~ +/-6,9 deg (obliquite propre)");
+  }
+
+  // --- 5. L'ORACLE MORD-IL ? (mutation volontaire) ----------------------------
+  // Un oracle de phase qui ne rejette pas une phase fausse ne prouve rien. On
+  // refait le meme calcul avec le meridien decale d'un quart de tour, et on exige
+  // que l'ecart explose. C'est la reproduction exacte du defaut corrige.
+  {
+    const Epoch t{epoch_from_iso("2026-07-27T00:00:00").tdb};
+    const BodyFrame f = body_frame_ecliptic(Body::Moon, t);
+    const Vec3 vers_terre = unit(-eph.state(Body::Moon, Body::EarthBary, t).r);
+    const Vec3 x_faux = f.y;                       // = x tourne de +90 deg autour du pole
+    const double ecart_faux = std::acos(std::clamp(dot(vers_terre, x_faux), -1.0, 1.0)) / DEG;
+    std::printf("     mutation (+90 deg de phase) : ecart = %.1f deg\n", ecart_faux);
+    CHECK(ecart_faux > 45.0, "l'oracle MORD : un quart de tour de phase est rejete");
+  }
+
+  // --- 6. ORACLE COURONNE B : A MIDI, LE SOLEIL EST SUR GREENWICH -------------
+  // Meme mecanique que la latitude sub-solaire (saisons), mais sur la LONGITUDE :
+  // c'est la composante que le pole seul ne pouvait pas contraindre.
+  {
+    const char* midis[] = {"2026-01-15T12:00:00", "2026-04-15T12:00:00",
+                           "2026-07-27T12:00:00", "2026-11-03T12:00:00",
+                           "2030-02-11T12:00:00"};
+    double pire = 0.0;
+    for (const char* iso : midis) {
+      const Epoch t{epoch_from_iso(iso).tdb};
+      const BodyFrame f = body_frame_ecliptic(Body::EarthBary, t);
+      const Vec3 vers_soleil = unit(-eph.state(Body::EarthBary, Body::Sun, t).r);
+      const double lon = std::atan2(dot(vers_soleil, f.y), dot(vers_soleil, f.x)) / DEG;
+      std::printf("     %s : longitude sub-solaire = %+6.2f deg\n", iso, lon);
+      pire = std::max(pire, std::fabs(lon));
+      // 4,13 deg (equation du temps) + 0,31 deg (W0 WGCCRE) + marge d'arrondi.
+      CHECK(std::fabs(lon) < 5.0, "a 12 h, le Soleil est au-dessus de Greenwich (a l'EoT pres)");
+    }
+    // Et l'ecart doit etre du bon ORDRE : s'il tombait a 0 partout, c'est que
+    // l'equation du temps a disparu, donc que quelque chose est trop lisse.
+    CHECK(pire > 0.5, "...et l'equation du temps est bien la (l'ecart n'est pas nul)");
+  }
+
+  // --- 7. La longitude sous-solaire recule de 15 deg par heure ----------------
+  // Le jour SOLAIRE, deduit du repere, doit valoir 24 h a la seconde pres. Il
+  // croise le taux sideral de la table (360,9856 deg/j) avec le mouvement orbital
+  // de la Terre, qui vient de l'ephemeride : deux sources independantes.
+  {
+    const Epoch t0{epoch_from_iso("2026-07-27T00:00:00").tdb};
+    auto lon_sol = [&](Epoch t) {
+      const BodyFrame f = body_frame_ecliptic(Body::EarthBary, t);
+      const Vec3 s = unit(-eph.state(Body::EarthBary, Body::Sun, t).r);
+      return std::atan2(dot(s, f.y), dot(s, f.x)) / DEG;
+    };
+    // Ramené dans (-180, 180] : la longitude enjambe la coupure du méridien 180.
+    double d = std::fmod(lon_sol(Epoch{t0.tdb + 3600.0}) - lon_sol(t0) + 540.0, 360.0) - 180.0;
+    std::printf("     derive de la longitude sub-solaire : %+.4f deg/h (attendu -15)\n", d);
+    CHECK_NEAR(d, -15.0, 0.05, "le Soleil derive de -15 deg/h : le jour solaire fait 24 h");
+  }
+}
+
+// ---------------------------------------------------------------------------
 // LES LUNES MAJEURES [GDD 7.1] — la table se vérifie contre la physique.
 // Le modèle (Satellites.hpp) DÉRIVE la période de (a, GM du parent) par la 3e loi
 // de Kepler ; la table porte en plus la période sidérale PUBLIÉE, qui n'entre
@@ -834,6 +1037,50 @@ static void test_satellites() {
     const Vec3 d = eph.state(s.b, s.parent, t).r;
     CHECK_NEAR(std::sqrt(norm2(d)) / s.sma_m, 1.0, 1e-9,
                "ephemeride : la lune est a son demi-grand axe de son parent");
+
+    // --- ORACLE 6 : LA NORMALE ORBITALE EN FORME FERMÉE ---------------------
+    // `satellite_orbit_normal` remplace une différence finie par cos i · pôle
+    // − sin i · v. On la confronte au h = r × v mesuré : deux chemins, un seul
+    // résultat. C'est ce qui autorise le verrou synchrone à s'en servir comme
+    // pôle sans recalculer une vitesse.
+    {
+      const double dt2 = 60.0;
+      const Vec3 ra = satellite_parentcentric(s, Epoch{-dt2});
+      const Vec3 rb = satellite_parentcentric(s, Epoch{+dt2});
+      const Vec3 h_mes = unit(cross(satellite_parentcentric(s, Epoch{0.0}), rb - ra));
+      const Vec3 h_ferme = satellite_orbit_normal(s);
+      CHECK_NEAR(norm(h_mes - h_ferme), 0.0, 1e-9,
+                 "normale orbitale : forme fermee == r x v mesure");
+    }
+
+    // --- ORACLE 7 : LE VERROU SYNCHRONE VERROUILLE VRAIMENT ----------------
+    // Ces dix-neuf lunes présentent en permanence la même face à leur primaire.
+    // Le repère le construit depuis la géométrie, donc le point sous-parent doit
+    // tomber EXACTEMENT sur (lon 0, lat 0) — pas « à peu près », à l'arrondi près,
+    // et à toute époque. Le rendu, lui, faisait tourner ces lunes sur une phase
+    // arbitraire : elles montraient n'importe quelle face.
+    // On balaie plus d'une période complète pour que la lune ait réellement
+    // PARCOURU son orbite (un verrou qui ne tient que parce que rien ne bouge ne
+    // prouverait rien — vérifié par `parcours` ci-dessous).
+    {
+      double parcours = 0.0;
+      const Vec3 r_ref = unit(satellite_parentcentric(s, Epoch{0.0}));
+      for (int k = 0; k < 17; ++k) {
+        const Epoch tk{k * 0.13 * s.period_days_ref * DAY};
+        const BodyFrame f = satellite_frame_ecliptic(s, tk);
+        const Vec3 r = satellite_parentcentric(s, tk);
+        const Vec3 vers_parent = unit(-r);
+        CHECK_NEAR(dot(f.x, vers_parent), 1.0, 1e-12,
+                   "verrou synchrone : le point sous-parent EST la longitude 0");
+        CHECK_NEAR(dot(f.z, vers_parent), 0.0, 1e-12,
+                   "verrou synchrone : le parent est sur l'equateur de la lune (lat 0)");
+        CHECK_NEAR(norm(cross(f.x, f.y) - f.z), 0.0, 1e-12,
+                   "verrou synchrone : repere DIRECT (longitude vers l'est)");
+        parcours = std::max(parcours,
+                            std::acos(std::clamp(dot(unit(r), r_ref), -1.0, 1.0)) / DEG);
+      }
+      CHECK(parcours > 90.0, "...et la lune a vraiment parcouru son orbite pendant l'essai");
+    }
   }
   std::printf("     pire ecart periode Kepler vs publiee : %.2f %% (%s)\n",
               100.0 * pire, pire_nom);
@@ -1136,6 +1383,7 @@ int main() {
   test_porkchop();
   test_launch_window();
   test_body_orientation();
+  test_body_frame();
   test_satellites();
   test_flyby();
   test_mga();

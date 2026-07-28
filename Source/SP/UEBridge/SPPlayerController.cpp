@@ -109,7 +109,7 @@ void ASPPlayerController::PlayerTick(float DeltaTime)
 	if (Session->modal != fen::app::Modal::Aucun)
 	{
 		auto& In = B.station_in;
-		In.fwd = 0.0f; In.right = 0.0f; In.up = 0.0f; In.boost = false;
+		In.fwd = 0.0f; In.right = 0.0f; In.up = 0.0f; In.agrippe = false;
 		In.look_dx = 0.0f; In.look_dy = 0.0f;
 		bPrecM = bPrecE = bPrecF5 = bPrecEsc = false;
 		return;
@@ -240,7 +240,7 @@ void ASPPlayerController::TickStation(float DeltaTime)
 
 	if (Session->poste_ouvert >= 0)   // panneau ouvert : on ne bouge plus
 	{
-		In.fwd = 0.0f; In.right = 0.0f; In.up = 0.0f; In.boost = false;
+		In.fwd = 0.0f; In.right = 0.0f; In.up = 0.0f; In.agrippe = false;
 		In.look_dx = 0.0f; In.look_dy = 0.0f;
 		return;
 	}
@@ -255,7 +255,7 @@ void ASPPlayerController::TickStation(float DeltaTime)
 	In.right = (Dr ? 1.0f : 0.0f) - (Ga ? 1.0f : 0.0f);
 	In.up    = (IsInputKeyDown(EKeys::SpaceBar) ? 1.0f : 0.0f) -
 	           (IsInputKeyDown(EKeys::LeftControl) ? 1.0f : 0.0f);
-	In.boost = IsInputKeyDown(EKeys::LeftShift);
+	In.agrippe = IsInputKeyDown(EKeys::LeftShift);
 
 	// LE REGARD : souris capturée, delta brut. Le pawn accumule et applique.
 	float Dx = 0.0f, Dy = 0.0f;
