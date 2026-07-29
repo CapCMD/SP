@@ -42,6 +42,12 @@ inline int max_parallel_research(Rank r, bool critical_program = false) {
 // être visibles ; le déclencheur reste le SCORE, jamais l'ancienneté.
 inline constexpr double PROMOTION_THRESHOLDS[4] = {100.0, 300.0, 700.0, 1500.0};
 
+// LE HAUT DE L'ÉCHELLE — « le personnage ne quitte ARES que lorsqu'il n'a plus
+// de carrière à construire » [GDD 9.2]. Cette phrase désigne UN état, et c'est
+// celui-ci : le rang terminal. Nommé une fois, lu par `promotion_ready` (qui
+// l'exprimait en dur) et par la porte d'embarquement d'une mission vécue.
+inline bool terminal_rank(Rank r) { return r == Rank::Directeur; }
+
 struct CareerState {
   Rank   rank{Rank::Stagiaire};
   double score{0.0};
@@ -51,7 +57,7 @@ struct CareerState {
 
   void add_score(double pts) { score += pts; }
   bool promotion_ready(double now_days) const {
-    if (rank == Rank::Directeur) return false;
+    if (terminal_rank(rank)) return false;
     if (promotion_frozen && now_days < frozen_until_days) return false;
     return score >= PROMOTION_THRESHOLDS[static_cast<int>(rank)];
   }
@@ -95,18 +101,25 @@ struct Notebook {
 
 // --- Passation [GDD 3.5] -----------------------------------------------------
 // Optionnelle, proposée SEULEMENT en fin de vie naturelle. Le successeur hérite
-// de l'accès techno (propriété d'ARES, pas du personnage) et du carnet. Le
-// score et le rang repartent bas : la crédibilité ne s'hérite pas.
+// de l'accès techno (propriété d'ARES, pas du personnage) et du carnet.
+//
+// ⚠ CORRIGÉ SUR LE GDD v1.2 : ce bloc appliquait encore la règle v1.1 (rang
+// ramené à Junior, confiance à 40). Les décisions 6 et 7 du journal v1.2 disent
+// l'inverse, et le tableau de 3.5 le répète ligne à ligne :
+//   . RANG      — « Transmis : Oui », « propriété du POSTE, non de la personne » ;
+//   . CONFIANCE — « Transmis : Non — remise à 70 », la valeur de départ de 13.4.
+// Ce qui ne s'hérite pas, c'est la crédibilité PERSONNELLE ; le rang, lui, est un
+// droit institutionnel durable [GDD 3.2].
 struct Succession {
   // Renvoie faux si la passation est illégale (décès opérationnel).
   static bool allowed(const Character& c) {
     return !c.alive ? !c.operational_death : c.natural_death_due();
   }
-  static CareerState inherit_career() {
+  static CareerState inherit_career(Rank rank_atteint) {
     CareerState s;
-    s.rank = Rank::Junior;        // ARES ne confie pas un programme à un inconnu
-    s.score = 0.0;
-    s.confidence_ares = 40.0;
+    s.rank = rank_atteint;        // [GDD 3.5] le successeur CONSERVE le rang
+    s.score = 0.0;                // le score, lui, est personnel
+    s.confidence_ares = 70.0;     // [GDD 13.4] valeur initiale de la confiance
     return s;
   }
 };

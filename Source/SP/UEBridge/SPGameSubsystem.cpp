@@ -121,6 +121,23 @@ void USPGameSubsystem::ArmerCapture()
 			M.contract.family = (Ph == TEXT("edl")) ? "surface"
 			                  : (Ph == TEXT("ascension") || Ph == TEXT("parking")) ? "sat"
 			                  : "mars_habite";
+			// `-spvecu` : le vol doit être HABITÉ, sinon il n'y a personne à
+			// rejoindre. `mars_habite` l'est dans le catalogue [CAT-09] ; on le
+			// dit ici parce que la mission de capture est construite à la main.
+			if (SPCapture::RequestedVecu())
+			{
+				M.contract.family = "mars_habite";
+				M.contract.title = "Capture : mission habitee vecue";
+				M.contract.crewed = true;
+			}
+			// ═══ ET SES TERMES SONT CEUX DE SA FAMILLE ═══ [GDD 4.1]
+			// Sans cette ligne, la mission de capture naissait avec des termes
+			// NULS : « BUDGET CONTRAT 0 M EUR », « CALENDRIER 0 / 0 mois »,
+			// « P(SUCCES) 0,0 % » et un VERROU rouge dans CHAQUE image en vol —
+			// une alarme fausse, donc une alarme qu'on apprend à ne plus lire, et
+			// un bilan de viabilité que la capture ne pouvait pas vérifier. Même
+			// table que le catalogue, un seul endroit où elle vit.
+			M.contract.terms = fen::mission::contract_terms_for_family(M.contract.family);
 			// `-spvol=conception` : la mission N'EST PAS PARTIE. C'est la phase où
 			// vit l'étude de navigation (dispersion d'injection, correction à
 			// prévoir) — on ne reconçoit pas un véhicule en vol, donc ce cadran ne
@@ -200,8 +217,127 @@ void USPGameSubsystem::ArmerCapture()
 			            "arrivee dans %.2f j"),
 			       *Ph, M.contract.family.c_str(), M.tof_days,
 			       fen::mission::flight_arrival(M, G3.clock.now_days()).reste_jours);
-			G3.missions.push_back(std::move(M));
+
+			// ═══ `-spvecu` : ON MONTE À BORD [GDD 9] ═══
+			// DANS LE BON ORDRE, et c'est le modèle qui l'impose : on embarque
+			// AVANT le feu vert (`Session::peut_embarquer` refuse un vol déjà
+			// parti — on ne rattrape pas un vaisseau en route). La mission est
+			// donc déposée en QUALIFICATION, l'Architecte y monte par la MÊME
+			// porte que le bouton du poste, puis on la fait décoller avec les
+			// dates que la chronologie vient de calculer — ce que fait le feu
+			// vert dans une vraie partie.
+			//
+			// Les conditions de [GDD 9.2] sont posées dans le MODÈLE, pas
+			// contournées : une mission longue exige le rang terminal ET le
+			// support-vie long séjour qualifié. C'est l'état qu'aurait un joueur
+			// arrivé là en jouant — on le lui donne, on ne désactive pas la porte.
+			if (SPCapture::RequestedVecu())
+			{
+				const double Entree = M.state_entered_days;
+				const double Tof = M.tof_days;
+				// LU AVANT LE DÉPLACEMENT, comme `Entree` et `Tof` juste au-dessus :
+				// après `std::move`, `M.contract.family` est une chaîne vidée. La
+				// première version de la boucle de prérequis ci-dessous lisait `M`
+				// APRÈS le move et n'accordait donc rien — le journal de bord l'a
+				// dit en une ligne (« maturite requise : support-vie long sejour »)
+				// là où la capture seule ne montrait qu'un bloc manquant.
+				const std::string Famille = M.contract.family;
+				M.state = fen::mission::MissionState::Qualification;
+				G3.missions.push_back(std::move(M));
+
+				G3.career.rank = fen::career::Rank::Directeur;
+				auto Qualifier = [&G3](const char* Id)
+				{
+					if (fen::tech::TechNode* N = G3.tree.find_mut(Id))
+						N->trl = fen::tech::TRL_OPERATIONAL;
+				};
+				// ═══ ON ACCORDE CE QUE LE CONTRAT EXIGE, PAS UNE LISTE À LA MAIN ═══
+				// Une liste écrite ici se périme dès qu'un prérequis change dans le
+				// catalogue — et c'est arrivé : l'assemblage orbital est devenu
+				// nécessaire à une architecture martienne blindée (182 t contre
+				// 130 t de plafond), la capture ne l'accordait pas, et le poste
+				// affichait un verrou parfaitement juste mais sans intérêt pour une
+				// image censée montrer un vol EN COURS. On lit donc les prérequis
+				// de l'entrée de catalogue de la MÊME famille : le jour où ils
+				// changent, la capture suit toute seule.
+				for (const auto& E : G3.catalog.entries())
+					if (E.contract.family == Famille)
+						for (const auto& T : E.contract.prerequisites.required_tech)
+							Qualifier(T.c_str());
+				// Le recyclage quasi fermé fait partie d'une architecture de fin
+				// d'arbre : sans lui la télémétrie afficherait les boucles ISS. Il
+				// n'est prérequis d'aucun contrat — c'est un CHOIX d'architecture.
+				Qualifier("recyclage_partiel");
+				Qualifier("recyclage_ferme");
+				// ET LA CAMPAGNE DE MISE EN ORBITE [GDD 5.2 branche 1] : 182 t
+				// blindées demandent deux tirs du super-lourd, donc le rendez-vous
+				// automatisé. Un architecte au rang terminal qui part pour Mars les
+				// a forcément — les lui refuser peindrait un verrou de progression
+				// sur une capture qui documente autre chose.
+				Qualifier("lanceur_lourd");
+				Qualifier("lanceur_super_lourd");
+				Qualifier("rdv_automatise");
+
+				S.piloter_premiere_mission();
+				// UNE ARCHITECTURE QUI A CHOISI DE PROTÉGER SON ÉQUIPAGE [GDD 6.6] :
+				// 10 g/cm² de matériau riche en hydrogène. Sans ce choix, la
+				// télémétrie de dose afficherait un blindage nul et la capture
+				// montrerait le pire cas au lieu d'un arbitrage.
+				S.mission_plan.blindage = fen::env::Shielding{10.0, 1.0};
+				// ET ON ÉVALUE LE PLAN, comme le poste CONCEPTION le ferait
+				// [GDD 4.1]. Sans cet appel, `MissionPlan::evaluated` reste faux
+				// et le bilan de viabilité s'affiche « CONCEPTION NON EVALUEE » :
+				// juste, mais sans intérêt pour une capture censée montrer un vol
+				// en cours. C'est le pendant des termes du contrat ci-dessus —
+				// une mission fabriquée à la main doit traverser les mêmes portes
+				// qu'une mission jouée, sinon la capture ne prouve rien.
+				S.evaluer_plan();
+				const bool bMonte = S.embarquer();
+
+				// LE DÉCOLLAGE : on rend à la mission l'état de vol déjà calculé.
+				if (fen::mission::Mission* Mp = S.mission_courante())
+				{
+					Mp->state = fen::mission::MissionState::Launched;
+					Mp->state_entered_days = Entree;
+					Mp->tof_days = Tof;
+				}
+				UE_LOG(LogTemp, Log,
+				       TEXT("[SPCapture] mission vecue : embarque=%d (%hs) — autonomie %.0f j, "
+				            "agence gelee=%d"),
+				       bMonte ? 1 : 0, S.dernier_refus_embarquement.c_str(),
+				       G3.lived.days_left(), G3.finance.suspended ? 1 : 0);
+			}
+			else
+			{
+				G3.missions.push_back(std::move(M));
+			}
 		}
+	}
+	// ═══ `-spantimatiere` : LA FILIÈRE DE FIN D'ARBRE EXISTE ═══
+	// [GDD 5.12.12, 19.3] Le bloc ANTIMATIÈRE du poste AGENCE ne s'affiche que si
+	// le nœud est opérationnel — et l'y amener demande une carrière entière puis
+	// plusieurs vies d'accumulation. On pose donc l'ÉTAT DU MODÈLE, comme
+	// `-spvol` et `-spvecu` : le nœud est qualifié PAR LE MÊME champ que la
+	// recherche (`trl`), et le stock est obtenu en faisant COULER la production
+	// réelle sur l'horizon de calibration, jamais en écrivant un nombre de
+	// grammes. Une capture qui poserait le stock à la main ne prouverait que
+	// l'existence de la ligne d'affichage.
+	// `assurer` D'ABORD, comme le fait `-spvol` : la couche ARES n'est pas encore
+	// montée au sortir de `nouvelle_partie`, et sans cet appel le test
+	// `initialisee()` est faux — le drapeau s'appliquait donc à rien, et la
+	// capture montrait un arbre au défaut sans rien signaler.
+	if (SPCapture::RequestedAntimatiere())
+		S.jeu.ares.assurer(S.jeu.agence, S.jeu.epoch_courant());
+	if (SPCapture::RequestedAntimatiere() && S.jeu.ares.initialisee())
+	{
+		fen::game::GameState& Ga = *S.jeu.ares.etat;
+		for (const char* Id : {"fission_spatiale", "nep_megawatt", "fusion", "antimatiere"})
+			if (fen::tech::TechNode* N = Ga.tree.find_mut(Id))
+				N->trl = fen::tech::TRL_OPERATIONAL;
+		Ga.antimatiere.prod =
+			fen::rel::AntimatterProduction::for_tier(fen::app::antimatter_tier(Ga));
+		Ga.antimatiere.tick(
+			fen::rel::AntimatterProduction::CALIB_HORIZON_YEARS * 365.25, true);
 	}
 	// `-spcadence=N` : fait COULER le temps d'emblée [GDD 14.2], pour vérifier de
 	// bout en bout (date, heure, positions des corps) que deux captures prises à
@@ -269,6 +405,42 @@ void USPGameSubsystem::Tick(float DeltaTime)
 	// L'ÉTAT AVANT LE MONDE : Session::tick publie le pont, les subsystems de
 	// monde (station, carte, ciel) le liront dans leur propre Tick.
 	Holder->Session.tick(DeltaTime);
+
+#if 0	// DIAGNOSTIC — la mission vécue avance-t-elle vraiment à bord ?
+	// GARDÉ SOUS `#if 0`, comme celui du ciel : c'est lui qui a tranché entre
+	// « le modèle ne consomme rien » et « l'écran ne se rafraîchit pas » (piège
+	// n°74), en trois lignes de journal contre une capture qui ne pouvait pas le
+	// dire. Le réécrire coûterait plus cher que le lire.
+	if (SPCapture::RequestedVecu() && Holder->Session.jeu.ares.initialisee())
+	{
+		static int Compteur = 0;
+		if ((Compteur++ % 200) == 0)
+		{
+			auto& G = *Holder->Session.jeu.ares.etat;
+			int Etat = -1; int Ph = -1;
+			for (const auto& mm : G.missions)
+				if (mm.contract.id == G.lived.mission_id)
+				{ Etat = (int)mm.state; Ph = (int)mm.phase; break; }
+			UE_LOG(LogTemp, Warning,
+			       TEXT("[DIAG vecu] f=%d dt=%.4f mois=%.4f cadence=%d actif=%d etat=%d phase=%d "
+			            "jours_restants=%.3f dose=%.5f"),
+			       Compteur, DeltaTime, Holder->Session.jeu.agence.mois,
+			       (int)Holder->Session.jeu.cadence, G.lived.active ? 1 : 0, Etat, Ph,
+			       G.lived.days_left(), G.dose_architecte.career_sv);
+			// LES DEUX HORLOGES [GDD 6.7] : le bloc « VIE À BORD » est sous la
+			// ligne de flottaison du défilement, donc AUCUNE capture ne peut
+			// montrer ce chiffre — une mesure, ici, vaut mieux que dix images.
+			UE_LOG(LogTemp, Warning,
+			       TEXT("[DIAG horloge] t_terre=%.1f j  tau_bord=%.1f j  ecart=%+.4f ms  "
+			            "a_croisiere=%.4f UA  medical=%.2f  age_bio=%.4f ans"),
+			       G.dual_clock.t_earth / 86400.0, G.dual_clock.tau_board / 86400.0,
+			       -G.dual_clock.aging_gap() * 1000.0,
+			       G.lived.horloge.a_croisiere_m / fen::cst::AU,
+			       G.lived.facteur_risque_medical,
+			       G.character.age_bio_s / fen::career::YEAR_S);
+		}
+	}
+#endif
 
 	// CAPTURE de CONTROLE (`-sppost=3`) : la couche ARES ne s'initialise qu'au
 	// premier tick, donc on accepte un contrat ICI (une fois) pour que le poste

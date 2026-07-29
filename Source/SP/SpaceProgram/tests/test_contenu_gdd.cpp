@@ -846,7 +846,7 @@ int main() {
 
     // LE MODÈLE DE PRODUCTION est le levier : debit faible => accumulation
     // pluriannuelle ; confinement plafonne le stock utile.
-    AntimatterProduction prod;
+    AntimatterProduction prod = AntimatterProduction::for_tier(AntimatterTier::Fission);
     CHECK(prod.years_to_accumulate(1.0) >= 1.0,
           "5.12.12 : produire un gramme est pluriannuel");
     CHECK(prod.max_usable_stock_g() <= prod.confinement_capacity_g + 1e-9,
@@ -855,10 +855,16 @@ int main() {
           "5.12.12 : le cout par gramme est hors echelle");
     CHECK(prod.stock_survival(0.0) == 1.0 && prod.stock_survival(1e9) < 1.0,
           "5.12.12 : le confinement perd du stock avec le temps (risque permanent)");
-    // Un meilleur debit reduit le temps d'accumulation (le vrai levier).
-    AntimatterProduction fast; fast.production_g_per_yr = 1.0;
+    // Un meilleur debit reduit le temps d'accumulation (le vrai levier). Le debit
+    // n'est plus un champ qu'on ecrit : il decoule du PALIER DE BRANCHE 6, ce que
+    // [GDD 5.12.12] demande (« le rendement couple la production a la branche
+    // energie »). Ameliorer le levier, c'est donc monter d'un palier.
+    AntimatterProduction fast = AntimatterProduction::for_tier(AntimatterTier::Mature);
     CHECK(fast.years_to_accumulate(1.0) < prod.years_to_accumulate(1.0),
           "5.12.12 : ameliorer le debit raccourcit l accumulation");
+    CHECK(fast.production_efficiency > prod.production_efficiency
+          && fast.plant_power_w > prod.plant_power_w,
+          "5.12.12 : ... et le debit ne progresse que par le rendement ou la puissance");
   }
 
   std::printf("\nCONTENU GDD (6.4, 5.12, 11, arbre, 10.1, 12.1, 13.3, 12.4, 12.2, 6.7) : %d OK, %d en echec.\n",

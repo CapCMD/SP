@@ -58,6 +58,22 @@ namespace SPCapture
 	// se vérifie ailleurs. La position dans la chronologie est CALCULÉE (milieu
 	// du segment visé), jamais un décalage écrit à la main.
 	bool RequestedVol();
+	// `-spvecu` : LE JOUEUR EST À BORD [GDD 9, décision 18] — la mission VÉCUE.
+	// Implique `-spvol=croisiere` (dont il réutilise toute la machinerie) et
+	// embarque l'Architecte. L'état demande une carrière menée jusqu'au rang
+	// terminal et le support-vie long séjour qualifié : aucune capture ne peut y
+	// arriver en jouant, donc sans ce drapeau la télémétrie vitale du poste
+	// CONTRÔLE et le gel de l'agence [GDD 9.3] ne se photographient jamais.
+	// À combiner avec `-sppost=3` et `-spcadence=4`.
+	bool RequestedVecu();
+	// `-spantimatiere` : QUALIFIE LA FILIÈRE DE FIN D'ARBRE et fait couler son
+	// stock [GDD 5.12.12, 19.3]. Le bloc ANTIMATIÈRE du poste AGENCE — débit de
+	// l'usine, plafond réel AVEC SA CAUSE, écart au seuil relativiste — ne
+	// s'affiche que filière qualifiée, ce qui demande plusieurs vies de jeu : sans
+	// ce drapeau, la surface qui porte toute la calibration de fin de jeu
+	// [Annexe E] n'est photographiable par aucune capture. À combiner avec
+	// `-sppost=0`.
+	bool RequestedAntimatiere();
 	const TCHAR* RequestedVolPhase();
 	// `-spcode` : OUVRE L'ATELIER LOGICIEL du mode PRO [GDD 15.1, 15.5]. La partie
 	// de capture démarre en NORMAL, où cette face du poste n'existe pas — et le

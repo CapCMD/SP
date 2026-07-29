@@ -26,8 +26,10 @@
 #pragma once
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <string>
 #include <vector>
+#include "fen/mission/Assemblage.hpp"
 #include "fen/vehicle/Vehicle.hpp"
 
 namespace fen::mission {
@@ -41,15 +43,53 @@ struct Launcher {
   double cost_musd{};
   double reliability{};        // P(succès), historique
   double lead_months{};
+  // ═══ LE NŒUD D'ARBRE QUI LE QUALIFIE ═══ [GDD 5.4]
+  // Il manquait, et la branche 1 « Accès à l'orbite » ne gardait donc RIEN :
+  // `lanceur_leger`, `lanceur_moyen`, `lanceur_lourd` et `lanceur_super_lourd`
+  // étaient quatre nœuds à rechercher qui ne débloquaient aucun lanceur — le
+  // joueur disposait de toute la gamme dès la première mission.
+  std::string tech_id;
 };
 
 inline const std::vector<Launcher>& launchers() {
   static const std::vector<Launcher> v = {
-      {"L-A leger",  4200.0, 41.0, 0.920, 10.0},
-      {"L-B moyen",  5800.0, 62.0, 0.960, 12.0},
-      {"L-C lourd",  8300.0, 95.0, 0.980, 16.0},
+      {"L-A leger",  4200.0,   41.0, 0.920, 10.0, "lanceur_leger"},   // PSLV-XL : 3,8 t
+      {"L-B moyen",  5800.0,   62.0, 0.960, 12.0, "lanceur_moyen"},   // Soyouz-2 : 5-8 t
+      // ═══ UN « LOURD » À 8,3 t N'A AUCUNE LIGNÉE RÉELLE ═══ [GDD 12.1]
+      // « Assemblage à partir de pièces réelles ou extrapolées de lignées
+      // réelles, jamais génériques. » La classe lourde RÉELLE, c'est Falcon 9
+      // Block 5 (22,8 t en LEO) ou Atlas V 541 (17 t) — pas 8,3 t, qui est un
+      // moyen déguisé. Conséquence MESURÉE de cette sous-évaluation : l'échelle
+      // sautait de 8,3 t à 130 t (facteur 15,7) sans rien entre les deux, si bien
+      // que CAT-04 — qui dépasse le plafond de 356 kg, soit 4 % — devait acheter
+      // un Saturn V à 1 457 M$ pour un contrat à 240 M$. Le prix reste à 95 M$,
+      // conservateur : un Falcon 9 réel se vend ~67 M$.
+      {"L-C lourd",  22800.0,  95.0, 0.980, 16.0, "lanceur_lourd"},   // Falcon 9 Block 5
+      // ═══ LE SUPER-LOURD, QUE L'ARBRE NOMMAIT SANS QU'IL EXISTE ═══
+      // `lanceur_super_lourd` est un nœud de fin de branche 1, et CAT-09 (Mars
+      // habité) l'exige en prérequis — mais le catalogue s'arrêtait à 8,3 t.
+      // Conséquence MESURÉE : cinq contrats sur onze étaient inachevables quoi
+      // que fasse le joueur, dont trois dont la charge NUE dépassait déjà le
+      // plafond. Un prérequis qui ne débloque rien est un prérequis qui ment.
+      //
+      // ANCRÉ SUR UNE LIGNÉE RÉELLE [GDD 12.1], jamais sur un besoin de gameplay :
+      // Saturn V (140 t en LEO, 13 vols sur 13) et SLS Block 2 (130 t). On retient
+      // 130 t. Le coût suit le même $/kg que le reste du tableau (~11 M$/t, contre
+      // 8,6 pour Saturn V et 15,4 pour SLS). La fiabilité est PLUS BASSE que celle
+      // du L-C lourd, et c'est le fait réel : un lanceur géant vole peu, donc il
+      // démontre peu — on n'achète pas de la fiabilité en achetant de la taille.
+      {"L-D super-lourd", 130000.0, 1400.0, 0.970, 28.0, "lanceur_super_lourd"},
   };
   return v;
+}
+
+// ═══ CE QUE L'AGENCE PEUT ACHETER ═══ [GDD 5.4]
+// Filtre optionnel sur les lanceurs disponibles. `nullptr` = AUCUN filtre, et
+// c'est le mode MODÈLE (oracles de physique pure, où l'arbre n'existe pas) —
+// jamais le mode JEU, où `Session::evaluer_plan` passe la liste qualifiée.
+using LauncherFilter = std::function<bool(const Launcher&)>;
+inline bool launcher_autorise(const Launcher& L, const LauncherFilter* f) {
+  return !f || !*f || (*f)(L);
 }
 
 // --- CATALOGUE DE MOTEURS ----------------------------------------------------
@@ -115,11 +155,36 @@ inline const std::vector<EngineOption>& engines() {
 // --- LE CONTRAT --------------------------------------------------------------
 // Les objectifs sont des GRANDEURS PHYSIQUES. Le budget est en dollars. Le delai
 // est en mois. Rien de tout ca n'est un point de jeu.
+// ═══ CE QU'ARES DEMANDE — L'OBJECTIF ET L'ENVELOPPE, RIEN D'AUTRE ═══ [GDD 3.1]
+// « L'Architecte décide COMMENT concevoir, dans des enveloppes imposées par ARES.
+// Il ne fixe pas le budget. » Ce qui est ici est donc du côté du CLIENT :
+//   . `payload_kg`     — la charge qu'il FOURNIT (satellite, fret, instruments).
+//                        Là, la masse EST l'objectif. Elle exclut le véhicule,
+//                        la coque pressurisée, les ergols et les consommables,
+//                        qui sont le métier de l'architecte.
+//   . `crew_required`  — combien de personnes l'objectif demande sur place.
+//   . budget / délai / P(succès) — l'enveloppe, littéralement.
 struct Contract {
   double payload_kg{};
   double budget_musd{};
   double deadline_months{};
   double min_success_prob{};   // ce que le client exige
+  // ═══ L'ÉQUIPAGE EST UN OBJECTIF, PAS UNE DÉCISION D'ARCHITECTE ═══
+  // Il vit donc ici plutôt que dans une table indexée sur une chaîne de famille.
+  // Et la raison est le MODÈLE, pas une préférence : embarquer plus de monde
+  // n'apporte aucun avantage modélisé — ni la réparation ni la redondance
+  // médicale ne dépendent de l'effectif — et coûte de la coque, des vivres et du
+  // blindage. Un « choix » à une seule bonne réponse n'en est pas un. Le jour où
+  // l'effectif achètera quelque chose, il deviendra une décision et déménagera
+  // dans `MissionPlan`.
+  //
+  // ⚠ EN QUEUE DE STRUCTURE, ET CE N'EST PAS ARBITRAIRE : la liste de contrats
+  // du prototype (`app/jeu.cpp`) initialise `spec` de façon POSITIONNELLE
+  // (`{1200.0, 115.0, 18.0, 0.85}`). Insérer un `int` entre deux `double` y
+  // faisait échouer quinze agrégats sur un rétrécissement de conversion. Tout
+  // nouveau champ va donc EN QUEUE, ou alors ces quinze sites passent en
+  // initialisation nommée d'abord.
+  int    crew_required{0};
 };
 
 // --- LE PROGRAMME : ce que le joueur achete ----------------------------------
@@ -153,6 +218,10 @@ struct Assessment {
   bool fits_mass{false}, fits_budget{false}, fits_schedule{false}, fits_risk{false};
   bool ok{false};
   std::string why;
+  // LA CAMPAGNE DE MISE EN ORBITE [GDD 5.2 branche 1] : un seul tir dans le cas
+  // courant, une campagne assemblée quand la masse l'exige. Gardée pour
+  // l'affichage — le joueur doit voir ce que son architecture lui coûte en tirs.
+  PlanAssemblage assemblage{};
 };
 
 // COÛTS. Chaque ligne est une hypothese assumee, pas une constante de gameplay.
@@ -236,7 +305,9 @@ inline Assessment assess(const Contract& c, const Program& pr, int n_burns,
 // mur du mono-etage chimique (dv <~ ve*ln(1/frac_seche)) sur les missions lourdes.
 // assess_multistage(...,1) reproduit EXACTEMENT assess(...).
 inline Assessment assess_multistage(const Contract& c, const Program& pr, int n_burns,
-                                    double dv_nominal, double finite_loss, int n_stages) {
+                                    double dv_nominal, double finite_loss, int n_stages,
+                                    const LauncherFilter* dispo = nullptr,
+                                    const CapaciteAssemblage& assemblage = {}) {
   Assessment a;
   const auto& E = engines()[pr.engine_index];
   a.dv_design = dv_nominal + finite_loss + pr.dv_margin;
@@ -264,25 +335,80 @@ inline Assessment assess_multistage(const Contract& c, const Program& pr, int n_
   a.propellant_kg = prop; a.dry_kg = dry;
 
   // ---- 2) LE LANCEUR (pour la masse multi-etages) --------------------------
+  // ═══ UN LANCEUR PEUT DÉSORMAIS S'Y REPRENDRE À PLUSIEURS FOIS ═══
+  // [GDD 5.2 branche 1] L'assemblage en orbite ne CONTOURNE pas le plafond de
+  // masse : il l'échange contre du prix, du risque et du temps (Assemblage.hpp).
+  // Le meilleur lanceur n'est donc plus « le moins cher qui soulève » mais
+  // « celui dont la CAMPAGNE coûte le moins » — et une campagne de neuf tirs
+  // peut coûter plus cher qu'un seul gros.
+  auto campagne = [&](const Launcher& L) {
+    return planifier_assemblage(a.dry_kg + c.payload_kg, a.propellant_kg,
+                                L.payload_leo, L.reliability, assemblage);
+  };
+  PlanAssemblage plan;
   if (pr.launcher_index >= 0) {
-    if (launchers()[pr.launcher_index].payload_leo < a.m0_kg) {
-      a.why = "LE LANCEUR CHOISI NE SOULEVE PAS CETTE MASSE"; return a;
+    const auto& Lc = launchers()[pr.launcher_index];
+    if (!launcher_autorise(Lc, dispo)) {
+      a.why = "LE LANCEUR CHOISI N'EST PAS QUALIFIE : " + Lc.tech_id; return a;
     }
+    plan = campagne(Lc);
+    if (!plan.possible) { a.why = plan.why; return a; }
     a.launcher_index = pr.launcher_index;
   } else {
-    double best_cost = 1e300;
+    // ═══ ON N'ACHÈTE PAS UNE CAMPAGNE QUI NE PEUT PAS TENIR LE CONTRAT ═══
+    // Depuis l'assemblage, « le moins cher qui soulève » est devenu un mauvais
+    // conseil : deux tirs légers coûtent 13 M$ de moins qu'un lourd et rendent
+    // 0,843 au lieu de 0,980. Or `p_success = p_segment · p_moteur · … ≤
+    // p_segment` : une campagne dont le SEGMENT est déjà sous l'exigence du
+    // client est GARANTIE d'échouer, quoi qu'on fasse ensuite. L'écarter ne
+    // retire donc aucune option viable — c'est une déduction, pas un réglage.
+    // C'est aussi la raison réelle pour laquelle on construit un lanceur géant
+    // plutôt que d'empiler les tirs moyens quand un équipage est à bord.
+    double best_cost = 1e300, best_p = -1.0;
+    int idx_p = -1;
+    PlanAssemblage plan_p;
     for (std::size_t i = 0; i < launchers().size(); ++i) {
       const auto& L = launchers()[i];
-      if (L.payload_leo < a.m0_kg) continue;
-      if (L.cost_musd < best_cost) { best_cost = L.cost_musd; a.launcher_index = static_cast<int>(i); }
+      if (!launcher_autorise(L, dispo)) continue;
+      const PlanAssemblage pl = campagne(L);
+      if (!pl.possible) continue;
+      // Le repli : la campagne la PLUS SÛRE, gardée pour que le diagnostic porte
+      // sur la meilleure tentative et non sur la moins chère.
+      if (pl.p_segment > best_p) {
+        best_p = pl.p_segment; idx_p = static_cast<int>(i); plan_p = pl;
+      }
+      if (pl.p_segment < c.min_success_prob) continue;
+      const double cout = pl.n_lancements * L.cost_musd;
+      if (cout < best_cost) {
+        best_cost = cout; a.launcher_index = static_cast<int>(i); plan = pl;
+      }
     }
+    if (a.launcher_index < 0 && idx_p >= 0) { a.launcher_index = idx_p; plan = plan_p; }
   }
-  if (a.launcher_index < 0) { a.why = "AUCUN LANCEUR NE SOULEVE CETTE MASSE"; return a; }
+  if (a.launcher_index < 0) {
+    // ═══ LE REFUS NOMME CE QUI MANQUE ═══ (piège n°42) : « aucun lanceur » est
+    // une impasse ; « le lanceur qui le soulèverait existe, il n'est pas
+    // qualifié » est une DIRECTION. Deux situations que le joueur doit
+    // distinguer, parce qu'une seule des deux se résout en cherchant. Et depuis
+    // l'assemblage, une troisième existe : le lanceur EST qualifié, mais la
+    // campagne ne converge pas — c'est `PlanAssemblage::why` qui parle alors.
+    for (const auto& L : launchers())
+      if (!launcher_autorise(L, dispo) && campagne(L).possible) {
+        a.why = "LANCEUR NON QUALIFIE : RECHERCHER " + L.tech_id;
+        return a;
+      }
+    for (const auto& L : launchers())
+      if (launcher_autorise(L, dispo)) { a.why = campagne(L).why; break; }
+    if (a.why.empty()) a.why = "AUCUN LANCEUR NE SOULEVE CETTE MASSE";
+    return a;
+  }
+  a.assemblage = plan;
   a.fits_mass = true;
   const auto& L = launchers()[a.launcher_index];
 
   // ---- 3) ARGENT : moteur DEVELOPPE une fois, N unites ; etage fixe+seche/etage
-  a.cost_launcher = L.cost_musd;
+  // LA CAMPAGNE, PAS LE TIR : N lancements se paient N fois [GDD 5.2 branche 1].
+  a.cost_launcher = plan.n_lancements * L.cost_musd;
   a.cost_engine   = E.dev_cost_musd + ns * E.unit_cost_musd;
   a.cost_stage    = ns * COST_STAGE_FIXED + COST_PER_KG_DRY * a.dry_kg;
   a.cost_tracking = pr.tracking_musd;
@@ -291,8 +417,11 @@ inline Assessment assess_multistage(const Contract& c, const Program& pr, int n_
   a.cost_review   = pr.review ? COST_REVIEW : 0.0;
 
   // ---- 4) TEMPS ------------------------------------------------------------
+  // L'ASSEMBLAGE DURE, et ce temps se paie sur le calendrier du contrat : une
+  // campagne de neuf tirs à un mois d'intervalle, c'est huit mois de plus.
   a.schedule_months = std::max(E.lead_months, L.lead_months) + MONTHS_INTEGRATION
-                    + pr.tracking_days / 30.44;
+                    + pr.tracking_days / 30.44
+                    + plan.duree_jours / 30.44;
   a.cost_ops = COST_OPS_PER_MONTH * a.schedule_months;
   a.cost_total = a.cost_launcher + a.cost_engine + a.cost_stage + a.cost_tracking
                + a.cost_compute + a.cost_tests + a.cost_review + a.cost_ops;
@@ -300,7 +429,10 @@ inline Assessment assess_multistage(const Contract& c, const Program& pr, int n_
   a.fits_schedule = (a.schedule_months <= c.deadline_months);
 
   // ---- 5) RISQUE : ignitions totales inchangees, + SEPARATION par etage largue
-  a.p_launcher = L.reliability;
+  // LA MASSE S'ACHÈTE EN RISQUE : le segment de mise en orbite n'est plus un
+  // tir mais N tirs et N−1 amarrages, tous à réussir. C'est l'arbitrage central
+  // de l'assemblage, et il est exponentiel — neuf tirs à 0,98 rendent 0,83.
+  a.p_launcher = plan.p_segment;
   const double R_sep = 0.99;   // fiabilite par separation d'etage (modele DECLARE)
   a.p_engine   = std::pow(engine_reliability(E, pr.test_hours), n_burns)
                * std::pow(R_sep, ns - 1);
@@ -309,13 +441,22 @@ inline Assessment assess_multistage(const Contract& c, const Program& pr, int n_
 }
 
 inline void finalize(Assessment& a, const Contract& c, double p_physics) {
+  // ═══ UN ARRÊT PRÉCOCE N'EST PAS QUATRE ÉCHECS ═══ [GDD 4.1, piège n°42]
+  // TROUVÉ EN AUDITANT UNE CAPTURE. `assess` s'arrête net dès qu'aucun lanceur ne
+  // soulève la masse, et il DIT pourquoi (« AUCUN LANCEUR NE SOULEVE CETTE
+  // MASSE ») : à ce moment-là, le coût, le calendrier et la fiabilité n'ont pas
+  // été calculés du tout, ils valent zéro parce qu'on n'y est jamais arrivé.
+  // Reconstruire `why` à partir des quatre `fits_*` écrasait donc ce diagnostic
+  // précis par une liste de SYMPTÔMES — « MASSE BUDGET CALENDRIER RISQUE » — dont
+  // trois quarts étaient de l'ignorance déguisée en verdict. Un refus doit nommer
+  // ce qui manque, pas énumérer tout ce qu'on ignore.
+  if (!a.fits_mass) { a.ok = false; return; }   // `why` porte déjà la vraie cause
   a.p_physics = p_physics;
   a.p_success = a.p_launcher * a.p_engine * (1.0 - a.p_blunder) * a.p_physics;
   a.fits_risk = (a.p_success >= c.min_success_prob);
   a.ok = a.fits_mass && a.fits_budget && a.fits_schedule && a.fits_risk;
   if (a.ok) { a.why = "PROGRAMME VIABLE"; return; }
   a.why.clear();
-  if (!a.fits_mass)     a.why += "MASSE ";
   if (!a.fits_budget)   a.why += "BUDGET ";
   if (!a.fits_schedule) a.why += "CALENDRIER ";
   if (!a.fits_risk)     a.why += "RISQUE ";

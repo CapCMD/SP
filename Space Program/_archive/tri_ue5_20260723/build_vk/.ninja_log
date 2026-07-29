@@ -1,0 +1,138 @@
+# ninja log v7
+28	586	8060695082142523	CMakeFiles/astro_core.dir/astro_core/src/Elements.cpp.obj	ffefe8440902e7c8
+42	604	8060695082278325	CMakeFiles/astro_core.dir/astro_core/src/Kepler.cpp.obj	c265ad0a4173170d
+15	926	8061996914104799	CMakeFiles/spr_render.dir/render/src/Hud.cpp.obj	685f695236e97052
+35	774	8060695082214242	CMakeFiles/astro_core.dir/astro_core/src/Epoch.cpp.obj	80a8c419c9a70d27
+32	804	8060695082184251	CMakeFiles/astro_core.dir/astro_core/src/Ephemeris.cpp.obj	fb94c5758fbdc717
+28	714	8059023177060844	CMakeFiles/astro_core.dir/astro_core/src/Integrator.cpp.obj	8fe8cc149f763494
+45	820	8060695082308357	CMakeFiles/astro_core.dir/astro_core/src/Lambert.cpp.obj	958c8aa46fda7947
+65	728	8059023177457020	CMakeFiles/imgui_vk.dir/extern/imgui/backends/imgui_impl_vulkan.cpp.obj	9a48ef136d075fb
+25	873	8059023177019135	CMakeFiles/astro_core.dir/astro_core/src/Ias15.cpp.obj	d2c6e0c96f796a91
+69	183	8059767150115004	render_shaders/scene.frag.spv	b93b408a45136086
+69	183	8059767150115004	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/render_shaders/scene.frag.spv	b93b408a45136086
+53	184	8059140907440486	render_shaders/scene.vert.spv	222606032a7b0621
+53	184	8059140907440486	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/render_shaders/scene.vert.spv	222606032a7b0621
+21	327	8061071087404775	CMakeFiles/spr_render.dir/render/src/core/Camera.cpp.obj	e549ebcf1df0221f
+64	827	8060695082495905	CMakeFiles/spr_render.dir/render/src/bridge/DataBridge.cpp.obj	307adaafb2aaf0cf
+21	594	8061980579966559	CMakeFiles/spr_render.dir/render/src/RenderCore.cpp.obj	8a260c5496b363b4
+61	1420	8059023177415247	CMakeFiles/imgui_vk.dir/extern/imgui/backends/imgui_impl_glfw.cpp.obj	8ec803c29d0bf02a
+24	1312	8061980579991058	CMakeFiles/spr_render.dir/render/src/scene/RenderScene.cpp.obj	24cc9a7e87e8bd3f
+52	1786	8060695082384059	CMakeFiles/astro_core.dir/astro_core/src/Propagator.cpp.obj	cede34a832e1a9c
+49	1713	8060695082353963	CMakeFiles/astro_core.dir/astro_core/src/OrbitDetermination.cpp.obj	311dad8ca913dc1
+20	1167	8060715647488556	CMakeFiles/spr_render.dir/render/src/Window.cpp.obj	4aa58b8fef927c32
+14	696	8060738480665875	CMakeFiles/space_program_3d.dir/render/app/space_program_3d.cpp.obj	880fe3034018873
+39	2300	8060695082244247	CMakeFiles/astro_core.dir/astro_core/src/Fpl.cpp.obj	a50f4df4a7eb85d5
+54	2544	8059023177352381	CMakeFiles/imgui_vk.dir/extern/imgui/imgui_tables.cpp.obj	8d263eaad9dad044
+15	2436	8061951327817161	CMakeFiles/spr_render.dir/render/src/rhi/vulkan/VulkanDevice.cpp.obj	a12cdb585d85bdfa
+2415	2526	8061996938099575	libspr_render.a	f49a649b7b0db677
+56	2976	8060695082414063	CMakeFiles/astro_core.dir/astro_core/src/Session.cpp.obj	79797d3b57217e92
+2976	3075	8060695111622755	libastro_core.a	2659d69cb8521c2b
+51	3909	8059023177310951	CMakeFiles/imgui_vk.dir/extern/imgui/imgui_draw.cpp.obj	376c3235e21373fc
+58	5341	8059023177373571	CMakeFiles/imgui_vk.dir/extern/imgui/imgui_widgets.cpp.obj	40493a6c078a9857
+47	7366	8059023177269124	CMakeFiles/imgui_vk.dir/extern/imgui/imgui.cpp.obj	27e152c363a37f0d
+7366	7441	8059023250435736	libimgui_vk.a	61282e94f4c0adc4
+696	880	8060738487456858	space_program_3d.exe	b19c1180aa40f4f4
+13	220	8062453509863337	build.ninja	4fd629c728ef3f4
+13	220	8062453509833296	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/cmake_install.cmake	4fd629c728ef3f4
+13	220	8062453509843337	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/CTestTestfile.cmake	4fd629c728ef3f4
+42	174	8059140907313451	render_shaders/planet.vert.spv	43108e0371e53be9
+42	174	8059140907313451	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/render_shaders/planet.vert.spv	43108e0371e53be9
+27	140	8060922832125684	render_shaders/planet.frag.spv	63b88abc56cdb87f
+27	140	8060922832125684	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/render_shaders/planet.frag.spv	63b88abc56cdb87f
+59	188	8059140907475561	render_shaders/star.frag.spv	8be623071be8ddd6
+59	188	8059140907475561	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/render_shaders/star.frag.spv	8be623071be8ddd6
+32	148	8059172983992641	render_shaders/star.vert.spv	1403fb9c14c73335
+32	148	8059172983992641	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/render_shaders/star.vert.spv	1403fb9c14c73335
+22	113	8059179041447418	render_shaders/composite.frag.spv	537e29af8b652576
+22	113	8059179041447418	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/render_shaders/composite.frag.spv	537e29af8b652576
+27	114	8059179041457427	render_shaders/fullscreen.vert.spv	ee4fda744536ae30
+27	114	8059179041457427	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/render_shaders/fullscreen.vert.spv	ee4fda744536ae30
+27	123	8059374767983997	render_shaders/blur.frag.spv	5c41576b8b367581
+27	123	8059374767983997	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/render_shaders/blur.frag.spv	5c41576b8b367581
+32	127	8059374768014662	render_shaders/bright.frag.spv	cf72016f146be6c4
+32	127	8059374768014662	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/render_shaders/bright.frag.spv	cf72016f146be6c4
+22	4416	8061996914179871	CMakeFiles/solar_system_map.dir/render/app/solar_system_map.cpp.obj	9419ba6aa9d9a9ab
+19	2415	8061996914144779	CMakeFiles/spr_render.dir/render/src/asset/GlbTexture.cpp.obj	16cb28cde856d092
+4417	4650	8061996958121959	solar_system_map.exe	d926006c90a5b846
+25	141	8061071088540521	render_shaders/shell.frag.spv	99a3f85a3b9d480
+25	141	8061071088540521	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/render_shaders/shell.frag.spv	99a3f85a3b9d480
+60	168	8059878259113175	render_shaders/shell.vert.spv	e58a8d3a108e8553
+60	168	8059878259113175	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/render_shaders/shell.vert.spv	e58a8d3a108e8553
+67	187	8059980134698663	render_shaders/ring.vert.spv	3e191fe8832230fc
+67	187	8059980134698663	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/render_shaders/ring.vert.spv	3e191fe8832230fc
+60	188	8059980134698663	render_shaders/ring.frag.spv	c69808ca3a06ffec
+60	188	8059980134698663	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/render_shaders/ring.frag.spv	c69808ca3a06ffec
+14	2148	8060011835638073	CMakeFiles/test_astro_core.dir/tests/test_astro_core.cpp.obj	ed6cd728f1120e75
+2148	2239	8060011856977586	test_astro_core.exe	13558473394c92b2
+39	167	8061094152006106	render_shaders/mesh.frag.spv	64a7cd4115a981b3
+39	167	8061094152006106	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/render_shaders/mesh.frag.spv	64a7cd4115a981b3
+49	176	8061081492019914	render_shaders/mesh.vert.spv	29989768bbf2fbe9
+49	176	8061081492019914	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/render_shaders/mesh.vert.spv	29989768bbf2fbe9
+62	4446	8061756501872527	CMakeFiles/solar_system_map.dir/app/jeu.cpp.obj	6f22327e7f1a767a
+34	1907	8061758479814570	CMakeFiles/imgui_pile.dir/extern/imgui/backends/imgui_impl_opengl3.cpp.obj	6bd888d26e1da47b
+29	2347	8061758479774516	CMakeFiles/imgui_pile.dir/extern/imgui/backends/imgui_impl_glfw.cpp.obj	a2eb678aff186249
+23	2728	8061758479706887	CMakeFiles/imgui_pile.dir/extern/imgui/imgui_tables.cpp.obj	39dfba657a9fb392
+50	4190	8061758479981292	CMakeFiles/fenetre_jeu.dir/ui/jeu_main.cpp.obj	379333bbe1614eb6
+20	4329	8061758479676838	CMakeFiles/imgui_pile.dir/extern/imgui/imgui_draw.cpp.obj	af248e1987b5a6ab
+55	4490	8061758480021330	CMakeFiles/fenetre_jeu.dir/app/jeu.cpp.obj	c2bac132b2f8e98d
+39	4832	8061758479864740	CMakeFiles/imgui_pile.dir/extern/implot/implot.cpp.obj	35c2d1008049177d
+26	5387	8061758479738122	CMakeFiles/imgui_pile.dir/extern/imgui/imgui_widgets.cpp.obj	8e25c879f0c75e90
+15	8374	8061758479635144	CMakeFiles/imgui_pile.dir/extern/imgui/imgui.cpp.obj	936497ffe9e8dbf2
+43	43262	8061758479906173	CMakeFiles/imgui_pile.dir/extern/implot/implot_items.cpp.obj	df1b19c778729a39
+43262	43382	8061758912164183	libimgui_pile.a	34a1f2ff98f5f2c5
+43382	43619	8061758913359957	fenetre_jeu.exe	649b8a40d6dd2c04
+26	406	8062453509863337	build.ninja	4fd629c728ef3f4
+26	406	8062453509863337	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/cmake_install.cmake	4fd629c728ef3f4
+26	406	8062453509863337	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/CTestTestfile.cmake	4fd629c728ef3f4
+54	260	8062453512513391	render_shaders/blur.frag.spv	5c41576b8b367581
+54	260	8062453512513391	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/render_shaders/blur.frag.spv	5c41576b8b367581
+91	267	8062453512648666	render_shaders/mesh.vert.spv	29989768bbf2fbe9
+91	267	8062453512648666	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/render_shaders/mesh.vert.spv	29989768bbf2fbe9
+78	274	8062453512638665	render_shaders/fullscreen.vert.spv	ee4fda744536ae30
+78	274	8062453512638665	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/render_shaders/fullscreen.vert.spv	ee4fda744536ae30
+60	282	8062453512648666	render_shaders/bright.frag.spv	cf72016f146be6c4
+60	282	8062453512648666	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/render_shaders/bright.frag.spv	cf72016f146be6c4
+66	288	8062453512638665	render_shaders/composite.frag.spv	537e29af8b652576
+66	288	8062453512638665	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/render_shaders/composite.frag.spv	537e29af8b652576
+84	295	8062453512743843	render_shaders/mesh.frag.spv	64a7cd4115a981b3
+84	295	8062453512743843	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/render_shaders/mesh.frag.spv	64a7cd4115a981b3
+97	296	8062453512879001	render_shaders/planet.frag.spv	63b88abc56cdb87f
+97	296	8062453512879001	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/render_shaders/planet.frag.spv	63b88abc56cdb87f
+104	297	8062453512984195	render_shaders/planet.vert.spv	43108e0371e53be9
+104	297	8062453512984195	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/render_shaders/planet.vert.spv	43108e0371e53be9
+111	301	8062453513067023	render_shaders/ring.frag.spv	c69808ca3a06ffec
+111	301	8062453513067023	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/render_shaders/ring.frag.spv	c69808ca3a06ffec
+118	317	8062453513224100	render_shaders/ring.vert.spv	3e191fe8832230fc
+118	317	8062453513224100	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/render_shaders/ring.vert.spv	3e191fe8832230fc
+124	327	8062453513339254	render_shaders/scene.frag.spv	b93b408a45136086
+124	327	8062453513339254	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/render_shaders/scene.frag.spv	b93b408a45136086
+131	335	8062453513445327	render_shaders/scene.vert.spv	222606032a7b0621
+131	335	8062453513445327	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/render_shaders/scene.vert.spv	222606032a7b0621
+260	408	8062453514161087	render_shaders/shadow.vert.spv	3fcd3dddd8438412
+260	408	8062453514161087	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/render_shaders/shadow.vert.spv	3fcd3dddd8438412
+268	418	8062453514263664	render_shaders/shell.frag.spv	99a3f85a3b9d480
+268	418	8062453514263664	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/render_shaders/shell.frag.spv	99a3f85a3b9d480
+274	418	8062453514263664	render_shaders/shell.vert.spv	e58a8d3a108e8553
+274	418	8062453514263664	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/render_shaders/shell.vert.spv	e58a8d3a108e8553
+282	423	8062453514318691	render_shaders/star.frag.spv	8be623071be8ddd6
+282	423	8062453514318691	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/render_shaders/star.frag.spv	8be623071be8ddd6
+288	427	8062453514368757	render_shaders/star.vert.spv	1403fb9c14c73335
+288	427	8062453514368757	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/render_shaders/star.vert.spv	1403fb9c14c73335
+44	770	8062453510596689	CMakeFiles/spr_render.dir/render/src/core/Camera.cpp.obj	e549ebcf1df0221f
+41	939	8062453510566657	CMakeFiles/spr_render.dir/render/src/bridge/DataBridge.cpp.obj	307adaafb2aaf0cf
+38	1248	8062453510536655	CMakeFiles/spr_render.dir/render/src/RenderCore.cpp.obj	8a260c5496b363b4
+34	1654	8062453510506083	CMakeFiles/spr_render.dir/render/src/Hud.cpp.obj	685f695236e97052
+50	2022	8062453510661826	CMakeFiles/spr_render.dir/render/src/scene/RenderScene.cpp.obj	24cc9a7e87e8bd3f
+47	3756	8062453510631785	CMakeFiles/spr_render.dir/render/src/rhi/vulkan/VulkanDevice.cpp.obj	a12cdb585d85bdfa
+3756	3884	8062453547723236	libspr_render.a	f49a649b7b0db677
+427	5557	8062453514433862	CMakeFiles/solar_system_map.dir/render/app/solar_system_map.cpp.obj	9419ba6aa9d9a9ab
+5557	5892	8062453565726133	solar_system_map.exe	d926006c90a5b846
+17	1216	8062456272579313	CMakeFiles/spr_render.dir/render/src/scene/RenderScene.cpp.obj	24cc9a7e87e8bd3f
+1217	1323	8062456284564206	libspr_render.a	f49a649b7b0db677
+1323	1558	8062456285635547	solar_system_map.exe	d926006c90a5b846
+26	126	8062458244377774	render_shaders/shadow.vert.spv	3fcd3dddd8438412
+26	126	8062458244377774	C:/Users/Cap/Documents/Etudes/Space Program/Space Program/build_vk/render_shaders/shadow.vert.spv	3fcd3dddd8438412
+22	1281	8062458243396972	CMakeFiles/spr_render.dir/render/src/scene/RenderScene.cpp.obj	24cc9a7e87e8bd3f
+19	2366	8062458243357266	CMakeFiles/spr_render.dir/render/src/rhi/vulkan/VulkanDevice.cpp.obj	a12cdb585d85bdfa
+2366	2471	8062458266827792	libspr_render.a	f49a649b7b0db677
+2471	2703	8062458267880778	solar_system_map.exe	d926006c90a5b846

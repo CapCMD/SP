@@ -1297,10 +1297,32 @@ void SSPPoste::Tick(const FGeometry& AllottedGeometry, const double InCurrentTim
 	const double H = AllottedGeometry.GetLocalSize().Y;
 	if (H > 1.0) Echelle = static_cast<float>(H / 720.0);
 	// Le contenu suit le poste ouvert. On reconstruit au CHANGEMENT de poste
-	// (l'ouverture, la fermeture), pas à chaque frame — les actions internes
-	// appellent Rebuild() elles-mêmes quand elles modifient le modèle.
+	// (l'ouverture, la fermeture) — les actions internes appellent Rebuild()
+	// elles-mêmes quand elles modifient le modèle.
 	const int32 P = Session ? Session->poste_ouvert : -1;
-	if (P != PosteAffiche) { PosteAffiche = P; Rebuild(); }
+	if (P != PosteAffiche) { PosteAffiche = P; MoisAffiche = -1.0; Rebuild(); return; }
+
+	// ═══ ...ET QUAND LE CALENDRIER A BOUGÉ ═══ [GDD 9.1, 14.2]
+	// « Pas à chaque frame » était juste TANT QUE RIEN NE BOUGEAIT SANS CLIC.
+	// Depuis que le temps COULE, un poste affiche des grandeurs que le monde
+	// change tout seul : l'arrivée qui se rapproche, les vivres qui se
+	// consomment, la dose qui monte. Figé, il MENT — trouvé en capture, où le
+	// poste annonçait encore 897 jours d'autonomie et « arrivée dans 322 jours »
+	// après quatre mois de vol, alors que le modèle, lui, était à 784 jours.
+	// C'est [GDD 9.1] qui l'exige : on ne « surveille » pas une valeur figée.
+	//
+	// RYTHME BORNÉ à 5 Hz : une télémétrie n'a pas besoin de la fréquence
+	// d'image, et reconstruire une quarantaine de widgets par frame serait payer
+	// cher un chiffre que l'œil ne suit pas. Rien ne se reconstruit quand le
+	// temps est en pause — l'état par défaut d'une partie.
+	if (P < 0 || !Session || !Session->jeu.agence.creee) return;
+	const double Mois = Session->jeu.agence.mois;
+	if (Mois != MoisAffiche && InCurrentTime - DernierRefresh > 0.2)
+	{
+		MoisAffiche = Mois;
+		DernierRefresh = InCurrentTime;
+		Rebuild();
+	}
 }
 
 void SSPPoste::Rebuild()
@@ -1450,6 +1472,71 @@ TSharedRef<SWidget> SSPPoste::BuildAgence()
 			               return FReply::Handled();
 		               })) ]
 	];
+
+	// ═══ LE STOCK D'ANTIMATIÈRE [GDD 5.12.12, 19.3] ═══
+	// N'apparaît QUE si la filière est qualifiée : afficher une ligne à zéro
+	// pendant toute la partie ferait du bruit, pas de l'information. Une fois
+	// visible, elle dit les trois choses qui décident de la fin de jeu — ce qu'on
+	// a, où la fuite plafonne le stock, et l'écart à ce qu'un vol relativiste
+	// exigerait. LE VERDICT EST AFFICHÉ, pas caché dans un modèle : c'est la
+	// différence entre un cul-de-sac conçu et un cul-de-sac subi.
+	if (const fen::tech::TechNode* NAm = G.tree.find("antimatiere"))
+	if (NAm->operational())
+	{
+		const auto& Prod = G.antimatiere.prod;
+		const double Eq = G.antimatiere.equilibrium_g();
+		// LA CIBLE DE RÉFÉRENCE EST UN VOL HABITÉ, ALLER-RETOUR [GDD 3.4, 6.7.4].
+		// « Le relativisme n'a d'intérêt que pour les vols habités » — une dilatation
+		// que personne ne vit n'a aucune conséquence de jeu. Le nombre de poussées
+		// vient donc de `CALIB_BURNS` (quatre) et non de 1 : afficher l'aller simple
+		// annonçait une cible **26 fois trop basse**, donc « ATTEINT » bien avant que
+		// le vol soit réellement payé.
+		const double Cible = fen::rel::antimatter_needed_g(
+			fen::rel::AntimatterProduction::CALIB_DRY_MASS_KG,
+			fen::rel::AntimatterProduction::CALIB_TARGET_BETA,
+			fen::rel::AntimatterProduction::CALIB_BURNS);
+		const bool bHors = G.antimatiere.hors_atteinte(Cible);
+		Col->AddSlot().AutoHeight().Padding(0, 6, 0, 2)
+		[ Txt(TEXT("ANTIMATIERE"), 12.0f, SRGB(200, 150, 255)) ];
+		Col->AddSlot().AutoHeight().Padding(6, 1)
+		[ LigneKV(TEXT("STOCK CONFINE"),
+		          FString::Printf(TEXT("%.3e g  /  %.1e g de capacite"),
+		                          G.antimatiere.grams, Prod.confinement_capacity_g)) ];
+		// LE DÉBIT DIT MAINTENANT D'OÙ IL VIENT. Il se lisait « marge Novellus » —
+		// et c'était vrai, ce qui était le défaut : la station n'a rien à voir avec
+		// une usine à antimatière [GDD 5.12.12]. Rendement ET puissance sont
+		// affichés parce que ce sont les deux seuls leviers, et qu'ils sont dans
+		// deux branches différentes.
+		Col->AddSlot().AutoHeight().Padding(6, 1)
+		[ LigneKV(TEXT("DEBIT  (usine, branche 6)"),
+		          FString::Printf(TEXT("%.3e g/an   %.0e W a rendement %.0e"),
+		                          Prod.rate_g_yr(), Prod.plant_power_w,
+		                          Prod.production_efficiency)) ];
+		// « Plafonné par la fuite » n'est PAS « plafonné par le réservoir » : le
+		// joueur qui agrandit son confinement sans rien changer d'autre doit
+		// comprendre pourquoi il ne gagne rien.
+		Col->AddSlot().AutoHeight().Padding(6, 1)
+		[ LigneKV(TEXT("PLAFOND REEL"),
+		          FString::Printf(TEXT("%.3e g  (%s)"), Eq,
+		                          G.antimatiere.borne_par_la_fuite()
+		                              ? TEXT("borne par la fuite") : TEXT("borne par le confinement")),
+		          SRGB(255, 190, 90)) ];
+		// TROIS VERDICTS, PAS DEUX. « Hors d'atteinte », « dans N ans » et « atteint »
+		// sont trois états distincts, et le troisième s'affichait « 0 ans » — ce qui
+		// se lit « c'est instantané » alors que cela veut dire « c'est fait ». Le
+		// stock couvre déjà la cible : le vol relativiste est PAYÉ, il ne reste qu'à
+		// le concevoir [GDD 3.1].
+		const bool bAtteint = !bHors && G.antimatiere.grams >= Cible;
+		Col->AddSlot().AutoHeight().Padding(6, 1)
+		[ LigneKV(TEXT("VOL HABITE b=0,3 (aller-retour)"),
+		          bHors
+		              ? FString::Printf(TEXT("%.2e g requis - HORS D'ATTEINTE"), Cible)
+		          : bAtteint
+		              ? FString::Printf(TEXT("%.2e g requis - ATTEINT"), Cible)
+		              : FString::Printf(TEXT("%.2e g requis - %.0f ans"), Cible,
+		                                G.antimatiere.years_to_reach(Cible)),
+		          bHors ? SRGB(242, 90, 80) : ColVert) ];
+	}
 
 	// l'arbre, branche par branche, dans une zone déroulante
 	TSharedRef<SScrollBox> Scroll = SNew(SScrollBox);
@@ -2158,6 +2245,67 @@ TSharedRef<SWidget> SSPPoste::BuildCodeVol()
 	return FramePoste(D, Col);
 }
 
+// ═══ CE QUI EST TOMBÉ EN PANNE, ET CE QU'ON PEUT Y FAIRE ═══ [GDD 9.5, 9.1]
+// « Diagnostics / réparations » : c'est la seule ligne du chapitre 9 qui demande
+// une ACTION du joueur à bord. Une avarie qu'on ne pourrait que regarder serait
+// un bandeau d'ambiance ; ici elle coûte des vivres CHAQUE JOUR, et la réparer
+// arrête l'hémorragie. D'où l'affichage du coût à côté du bouton : sans lui,
+// réparer serait un geste de confort au lieu d'un arbitrage.
+void SSPPoste::AjouterAvaries(const TSharedRef<SVerticalBox>& Col,
+                              fen::app::Session& Se, fen::game::GameState& G)
+{
+	const double Now = G.clock.now_days();
+	const auto Eff = fen::mission::effets_avaries(G.avaries, Now);
+	if (Eff.n_actives <= 0) return;
+
+	Col->AddSlot().AutoHeight().Padding(0, 0, 0, 1)
+	[ Txt(FString::Printf(TEXT("AVARIES EN COURS (%d)"), Eff.n_actives),
+	      11.0f, SRGB(242, 90, 80)) ];
+	if (Eff.recup_eau_restante < 1.0 || Eff.recup_o2_restante < 1.0)
+		Col->AddSlot().AutoHeight().Padding(12, 0)
+		[ Txt(FString::Printf(TEXT("boucles degradees : eau %.0f %%  O2 %.0f %% du nominal"),
+		                      Eff.recup_eau_restante * 100.0, Eff.recup_o2_restante * 100.0),
+		      9.0f, SRGB(255, 190, 90), 30) ];
+	if (Eff.fuite_o2_kg_j > 0.0)
+		Col->AddSlot().AutoHeight().Padding(12, 0)
+		[ Txt(FString::Printf(TEXT("fuite : %.2f kg d air et %.2f kg d eau par jour"),
+		                      Eff.fuite_o2_kg_j, Eff.fuite_eau_kg_j),
+		      9.0f, SRGB(255, 190, 90), 30) ];
+	if (Eff.sol_injoignable)
+		Col->AddSlot().AutoHeight().Padding(12, 0)
+		[ Txt(TEXT("le sol est injoignable — plus de commande depuis la Terre"),
+		      9.0f, SRGB(255, 190, 90), 30) ];
+
+	const fen::mission::CapaciteBord Cap = Se.capacite_bord();
+	for (std::size_t k = 0; k < G.avaries.size(); ++k)
+	{
+		const fen::mission::Avarie& A = G.avaries[k];
+		if (!A.active(Now)) continue;
+		const bool EnCours = A.en_reparation(Now);
+		const FString Nom = FString::Printf(TEXT("%hs  (gravite %.0f %%)"),
+		                                    fen::mission::event_name(A.kind), A.gravite01 * 100.0);
+		Col->AddSlot().AutoHeight().Padding(12, 1)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().FillWidth(1.0f).VAlign(VAlign_Center)
+			[ Txt(Nom, 10.0f, EnCours ? SRGB(255, 190, 90) : ColTexte, 44) ]
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+			[ EnCours
+				? Txt(FString::Printf(TEXT("reparation : %.1f j"), A.fin_reparation_days - Now),
+				      9.0f, SRGB(255, 190, 90), 0)
+				: (fen::mission::reparable(A.kind, Cap)
+					? BoutonMini(TEXT("REPARER"), FOnClicked::CreateLambda([this, k]() {
+						Session->reparer_avarie(k); Rebuild(); return FReply::Handled(); }))
+					: Txt(TEXT("hors capacite"), 9.0f, SRGB(242, 90, 80), 0)) ]
+		];
+	}
+	// LE MOTIF DU REFUS NOMME LA TECHNO MANQUANTE (piège n°42) : sans lui,
+	// « hors capacité » serait une impasse au lieu d'un objectif de recherche.
+	if (!Se.dernier_refus_reparation.empty())
+		Col->AddSlot().AutoHeight().Padding(12, 0, 0, 2)
+		[ Txt(FString(Se.dernier_refus_reparation.c_str()), 9.0f, SRGB(242, 90, 80), 44) ];
+}
+
 TSharedRef<SWidget> SSPPoste::BuildControle()
 {
 	int n = 0; const fen::app::PosteDef* defs = fen::app::postes_def(n);
@@ -2190,6 +2338,19 @@ TSharedRef<SWidget> SSPPoste::BuildControle()
 	}
 
 	using St = fen::mission::MissionState;
+	// ═══ CE QUI EST EN PANNE PASSE AVANT TOUT LE RESTE ═══ [GDD 9.5, 9.1]
+	// EN TÊTE DU POSTE, et c'est un choix d'ergonomie payé en capture : placées
+	// après le bilan de viabilité et la vie à bord, les avaries tombaient sous la
+	// ligne de flottaison de la zone déroulante. Une alarme qu'il faut aller
+	// chercher n'est pas une alarme — et le bilan de viabilité, lui, est une
+	// préoccupation de CONCEPTION, pas de conduite.
+	if (Se.jeu.ares.initialisee())
+	{
+		fen::game::GameState& GA = *Se.jeu.ares.etat;
+		if (GA.lived.active && GA.lived.mission_id == mc->contract.id)
+			AjouterAvaries(Col, Se, GA);
+	}
+
 	Col->AddSlot().AutoHeight().Padding(0, 0, 0, 3)
 	[ LigneKV(TEXT("MISSION"), FString(mc->contract.title.c_str()), SRGB(255, 220, 120)) ];
 	Col->AddSlot().AutoHeight().Padding(0, 0, 0, 3)
@@ -2611,6 +2772,85 @@ TSharedRef<SWidget> SSPPoste::BuildControle()
 		+ SHorizontalBox::Slot().FillWidth(1.0f).HAlign(HAlign_Right).VAlign(VAlign_Center)
 		[ Txt(TEXT("provisionnee en ergols"), 9.0f, ColTexteFaible, 30) ]
 	];
+	// ═══ BLINDAGE — L'ARBITRAGE MASSE / PROTECTION / MISSION ═══ [GDD 6.6]
+	// Seulement pour un vol HABITÉ : il n'y a pas d'équipage à protéger ailleurs,
+	// et un curseur qui ne sert à rien apprend une fausse leçon. `env/Radiation`
+	// existait depuis toujours sans aucun consommateur — [GDD 7.7] déclare
+	// l'environnement « acteur de mission », il n'était que décor.
+	//
+	// LA LEÇON EST DANS LES CHIFFRES, pas dans un texte : doubler la masse au
+	// décollage n'achète qu'une dizaine de pour cent de dose en moins, parce que
+	// le GCR ne se blinde quasiment pas (secondaires de spallation). Le joueur
+	// doit pouvoir le CONSTATER — d'où l'affichage de la masse à côté du réglage.
+	if (mc->contract.crewed)
+	{
+		const int NCrew = mc->contract.terms.crew_required;   // l'objectif d'ARES
+		// ═══ COMBIEN DE VOLUME PAR PERSONNE ═══ [GDD 3.1] — la première décision
+		// d'architecte, et la plus lourde de conséquences. « ARES dit : on doit
+		// aller là pour faire ça » ; c'est ICI qu'on décide comment loger un
+		// équipage. Serrer l'habitat allège la coque ET la surface à blinder —
+		// mesuré : 25 → 15 m³/personne fait passer une croisière martienne de
+		// 131 t à 100 t au décollage. Ce n'est plus un forfait du contrat.
+		// N'apparaît que si le véhicule EST le domicile : un vol LEO s'amarre à
+		// une station, il n'emporte pas sa maison.
+		if (P.crew_round_trip_days > 0.0)
+		{
+			Col->AddSlot().AutoHeight().Padding(6, 1)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)[ Txt(TEXT("VOLUME PAR PERSONNE"), 10.0f, ColTexte) ]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(6, 0, 2, 0)
+				[ BoutonMini(TEXT("-"), FOnClicked::CreateLambda([this, &P]() {
+					P.volume_par_personne_m3 = FMath::Max(10.0, P.volume_par_personne_m3 - 5.0);
+					Session->evaluer_plan(); Rebuild(); return FReply::Handled(); })) ]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+				[ SNew(SBox).WidthOverride(70.0f)[ Txt(FString::Printf(TEXT("%.0f m3"), P.volume_par_personne_m3), 10.0f, SRGB(140, 179, 255), 0) ] ]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+				[ BoutonMini(TEXT("+"), FOnClicked::CreateLambda([this, &P]() {
+					P.volume_par_personne_m3 += 5.0;
+					Session->evaluer_plan(); Rebuild(); return FReply::Handled(); })) ]
+				+ SHorizontalBox::Slot().FillWidth(1.0f).HAlign(HAlign_Right).VAlign(VAlign_Center)
+				[ Txt(FString::Printf(TEXT("habitat %.1f t  (%d a bord)"),
+				                      P.masse_habitat_kg_ / 1000.0, NCrew), 9.0f, ColTexteFaible, 30) ]
+			];
+		}
+		Col->AddSlot().AutoHeight().Padding(6, 1)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)[ Txt(TEXT("BLINDAGE EQUIPAGE"), 10.0f, ColTexte) ]
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(6, 0, 2, 0)
+			[ BoutonMini(TEXT("-"), FOnClicked::CreateLambda([this, &P]() {
+				P.blindage.areal_density_gcm2 = FMath::Max(0.0, P.blindage.areal_density_gcm2 - 2.5);
+				Rebuild(); return FReply::Handled(); })) ]
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+			[ SNew(SBox).WidthOverride(70.0f)[ Txt(FString::Printf(TEXT("%.1f g/cm2"), P.blindage.areal_density_gcm2), 10.0f, SRGB(140, 179, 255), 0) ] ]
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+			[ BoutonMini(TEXT("+"), FOnClicked::CreateLambda([this, &P]() {
+				P.blindage.areal_density_gcm2 += 2.5; Rebuild(); return FReply::Handled(); })) ]
+			+ SHorizontalBox::Slot().FillWidth(1.0f).HAlign(HAlign_Right).VAlign(VAlign_Center)
+			[ Txt(FString::Printf(TEXT("%.1f t sur %.0f m2"),
+			                      fen::mission::masse_blindage_kg(NCrew, P.blindage.areal_density_gcm2,
+			                                                      P.volume_par_personne_m3) / 1000.0,
+			                      fen::mission::surface_habitat_m2(NCrew, P.volume_par_personne_m3)),
+			      9.0f, ColTexteFaible, 30) ]
+		];
+		// LA DOSE QUE CE CHOIX PROMET, sur la durée réelle de la mission. C'est
+		// le seul chiffre qui rende le curseur ci-dessus décidable — sinon le
+		// joueur achèterait des tonnes à l'aveugle.
+		{
+			const double Jours = fen::mission::crew_occupation_days(
+				mc->contract.family, P.crew_round_trip_days);
+			const double Sv = fen::mission::dose_chronique_sv(
+				Jours, fen::mission::FlightPhase::TransferCruise, P.blindage, 0.0);
+			const bool Depasse = Sv >= fen::env::CAREER_DOSE_LIMIT_SV;
+			Col->AddSlot().AutoHeight().Padding(6, 1)
+			[ LigneKV(TEXT("DOSE PREVUE (pire cas)"),
+			          FString::Printf(TEXT("%.2f Sv  /  %.1f Sv de carriere"),
+			                          Sv, fen::env::CAREER_DOSE_LIMIT_SV),
+			          Depasse ? SRGB(242, 90, 80) : ColVert) ];
+		}
+	}
+
 	// POURSUITE — même histoire que la marge : `tracking_days` était acheté et
 	// facturé depuis le premier jour SANS RIEN FAIRE, donc sans bouton. Depuis
 	// qu'il commande la qualité de la solution de navigation [GDD 8.6], c'est le
@@ -2668,12 +2908,79 @@ TSharedRef<SWidget> SSPPoste::BuildControle()
 	                      fen::mission::is_critical_phase(fen::mission::flight_phase_of(
 	                          *mc, Se.jeu.ares.initialisee() ? Se.jeu.ares.etat->clock.now_days() : 0.0));
 	const fen::mission::Assessment& A = P.assessment;
-	if (!bConsole) {
+	// ═══ UNE FOIS PARTI, LE BILAN EST DE L'HISTOIRE ═══ [GDD 4.1]
+	// Même raisonnement que le mode console ci-dessus, étendu à TOUT le vol : la
+	// viabilité est une décision de CONCEPTION, gelée au feu vert. En vol, aucune
+	// de ses sept lignes n'est actionnable — alors que la télémétrie vitale, elle,
+	// l'est à chaque instant. Les laisser occuper le haut du poste poussait
+	// « VIE À BORD » sous la ligne de flottaison du défilement : dose, boucles et
+	// écart d'horloge n'étaient plus contrôlables par aucune capture, et c'est
+	// exactement la condition dans laquelle le piège n°74 (postes figés) avait
+	// prospéré pendant des semaines. On garde donc UNE ligne — ce qu'on a
+	// emporté et sous quel verdict — et on rend la place à ce qui vit.
+	const bool bBilanReduit = bEnVol && !bConsole && P.evaluated;
+	if (bBilanReduit)
+	{
+		Col->AddSlot().AutoHeight().Padding(0, 6, 0, 2)
+		[ LigneKV(TEXT("ARCHITECTURE EMPORTEE"),
+		          A.assemblage.n_lancements > 1
+		              ? FString::Printf(TEXT("%.0f t en %d lancements - %s"),
+		                                A.m0_kg / 1000.0, A.assemblage.n_lancements,
+		                                A.ok ? TEXT("viable au depart") : *FString(A.why.c_str()))
+		              : FString::Printf(TEXT("%.0f t en un lancement - %s"),
+		                                A.m0_kg / 1000.0,
+		                                A.ok ? TEXT("viable au depart") : *FString(A.why.c_str())),
+		          ColTexteFaible) ];
+	}
+	if (!bConsole && !bBilanReduit) {
 	Col->AddSlot().AutoHeight().Padding(0, 6, 0, 2)
 	[ Txt(TEXT("BILAN DE VIABILITE"), 10.0f, ColTexteFaible, 90) ];
+	// ═══ « PAS ENCORE ÉVALUÉ » N'EST PAS « RATÉ SUR LES QUATRE AXES » ═══
+	// TROUVÉ EN AUDITANT LA CAPTURE, une fois les termes du contrat réparés.
+	// `Assessment` naît avec ses quatre `fits_*` à false et ses chiffres à zéro ;
+	// le poste les affichait tels quels, si bien qu'une mission fraîchement
+	// acceptée — donc AVANT tout passage au poste CONCEPTION, ce qui est l'ordre
+	// normal de la boucle [GDD 4.1] — s'annonçait « COUT 0 / 1200 M EUR,
+	// P(SUCCES) 0,0 %, VERROU : MASSE BUDGET CALENDRIER RISQUE ». Le joueur lit
+	// une catastrophe là où il n'y a qu'un travail pas encore fait.
+	// `MissionPlan::evaluated` existait exactement pour ça, et PERSONNE ne le
+	// lisait — même famille de défaut que les modèles sans consommateur.
+	if (!P.evaluated)
+	{
+		Col->AddSlot().AutoHeight().Padding(6, 2)
+		[ Txt(TEXT("CONCEPTION NON EVALUEE"), 10.0f, SRGB(255, 190, 90), 40) ];
+		Col->AddSlot().AutoHeight().Padding(6, 0, 0, 3)
+		[ Txt(TEXT("Choisir moteur, lanceur et marges au poste CONCEPTION : le bilan s'ecrit la."),
+		      9.0f, ColTexteFaible, 20) ];
+	}
+	else {
 	Col->AddSlot().AutoHeight().Padding(6, 1)
 	[ LigneKV(TEXT("MASSE AU DECOLLAGE"), FString::Printf(TEXT("%.0f kg"), A.m0_kg),
 	          A.fits_mass ? ColVert : SRGB(242, 90, 80)) ];
+	// ═══ ON N'AFFICHE PAS UN ZÉRO QU'ON N'A JAMAIS CALCULÉ ═══
+	// Quand la masse bloque, `assess` s'arrête là : coût, calendrier et
+	// fiabilité ne SONT PAS des échecs, ils sont inconnus. Les peindre en rouge
+	// à zéro faisait passer une seule cause pour quatre, et cachait la seule
+	// information utile — laquelle des deux masses reprendre.
+	if (A.fits_mass) {
+	// ═══ LA CAMPAGNE DE MISE EN ORBITE [GDD 5.2 branche 1] ═══
+	// N'apparaît QUE si la masse a réellement demandé un assemblage : afficher
+	// « 1 lancement » sur chaque vol serait du bruit. Quand elle apparaît, elle
+	// dit les TROIS choses que l'assemblage coûte — des tirs, du temps, et de la
+	// fiabilité — parce que c'est un arbitrage et non un contournement.
+	if (A.assemblage.n_lancements > 1)
+	{
+		Col->AddSlot().AutoHeight().Padding(6, 1)
+		[ LigneKV(TEXT("ASSEMBLAGE EN ORBITE"),
+		          FString::Printf(TEXT("%d lancements sur %.0f jours"),
+		                          A.assemblage.n_lancements, A.assemblage.duree_jours),
+		          SRGB(255, 190, 90)) ];
+		Col->AddSlot().AutoHeight().Padding(6, 1)
+		[ LigneKV(TEXT("SEGMENT DE MISE EN ORBITE"),
+		          FString::Printf(TEXT("P = %.3f  (%.1f t d'ergols evapores)"),
+		                          A.p_launcher, A.assemblage.ergols_evapores_kg / 1000.0),
+		          A.p_launcher >= 0.95 ? ColVert : SRGB(255, 190, 90)) ];
+	}
 	Col->AddSlot().AutoHeight().Padding(6, 1)
 	[ LigneKV(TEXT("COUT PROGRAMME"), FString::Printf(TEXT("%.0f / %.0f M EUR"), A.cost_total, mc->contract.terms.budget_musd),
 	          A.fits_budget ? ColVert : SRGB(242, 90, 80)) ];
@@ -2683,9 +2990,15 @@ TSharedRef<SWidget> SSPPoste::BuildControle()
 	Col->AddSlot().AutoHeight().Padding(6, 1)
 	[ LigneKV(TEXT("P(SUCCES)"), FString::Printf(TEXT("%.1f %% / %.0f %% exige"), 100.0 * A.p_success, 100.0 * mc->contract.terms.min_success_prob),
 	          A.fits_risk ? ColVert : SRGB(242, 90, 80)) ];
+	} else {
+	Col->AddSlot().AutoHeight().Padding(6, 1)
+	[ Txt(TEXT("cout, calendrier et fiabilite NON EVALUES : l'etude s'arrete a la masse"),
+	      9.0f, ColTexteFaible, 20) ];
+	}
 	Col->AddSlot().AutoHeight().Padding(6, 3)
 	[ Txt(A.ok ? FString(TEXT("PROGRAMME VIABLE")) : (FString(TEXT("VERROU : ")) + FString(A.why.c_str())),
 	      10.0f, A.ok ? ColVert : SRGB(242, 90, 80), 40) ];
+	}   // fin du bilan CHIFFRÉ (plan évalué)
 
 	}   // fin du BILAN (masque en console de vol)
 
@@ -2729,7 +3042,143 @@ TSharedRef<SWidget> SSPPoste::BuildControle()
 		}
 	}
 
-	Col->AddSlot().FillHeight(1.0f)[ SNew(SSpacer) ];
+	// ═══ LA MISSION VÉCUE [GDD 9, décision 18] ═══
+	// « Vol habité vécu INCLUS. » Le modèle savait tout faire — provisionner les
+	// vivres, geler l'agence, écrire la reconstitution d'absence — et rien ne
+	// menait à cet état : `try_embark` n'avait aucun appelant. C'est ici que le
+	// joueur monte à bord, et c'est ici qu'il voit ce qu'il lui reste à respirer.
+	if (Se.jeu.ares.initialisee())
+	{
+		fen::game::GameState& GV = *Se.jeu.ares.etat;
+
+		if (GV.lived.active && GV.lived.mission_id == mc->contract.id)
+		{
+			Col->AddSlot().AutoHeight().Padding(0, 6, 0, 2)
+			[ Txt(TEXT("VIE A BORD"), 12.0f, SRGB(120, 210, 255)) ];
+
+			const double Jours = GV.lived.days_left();
+			// LE SEUL CHIFFRE QUI COMPTE VRAIMENT [GDD 9.1] : combien de temps
+			// l'équipage tient au rythme courant. Rouge quand il descend sous le
+			// délai d'un retour — l'ordre de grandeur d'un transit, pas un seuil
+			// d'affichage.
+			const bool Critique = Jours < 30.0;
+			Col->AddSlot().AutoHeight().Padding(6, 1)
+			[ LigneKV(TEXT("AUTONOMIE RESTANTE"),
+			          FString::Printf(TEXT("%.1f jours  (%d a bord)"), Jours, GV.lived.n_crew),
+			          Critique ? SRGB(242, 90, 80) : ColVert) ];
+			Col->AddSlot().AutoHeight().Padding(6, 1)
+			[ LigneKV(TEXT("OXYGENE / EAU"),
+			          FString::Printf(TEXT("%.0f kg  /  %.0f kg"),
+			                          GV.lived.vitals.o2_kg, GV.lived.vitals.water_kg)) ];
+			Col->AddSlot().AutoHeight().Padding(6, 1)
+			[ LigneKV(TEXT("VIVRES / EPURATION CO2"),
+			          FString::Printf(TEXT("%.0f kg  /  %.0f kg"),
+			                          GV.lived.vitals.food_kg,
+			                          GV.lived.vitals.co2_scrub_capacity_kg)) ];
+			// LE RECYCLAGE EST UN FAIT DU VOL, pas une case de menu : il vient de
+			// la branche 4 au moment de l'embarquement [GDD 5.10].
+			Col->AddSlot().AutoHeight().Padding(6, 1)
+			[ LigneKV(TEXT("BOUCLES DE RECYCLAGE"),
+			          FString::Printf(TEXT("eau %.0f %%   O2 %.0f %%"),
+			                          GV.lived.loops.water_recovery * 100.0,
+			                          GV.lived.loops.o2_recovery * 100.0)) ];
+			// ═══ LE SECOND CONSOMMABLE, CELUI QUI NE SE RECHARGE PAS ═══ [GDD 6.6]
+			// Les vivres se comptent en jours restants ; la dose, elle, se compte
+			// en fraction de carrière DÉFINITIVEMENT dépensée. Les deux lignes se
+			// suivent exprès : c'est le même équipage, et ce sont ses deux
+			// horloges.
+			{
+				const auto& D = GV.dose_architecte;
+				const double Frac = D.career_sv / fen::env::CAREER_DOSE_LIMIT_SV;
+				Col->AddSlot().AutoHeight().Padding(6, 1)
+				[ LigneKV(TEXT("DOSE MISSION"),
+				          FString::Printf(TEXT("%.3f Sv  (blindage %.1f g/cm2)"),
+				                          D.mission_sv, GV.lived.blindage.areal_density_gcm2)) ];
+				Col->AddSlot().AutoHeight().Padding(6, 1)
+				[ LigneKV(TEXT("DOSE DE CARRIERE"),
+				          FString::Printf(TEXT("%.3f Sv  /  %.1f Sv  (%.0f %%)"),
+				                          D.career_sv, fen::env::CAREER_DOSE_LIMIT_SV, Frac * 100.0),
+				          Frac >= 1.0 ? SRGB(242, 90, 80)
+				                      : (Frac > 0.75 ? SRGB(255, 190, 90) : ColVert)) ];
+			}
+
+			// ═══ ET LA TROISIÈME HORLOGE, CELLE QUI NE BAT PAS COMME LES AUTRES ═══
+			// [GDD 6.7, 14.4] « Le vieillissement différentiel pèse sur la carrière
+			// et la passation. » Il valait exactement zéro jusqu'ici : `DualClock`
+			// n'était avancé nulle part. Affiché en MILLISECONDES parce que c'est
+			// l'ordre de grandeur réel d'une croisière interplanétaire — et c'est
+			// tout l'intérêt de le montrer : le joueur constate de lui-même que le
+			// cliché relativiste ne s'applique pas à son vol, au lieu qu'on le lui
+			// affirme. Le SIGNE est la vraie information : en croisière l'équipage
+			// vieillit PLUS vite (le potentiel solaire l'emporte sur la vitesse), en
+			// orbite basse il vieillit MOINS.
+			{
+				// `aging_gap` = Terre − bord : positif = le bord a pris du retard.
+				const double EcartMs = -GV.dual_clock.aging_gap() * 1000.0;
+				const FString Sens = FMath::Abs(EcartMs) < 1.0e-3
+					? TEXT("aucun ecart mesurable")
+					: (EcartMs > 0.0 ? TEXT("l'equipage vieillit PLUS vite")
+					                 : TEXT("l'equipage vieillit MOINS vite"));
+				Col->AddSlot().AutoHeight().Padding(6, 1)
+				[ LigneKV(TEXT("HORLOGE DE BORD"),
+				          FString::Printf(TEXT("%+.1f ms  -  %s"), EcartMs, *Sens),
+				          SRGB(150, 190, 230)) ];
+			}
+
+			// CE QUE DEVIENT ARES PENDANT CE TEMPS [GDD 9.3] — sans cette ligne,
+			// le joueur croirait son agence à l'abandon.
+			Col->AddSlot().AutoHeight().Padding(6, 1)
+			[ LigneKV(TEXT("ARES"),
+			          FString::Printf(TEXT("sous l'adjoint - confiance gelee a %.0f"),
+			                          GV.lived.confidence_frozen),
+			          SRGB(255, 190, 90)) ];
+		}
+	}
+
+	// ═══ LE CADRE CLIPPE, IL NE REPLIE PAS (piège n°42) ═══
+	// La conduite de mission a fini par porter plus de lignes qu'un poste n'en
+	// affiche : bilan, navigation, vie à bord, dose, avaries. Trouvé EN CAPTURE —
+	// « ARES » chevauchait « [ECHAP] FERMER » et les boutons sortaient du cadre.
+	// Même remède que les postes AGENCE et PLANIFICATION, qui portaient déjà des
+	// listes longues : la LECTURE défile, les ACTIONS restent ancrées en bas. Un
+	// bouton qu'il faut aller chercher en défilant est un bouton qu'on ne trouve
+	// pas.
+	TSharedRef<SVerticalBox> Bas = SNew(SVerticalBox);
+
+	// --- EMBARQUER / DEBARQUER [GDD 9.2] -------------------------------------
+	// Proposé seulement quand il y a un vol habité à rejoindre : un bouton qui
+	// refuse toujours n'apprend rien. Quand il refuse, il DIT pourquoi (piège
+	// n°42) — c'est ce qui rend lisibles les conditions de 9.2 (rang terminal,
+	// maturité de support-vie, confiance) au lieu de les laisser deviner.
+	if (Se.jeu.ares.initialisee() && mc->contract.crewed)
+	{
+		fen::game::GameState& GV = *Se.jeu.ares.etat;
+		const bool ABord = GV.lived.active && GV.lived.mission_id == mc->contract.id;
+		if (ABord)
+		{
+			Bas->AddSlot().AutoHeight().Padding(0, 2, 0, 1)
+			[ BoutonAction(FText::FromString(TEXT("DEBARQUER : reprendre le poste au sol")),
+			               FOnClicked::CreateLambda([this]() {
+				               Session->debarquer();
+				               Rebuild(); return FReply::Handled();
+			               }), true) ];
+		}
+		else if (!GV.lived.active)
+		{
+			const auto V = Se.peut_embarquer();
+			Bas->AddSlot().AutoHeight().Padding(0, 2, 0, 1)
+			[ BoutonAction(FText::FromString(TEXT("EMBARQUER : vivre cette mission")),
+			               FOnClicked::CreateLambda([this]() {
+				               Session->embarquer();
+				               Rebuild(); return FReply::Handled();
+			               }), V.possible) ];
+			if (!V.possible && !V.raison.empty())
+			{
+				Bas->AddSlot().AutoHeight().Padding(6, 0, 0, 4)
+				[ Txt(FString(V.raison.c_str()), 10.0f, SRGB(242, 90, 80), 30) ];
+			}
+		}
+	}
 
 	// --- LE BOUTON D'AVANCE : franchit un gate, ou dit pourquoi il refuse -----
 	{
@@ -2743,7 +3192,7 @@ TSharedRef<SWidget> SSPPoste::BuildControle()
 			: TEXT("MISSION CLOSE");
 		const bool closable = mc->state != St::Completed && mc->state != St::Failed &&
 		                      mc->state != St::Aborted;
-		Col->AddSlot().AutoHeight().Padding(0, 2, 0, 1)
+		Bas->AddSlot().AutoHeight().Padding(0, 2, 0, 1)
 		[ BoutonAction(FText::FromString(lib),
 		               FOnClicked::CreateLambda([this]() {
 			               Session->avancer_mission();
@@ -2754,11 +3203,18 @@ TSharedRef<SWidget> SSPPoste::BuildControle()
 		// courtes plutôt qu'une longue — le cadre du poste CLIPPE, il ne replie pas.
 		if (!Session->dernier_refus_mission.empty())
 		{
-			Col->AddSlot().AutoHeight().Padding(6, 0, 0, 4)
+			Bas->AddSlot().AutoHeight().Padding(6, 0, 0, 4)
 			[ Txt(FString(Session->dernier_refus_mission.c_str()), 10.0f, SRGB(242, 90, 80), 30) ];
 		}
 	}
-	return FramePoste(D, Col);
+
+	// LA LECTURE DÉFILE, LES ACTIONS RESTENT : c'est ce qui permet au poste de
+	// porter une mission longue sans que rien ne déborde ni ne se dérobe.
+	return FramePoste(D,
+		SNew(SVerticalBox)
+		+ SVerticalBox::Slot().FillHeight(1.0f)
+		[ SNew(SScrollBox) + SScrollBox::Slot()[ Col ] ]
+		+ SVerticalBox::Slot().AutoHeight().Padding(0, 4, 0, 0)[ Bas ]);
 }
 
 // --- Postes en LECTURE SEULE (COUPOLE, NOVELLUS) -----------------------------
@@ -2789,6 +3245,74 @@ TSharedRef<SWidget> SSPPoste::BuildInfo(int Poste)
 			Col->AddSlot().AutoHeight().Padding(0, 0, 0, 3)
 			[ LigneKV(TEXT("MARGE ENERGIE"), FString::Printf(TEXT("%.0f kW"), fx.power_margin_kw),
 			          fx.power_sufficient ? ColVert : SRGB(242, 90, 80)) ];
+
+			// ═══ LE CARNET [GDD 15.4] ═══
+			// « Documentation personnelle du personnage […] transmis en
+			// passation. » Il est chez l'Architecte, à son poste — pas ailleurs.
+			// Il était sérialisé et transmis au successeur depuis le premier
+			// jour, et VIDE : personne n'y écrivait, personne ne le lisait.
+			// ═══ LE PASSAGE EN MODE PRO [GDD 2.3] ═══
+			// « Possible et UNIDIRECTIONNEL ; les graphes existants sont
+			// archivés en lecture seule dans le carnet. » Le mode ne s'écrivait
+			// qu'à la création d'une partie : la bascule n'existait pas. Le prix
+			// est annoncé AVANT le clic (piège n°64) — c'est une perte voulue,
+			// pas une surprise.
+			if (A.mode == fen::app::ModeAide::Normal)
+			{
+				Col->AddSlot().AutoHeight().Padding(0, 8, 0, 1)
+				[ Txt(FString::Printf(TEXT("MODE NORMAL — passer en PRO archive vos %d noeud(s) et les efface"),
+				                      (int32)Session->graphe.size()), 9.0f, SRGB(255, 190, 90), 80) ];
+				Col->AddSlot().AutoHeight().Padding(6, 1)
+				[ BoutonAction(FText::FromString(TEXT("PASSER EN MODE PRO (irreversible)")),
+				               FOnClicked::CreateLambda([this]() {
+					               Session->basculer_en_pro();
+					               Rebuild(); return FReply::Handled(); })) ];
+			}
+			else
+			{
+				Col->AddSlot().AutoHeight().Padding(0, 8, 0, 1)
+				[ LigneKV(TEXT("MODE D AIDE"), TEXT("PRO — le calcul est a vous [GDD 2.2]"),
+				          SRGB(255, 190, 90)) ];
+			}
+
+			const auto& Pages = J.ares.etat->notebook.entries;
+			Col->AddSlot().AutoHeight().Padding(0, 8, 0, 2)
+			[ Txt(FString::Printf(TEXT("CARNET — %d page(s), transmis en passation [GDD 15.4]"),
+			                      (int32)Pages.size()), 10.0f, ColTexteFaible, 90) ];
+			if (Pages.empty())
+			{
+				Col->AddSlot().AutoHeight().Padding(6, 0)
+				[ Txt(TEXT("(vide — il se remplira au premier debrief)"), 9.0f, ColTexteFaible) ];
+			}
+			// LES PLUS RÉCENTES D'ABORD, et seulement quelques-unes : le cadre
+			// d'un poste CLIPPE (piège n°42), et une carrière en écrit des
+			// dizaines. Le corps est tronqué à ses premières lignes — le carnet
+			// est ici une CONSULTATION, pas un traitement de texte.
+			{
+				int32 Montrees = 0;
+				for (int32 k = (int32)Pages.size() - 1; k >= 0 && Montrees < 4; --k, ++Montrees)
+				{
+					const auto& P = Pages[(std::size_t)k];
+					Col->AddSlot().AutoHeight().Padding(6, 2, 0, 0)
+					[ LigneKV(FString::Printf(TEXT("J+%.0f"), P.date_days),
+					          FString(UTF8_TO_TCHAR(P.title.c_str())), SRGB(235, 143, 235)) ];
+					FString Corps = FString(UTF8_TO_TCHAR(P.body.c_str()));
+					Corps.ReplaceInline(TEXT("\r"), TEXT(""));
+					TArray<FString> Lignes;
+					Corps.ParseIntoArray(Lignes, TEXT("\n"), true);
+					for (int32 L = 0; L < Lignes.Num() && L < 3; ++L)
+					{
+						Col->AddSlot().AutoHeight().Padding(14, 0)
+						[ Txt(Lignes[L], 9.0f, ColTexteFaible, 80) ];
+					}
+					if (Lignes.Num() > 3)
+					{
+						Col->AddSlot().AutoHeight().Padding(14, 0)
+						[ Txt(FString::Printf(TEXT("... (%d lignes de plus)"), Lignes.Num() - 3),
+						      9.0f, ColTexteFaible) ];
+					}
+				}
+			}
 		}
 	}
 	else if (id == TEXT("observation"))

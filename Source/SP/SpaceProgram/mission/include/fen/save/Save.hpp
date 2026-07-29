@@ -16,7 +16,22 @@
 namespace fen::save {
 
 inline constexpr std::uint32_t SAVE_MAGIC = 0x53455241u; // "ARES"
-inline constexpr std::uint32_t SCHEMA_VERSION = 1;
+// V2 (2026-07-28) : la MISSION VÉCUE [GDD 9] — bloc `lived` en queue d'archive.
+// Le lecteur le lit sous `if (r.version() >= 2)`, si bien qu'une sauvegarde V1
+// se recharge sans rien perdre : elle décrit simplement une partie où personne
+// n'était embarqué, ce qui est exactement ce qu'elle était.
+// V3 (2026-07-29) : ce qui est GELÉ AU DÉPART d'un vol vécu — préparation
+// médicale reçue [GDD 11.6] et géométrie des horloges [GDD 6.7]. Même règle : le
+// lecteur lit sous `if (r.version() >= 3)`, et une archive V2 retombe sur des
+// défauts qui reproduisent EXACTEMENT son comportement d'origine (facteur neutre,
+// géométrie invalide donc rapport d'horloges égal à 1).
+// V4 (2026-07-29) : le STOCK D'ANTIMATIÈRE [GDD 5.12.12] et le β de croisière.
+// Un stock qui met des années à s'établir et qui fuit en permanence ne se
+// reconstruit pas au chargement. Une archive V3 retombe sur stock nul et β nul —
+// exactement l'état qu'elle décrivait.
+// V5 : `Mission::beta_croisiere`, figé au feu vert. Lu sous `version() >= 5` ;
+// une archive V4 retombe sur 0, la valeur de toute mission non relativiste.
+inline constexpr std::uint32_t SCHEMA_VERSION = 5;
 
 // --- Écriture ----------------------------------------------------------------
 class Writer {

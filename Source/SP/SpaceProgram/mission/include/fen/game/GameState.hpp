@@ -12,6 +12,7 @@
 #include "fen/env/Debris.hpp"
 #include "fen/env/SpaceWeather.hpp"
 #include "fen/game/GameClock.hpp"
+#include "fen/mission/Avaries.hpp"
 #include "fen/mission/Crew.hpp"
 #include "fen/mission/Mail.hpp"
 #include "fen/mission/MissionFsm.hpp"
@@ -38,6 +39,11 @@ struct GameState {
   career::CareerState career;
   career::Character   character;
   career::Notebook    notebook;
+  // LA DOSE DE L'ARCHITECTE [GDD 6.6, 3.4] — elle appartient à la PERSONNE, pas
+  // à la mission : `career_sv` ne redescend jamais, et c'est ce qui donne son sens
+  // à « un personnage consommé ne revole pas ». Remise à zéro en passation, avec
+  // le reste de ce qui est personnel [GDD 3.5].
+  env::DoseAccumulator dose_architecte;
 
   // FINANCES v1.2 [GDD 13] : l'autorité économique, à l'échelle réelle (M€).
   // budget d'agence, réserve, chaîne de fin de partie. `treasury` (M$) reste en
@@ -53,7 +59,13 @@ struct GameState {
 
   mission::MissionCatalog     catalog;
   std::vector<mission::Mission> missions;
-  mission::CrewMissionSlot    crew_slot;
+  // LA MISSION VÉCUE [GDD 9, décision 18] : le joueur est-il à bord, et de quoi
+  // dispose l'équipage. Remplace `CrewMissionSlot`, que rien n'écrivait.
+  mission::LivedMission       lived;
+  // LES AVARIES EN COURS [GDD 9.5] — à côté de `lived` et non dedans, parce que
+  // `Avaries.hpp` inclut `Crew.hpp` : c'est la seule dépendance qui tienne dans
+  // ce sens. Vidées au débarquement avec le reste de la mission.
+  std::vector<mission::Avarie> avaries;
   // LE SEUL CANAL D'ARRIVÉE D'UN CONTRAT [GDD 10.2] : sans mail notifié, un
   // contrat du catalogue reste invisible même si ses quatre verrous sont levés.
   mission::MailInbox          inbox;
@@ -67,33 +79,39 @@ struct GameState {
 
   rel::DualClock dual_clock;         // bord/Terre — divergent en fin de jeu seulement
 
+  // ═══ L'ANTIMATIÈRE : LE VERROU DE LA FIN DE JEU ═══ [GDD 5.12.12, 19.3]
+  // `AntimatterProduction` décrivait un processus que RIEN n'exécutait — quatre
+  // paramètres, aucun gramme nulle part, alors que le GDD annonce que « le
+  // débit/confinement est le vrai levier d'équilibrage » de la fin de jeu. Le
+  // stock est un ÉQUILIBRE entre production et fuite, pas un cumul, et son débit
+  // se DÉRIVE de la puissance disponible sur Novellus [GDD 11.5].
+  rel::AntimatterStock antimatiere;
+
   explicit GameState(WorldEpoch epoch, std::uint64_t seed_)
       : seed(seed_), clock(epoch) {}
 
-  // --- LE TICK MONDE ---------------------------------------------------------
-  // Appelé par la frontière UE5 avec le temps réel de la frame. Chaque système
-  // avance en SOUS-PAS FIXES — l'accélération ne change que le nombre de pas.
-  void tick(double real_dt_s) {
-    const int steps = clock.advance(real_dt_s);
-    const double dt_days = clock.dt_step_days();
-    const auto fx = station::effects(station);
-    for (int i = 0; i < steps; ++i) {
-      const double now = clock.now_days();
-      treasury.tick(now);
-      research.tick(tree, dt_days * fx.research_speed);
-      // Hors mission relativiste : temps propre == temps de jeu [GDD 6.7.4].
-      character.age_by_proper_time(dt_days * cst::DAY);
-      // L'environnement vieillit avec le monde : les couloirs LEO se nettoient,
-      // les couloirs hauts restent pollués [GDD 7.8].
-      debris.tick(dt_days, solar.activity01(clock.now_epoch()));
-      if (treasury.dismissed) { /* fin de partie : licenciement [GDD 13.2] */ }
-    }
-    // ARES notifie ce qui vient de devenir jouable [GDD 4.2, 10.2]. Hors
-    // sous-pas : le courrier est un événement de programme, pas de physique.
-    mission::deliver_unlocked_contracts(inbox, catalog, career, tree,
-                                        treasury.available_musd(), &station,
-                                        clock.now_days());
-  }
+  // --- IL N'Y A QU'UN SEUL TICK MONDE, ET IL N'EST PAS ICI ---------------------
+  // ⚠ `GameState::tick` A ÉTÉ SUPPRIMÉ LE 2026-07-29. C'était du code mort depuis
+  // que le temps s'est mis à couler [GDD 14.2] : aucun appelant dans le dépôt, ni
+  // jeu, ni pont UE, ni oracle. Il faisait pourtant AUTRE CHOSE que le tick vivant
+  // (`AresLayer::avancer`, app/ares.hpp), ce qui en faisait un piège permanent —
+  // deux ticks divergents, dont un seul tourne, invitent à brancher un système
+  // dans le mauvais. Ça a coûté un cycle entier à la mission vécue (piège n°72).
+  //
+  // CE QU'IL CONTENAIT, ET OÙ CHAQUE SYSTÈME VIT MAINTENANT — vérifié par
+  // recherche d'appelants, pas par relecture :
+  //   . `research.tick`               -> AresLayer::avancer (avec le facteur labo)
+  //   . `debris.tick`                 -> AresLayer::avancer (cycle solaire à jour)
+  //   . `deliver_unlocked_contracts`  -> AresLayer::livrer_courrier
+  //   . `age_by_proper_time(dt)`      -> AresLayer::avancer, qui va PLUS LOIN :
+  //       l'âge biologique y suit désormais le temps PROPRE de bord [GDD 6.7].
+  //   . `treasury.tick` / `dismissed` -> RIEN, et c'est correct : la trésorerie en
+  //       M$ est l'économie v1.1, neutralisée à l'initialisation (`fixed_costs`
+  //       vidés). L'autorité v1.2 est `AgencyFinance::tick_month`, vivante, et sa
+  //       chaîne de fin de partie est `FinancialStage`. Le `Treasury` hérité ne
+  //       survit que pour la compatibilité de sauvegarde.
+  // Ajouter un système, c'est donc l'ajouter à `AresLayer::avancer`. Il n'y a plus
+  // d'autre endroit où se tromper.
 
   // --- ConsequenceEngine [GDD 10.3-10.4] -------------------------------------
   // Anomalie -> triple lecture appliquée à TOUS les systèmes concernés.
@@ -202,6 +220,10 @@ struct GameState {
       w2.i32(static_cast<std::int32_t>(m.state));
       w2.f64(m.state_entered_days);
       w2.f64(m.tof_days);
+      // Le β figé au feu vert est un FAIT du vol au même titre que la durée : il a
+      // DÉCIDÉ de cette durée [décision 10]. Le recalculer au chargement rendrait
+      // un vol parti sensible au stock d'antimatière d'aujourd'hui. V5.
+      w2.f64(m.beta_croisiere);
       w2.i32(static_cast<std::int32_t>(m.worst_severity));
       w2.boolean(m.any_anomaly);
       w2.boolean(m.flight_flown);
@@ -244,6 +266,55 @@ struct GameState {
       w2.i32(static_cast<std::int32_t>(m.vol_conduit_par));
       save_anomaly(w2, m.flight_anomaly);
     });
+    // ═══ V2 — LA MISSION VÉCUE [GDD 9] ═══ (en QUEUE d'archive, voir Save.hpp)
+    // Une absence est un fait DATÉ que rien d'autre ne porte : la perdre au
+    // rechargement remettrait le joueur au sol au milieu de sa croisière, et
+    // dégèlerait une chaîne financière que [GDD 9.3] promet suspendue.
+    w.boolean(lived.active);
+    w.str(lived.mission_id);
+    w.f64(lived.depart_days);
+    w.i32(static_cast<std::int32_t>(lived.n_crew));
+    w.f64(lived.loops.water_recovery);
+    w.f64(lived.loops.o2_recovery);
+    w.f64(lived.vitals.o2_kg);
+    w.f64(lived.vitals.water_kg);
+    w.f64(lived.vitals.food_kg);
+    w.f64(lived.vitals.co2_scrub_capacity_kg);
+    w.f64(lived.confidence_frozen);
+    w.i32(static_cast<std::int32_t>(lived.missions_at_departure));
+    // LE BLINDAGE EMBARQUÉ et LA DOSE [GDD 6.6]. La dose de CARRIÈRE surtout :
+    // c'est un verrou irréversible sur le personnage, la perdre au rechargement
+    // rendrait apte au vol quelqu'un qui ne l'est plus.
+    w.f64(lived.blindage.areal_density_gcm2);
+    w.f64(lived.blindage.hydrogen_richness);
+    w.f64(dose_architecte.mission_sv);
+    w.f64(dose_architecte.mission_acute_gy);
+    w.f64(dose_architecte.career_sv);
+    // LES AVARIES EN COURS [GDD 9.5] et l'index de tirage. Les perdre ferait
+    // qu'un rechargement REPARERAIT tout gratuitement — et retirerait les mêmes
+    // fenêtres, donc les mêmes pannes, en double.
+    w.f64(lived.jour_evenements_tire);
+    w.f64(lived.fiabilite_systeme);
+    w.vec(avaries, [](save::Writer& w2, const mission::Avarie& a) {
+      w2.i32(static_cast<std::int32_t>(a.kind));
+      w2.f64(a.debut_days); w2.f64(a.gravite01);
+      w2.f64(a.fin_reparation_days); w2.boolean(a.reparee);
+    });
+    // ═══ V3 — CE QUI A ÉTÉ GELÉ AU DÉPART ═══ [GDD 11.6, 6.7]
+    // La préparation médicale reçue et la géométrie des horloges. Les perdre
+    // ferait qu'un vol rechargé ne tirerait plus les mêmes urgences et ne
+    // battrait plus au même rythme : la rejouabilité d'un vol est une PROMESSE
+    // du modèle d'événements, pas une propriété heureuse.
+    w.f64(lived.facteur_risque_medical);
+    w.f64(lived.horloge.a_terre_m);
+    w.f64(lived.horloge.a_croisiere_m);
+    w.f64(lived.horloge.a_sejour_m);
+    w.f64(lived.horloge.r_parking_m);
+    // ═══ V4 — L'ANTIMATIÈRE ═══ [GDD 5.12.12] Un stock qui a mis des années à
+    // s'établir et qui fuit en permanence ne se reconstruit pas au chargement :
+    // le perdre remettrait le programme de fin de jeu à zéro en silence.
+    w.f64(antimatiere.grams);
+    w.f64(lived.horloge.beta_croisiere);
   }
   // L'anomalie EN ATTENTE DE DÉBRIEF est le seul événement dont les
   // conséquences n'ont pas encore été appliquées : elle doit survivre, sinon un
@@ -335,7 +406,7 @@ struct GameState {
     // plus dans le catalogue est ABANDONNÉE plutôt que ressuscitée à moitié :
     // une mission sans contrat n'a ni objectif, ni budget, ni prérequis.
     struct MissionSave {
-      std::string id; std::int32_t state; double entered, tof;
+      std::string id; std::int32_t state; double entered, tof, beta;
       std::int32_t worst; bool any, flown, success, has_anom;
       bool nav_eval; double nav_dv, nav_miss;
       bool vrai_ok; double vrai_t, vrai_r[3], vrai_v[3], connu_dv[3];
@@ -347,6 +418,10 @@ struct GameState {
     const auto sauves = r.vec<MissionSave>([](save::Reader& r2) {
       MissionSave s;
       s.id = r2.str(); s.state = r2.i32(); s.entered = r2.f64(); s.tof = r2.f64();
+      // V5 : le β figé. Une archive V4 retombe sur 0 — soit exactement ce que
+      // porte toute mission non relativiste, donc une relecture sans perte pour
+      // tout ce qui a jamais volé jusqu'ici.
+      s.beta = r2.version() >= 5 ? r2.f64() : 0.0;
       s.worst = r2.i32(); s.any = r2.boolean(); s.flown = r2.boolean();
       s.success = r2.boolean(); s.has_anom = r2.boolean();
       s.nav_eval = r2.boolean(); s.nav_dv = r2.f64(); s.nav_miss = r2.f64();
@@ -373,6 +448,7 @@ struct GameState {
       m.state = static_cast<mission::MissionState>(s.state);
       m.state_entered_days = s.entered;
       m.tof_days = s.tof;
+      m.beta_croisiere = s.beta;
       m.worst_severity = static_cast<mission::Severity>(s.worst);
       m.any_anomaly = s.any;
       m.flight_flown = s.flown;
@@ -401,6 +477,54 @@ struct GameState {
       m.flight_anomaly = s.anom;
       // `phase` reste dérivée : elle sera recalculée dès le premier tick.
       missions.push_back(std::move(m));
+    }
+    // ═══ V2 — LA MISSION VÉCUE ═══ Une archive V1 s'arrête ici, et c'est bien :
+    // elle décrit une partie où personne n'était embarqué. `lived` garde alors
+    // ses valeurs par défaut (inactif), ce qui est exactement le fait.
+    if (r.version() >= 2) {
+      lived.active = r.boolean();
+      lived.mission_id = r.str();
+      lived.depart_days = r.f64();
+      lived.n_crew = static_cast<int>(r.i32());
+      lived.loops.water_recovery = r.f64();
+      lived.loops.o2_recovery = r.f64();
+      lived.vitals.o2_kg = r.f64();
+      lived.vitals.water_kg = r.f64();
+      lived.vitals.food_kg = r.f64();
+      lived.vitals.co2_scrub_capacity_kg = r.f64();
+      lived.confidence_frozen = r.f64();
+      lived.missions_at_departure = static_cast<int>(r.i32());
+      lived.blindage.areal_density_gcm2 = r.f64();
+      lived.blindage.hydrogen_richness = r.f64();
+      dose_architecte.mission_sv = r.f64();
+      dose_architecte.mission_acute_gy = r.f64();
+      dose_architecte.career_sv = r.f64();
+      lived.jour_evenements_tire = r.f64();
+      lived.fiabilite_systeme = r.f64();
+      avaries = r.vec<mission::Avarie>([](save::Reader& r2) {
+        mission::Avarie a;
+        a.kind = static_cast<mission::EventKind>(r2.i32());
+        a.debut_days = r2.f64(); a.gravite01 = r2.f64();
+        a.fin_reparation_days = r2.f64(); a.reparee = r2.boolean();
+        return a;
+      });
+    }
+    // ═══ V3 — CE QUI A ÉTÉ GELÉ AU DÉPART ═══ Une archive V2 s'arrête ici. Les
+    // défauts sont alors les BONS : facteur médical neutre (1,0) et géométrie
+    // invalide, que `rapport_horloge_bord` traite en rendant 1 — soit exactement
+    // le comportement d'avant, sans dérive silencieuse.
+    if (r.version() >= 3) {
+      lived.facteur_risque_medical = r.f64();
+      lived.horloge.a_terre_m     = r.f64();
+      lived.horloge.a_croisiere_m = r.f64();
+      lived.horloge.a_sejour_m    = r.f64();
+      lived.horloge.r_parking_m   = r.f64();
+    }
+    // ═══ V4 — L'ANTIMATIÈRE ═══ Une archive V3 n'en avait pas : stock nul et
+    // β nul, ce qui est exactement l'état qu'elle décrivait.
+    if (r.version() >= 4) {
+      antimatiere.grams = r.f64();
+      lived.horloge.beta_croisiere = r.f64();
     }
     return r.ok();
   }

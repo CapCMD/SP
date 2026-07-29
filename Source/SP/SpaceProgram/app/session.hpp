@@ -32,6 +32,7 @@
 #include "app/novellus_orbite.hpp"
 #include "app/postes.hpp"
 #include "app/vehicle_design.hpp"
+#include "fen/career/Carnet.hpp"        // ce que le carnet retient [GDD 15.4]
 #include "fen/code/CodeQualification.hpp"
 #include "fen/code/Toolchain.hpp"
 #include "fen/ephem/Ephemeris.hpp"
@@ -355,6 +356,35 @@ struct Session {
   // sauvegarde pas, puisque [GDD 2.4] veut qu'on le REFASSE a chaque analyse.
   std::vector<mission::TypeNoeud> graphe;
 
+  // ═══ LE PASSAGE NORMAL → PRO [GDD 2.3] ═══
+  // « Le passage Normal → Pro est possible et UNIDIRECTIONNEL ; les graphes
+  // existants sont archivés en lecture seule dans le carnet (consultables, non
+  // exécutables), le joueur devant réécrire en C++. Cette perte est
+  // INTENTIONNELLE. »
+  //
+  // Le mode n'était écrit qu'à la création d'une partie : la bascule n'existait
+  // pas, alors que `GameState.hpp` la déclarait en commentaire depuis toujours.
+  // Trois effets, dans cet ordre, et le second est le prix du premier :
+  //   1. le graphe courant part au CARNET, en texte — donc consultable et
+  //      inexécutable par construction, pas par interdiction ;
+  //   2. il est VIDÉ : en Pro, le calcul se réécrit ;
+  //   3. le mode bascule, et rien ne le ramène.
+  // Rend false si l'on est déjà en Pro : c'est le sens de « unidirectionnel ».
+  bool basculer_en_pro() {
+    if (jeu.agence.mode == ModeAide::Pro) return false;
+    if (!jeu.ares.initialisee()) return false;
+    auto& G = *jeu.ares.etat;
+    const double now = G.clock.now_days();
+    G.notebook.write(career::archive_graphe(graphe, now));
+    // LES MAN PAGES SUIVENT L'ARCHIVE, et c'est le bon moment : le joueur perd
+    // ses nœuds à l'instant précis où il doit apprendre les fonctions qu'ils
+    // étaient. La page les NOMME toutes [GDD 2.2, 15.4].
+    G.notebook.write(career::man_pages_api(now));
+    graphe.clear();
+    jeu.agence.mode = ModeAide::Pro;
+    return true;
+  }
+
   // ═══════════════════════════════════════════════════════════════════════════
   // LE LOGICIEL DE VOL DU JOUEUR — mode PRO [GDD 15.1, 15.5, 18]
   // ═══════════════════════════════════════════════════════════════════════════
@@ -538,8 +568,62 @@ struct Session {
       // conception, plus une constante.
       nav_disp = evaluer_navigation(*m);
       if (nav_disp.ok) mission_plan.p_physics = nav_disp.p_marge;
+      // ═══ ET CE QUE PÈSE L'ÉQUIPAGE ═══ [GDD 9.4, 5.10]
+      // Mêmes deux grandeurs que le Δv : elles viennent du MONDE (le ciel et
+      // l'arbre), pas d'une saisie, et le plan pur ne peut pas les atteindre.
+      mission_plan.crew_round_trip_days = mission::crew_round_trip_days(
+          *m, fen::Epoch{jeu.epoch_courant()}, jeu.eph);
+      mission_plan.crew_loops = mission::loops_from_tech(
+          techno_operationnelle("recyclage_partiel"),
+          techno_operationnelle("recyclage_ferme"));
+      // ═══ ET LES LANCEURS QUE L'AGENCE SAIT FAIRE VOLER ═══ [GDD 5.4]
+      // La branche 1 « Accès à l'orbite » ne gardait RIEN : quatre nœuds à
+      // rechercher, et toute la gamme disponible dès la première mission. Même
+      // prédicat que partout ailleurs (`techno_operationnelle`, TRL >= 7), pas
+      // une seconde règle qui pourrait en diverger.
+      mission_plan.lanceurs_qualifies = [this](const mission::Launcher& L) {
+        return L.tech_id.empty() || techno_operationnelle(L.tech_id.c_str());
+      };
+      // ═══ ET CE QU'ELLE SAIT FAIRE EN ORBITE ═══ [GDD 5.2 branche 1]
+      // Les trois nœuds que le GDD nomme (« transfert de propergol orbital,
+      // rendez-vous automatisé robuste ») et que rien ne consommait.
+      mission_plan.assemblage.rdv_automatise     = techno_operationnelle("rdv_automatise");
+      mission_plan.assemblage.robotique_orbitale = techno_operationnelle("robotique_orbitale");
+      mission_plan.assemblage.transfert_ergols   = techno_operationnelle("transfert_ergols");
+      // ═══ ET CE QUE L'AGENCE A EN STOCK ═══ [GDD 5.12.12] — même raison que les
+      // trois précédents : le plan pur ne connaît pas l'état de l'agence. Pour
+      // une architecture relativiste habitée, c'est ce stock qui décide de la
+      // vitesse, donc de la durée, donc des vivres — la boucle que
+      // `bilan_relativiste` referme, et qui peut diverger [GDD 19.1].
+      mission_plan.antimatiere_g = jeu.ares.etat->antimatiere.grams;
       mission_plan.evaluate(*m);
     }
+  }
+
+  // Une techno est disponible quand LE MONDE sait la faire [GDD 5.3, 5.4] :
+  // TRL >= 7. C'est le même prédicat que celui des prérequis de mission
+  // (`tech/Unlock.hpp`), pas une seconde règle qui pourrait en diverger.
+  bool techno_operationnelle(const char* id) const {
+    if (!jeu.ares.initialisee()) return false;
+    const tech::TechNode* n = jeu.ares.etat->tree.find(id);
+    return n && n->operational();
+  }
+
+  // ═══ CE QUE L'ANTIMATIÈRE EMBARQUÉE ACHÈTE COMME VITESSE ═══
+  // [GDD 6.7.2, 19.3, décision 10] Une seule expression, un seul endroit : le feu
+  // vert la fige sur la mission, l'embarquement et l'évaluation la relisent. Elle
+  // vivait auparavant en double — dans `embarquer` seulement, donc une sonde
+  // robotique n'avait jamais de β. La masse sèche à pousser est celle du PLAN
+  // (charge utile + vivres + blindage), pas la charge du contrat, et le nombre de
+  // poussées est celui de l'architecture [GDD 6.7.4].
+  double beta_croisiere_de(const mission::Mission& m) const {
+    if (m.contract.family != "relativiste") return 0.0;
+    const auto& G = *jeu.ares.etat;
+    const double sec_kg = m.contract.terms.payload_kg
+                        + mission_plan.vital.total_kg()
+                        + mission_plan.masse_blindage_kg_;
+    return rel::beta_from_antimatter(sec_kg, G.antimatiere.grams,
+                                     rel::burns_for_architecture(m.contract.crewed));
   }
 
   // Le vol prospectif : « si on lançait maintenant ». C'est exactement ce qu'une
@@ -549,6 +633,7 @@ struct Session {
     prospect.state = mission::MissionState::Launched;
     prospect.state_entered_days = jeu.ares.etat->clock.now_days();
     const double epoch = jeu.epoch_courant();
+    prospect.beta_croisiere = beta_croisiere_de(prospect);
     prospect.tof_days =
         mission::transfer_tof_days(prospect, fen::Epoch{epoch}, jeu.eph);
     if (!mission::flight_has_arc(prospect)) return {};
@@ -966,6 +1051,12 @@ struct Session {
     if (target == St::Launched) {
       if (!G.finance.engage(mission_plan.assessment.cost_total))
         return {false, "fonds insuffisants pour engager le programme"};
+      // ═══ LE β SE FIGE AVANT LA DURÉE, PARCE QU'IL LA DÉCIDE ═══
+      // [GDD 6.7, décision 10] Pour une architecture relativiste, la durée de
+      // transit N'EST PAS une géométrie de ciel : c'est la distance de la cible
+      // divisée par la vitesse que l'antimatière embarquée achète. L'ordre compte
+      // donc — `transfer_tof_days` lit `beta_croisiere`.
+      m->beta_croisiere = beta_croisiere_de(*m);
       // LA DURÉE DE TRANSIT SE FIGE ICI, et nulle part ailleurs : c'est la
       // géométrie du ciel AU DÉCOLLAGE qui date l'arrivée. Recalculée en route,
       // elle ferait glisser l'arrivée d'un vol déjà parti [GDD 7.3].
@@ -1007,7 +1098,21 @@ struct Session {
       m->flight_has_anomaly = mission_outcome.has_anomaly;
       m->flight_anomaly = mission_outcome.anomaly;
       mission_outcome_pret = true;
+      // ═══ LE CARNET RETIENT LE VOL ═══ [GDD 15.4]
+      // `NotebookEntry::mission_ref` attendait ça depuis le premier jour. Le
+      // carnet était sérialisé et transmis au successeur — VIDE. C'est ici qu'il
+      // se remplit, et il ne contient que des faits que le débrief possède déjà.
+      G.notebook.write(career::debrief_mission(
+          *m, mission_plan.program.dv_margin, G.clock.now_days()));
     }
+
+    // LE VOL VÉCU SE TERMINE AVEC SA MISSION [GDD 9.2] : l'Architecte rentre,
+    // l'agence se dégèle et le carnet reçoit sa reconstitution d'absence. Avant
+    // la triple lecture ci-dessous, et c'est voulu — le retour a lieu au débrief,
+    // donc les conséquences du vol tombent sur un joueur redevenu présent.
+    if (target == St::Debrief && jeu.ares.etat->lived.active &&
+        jeu.ares.etat->lived.mission_id == m->contract.id)
+      debarquer();
 
     // DÉBRIEF : triple lecture appliquée à TOUS les systèmes [GDD 10.4].
     if (target == St::Completed || target == St::Failed) {
@@ -1026,6 +1131,286 @@ struct Session {
       mission_outcome_pret = false;
     }
     return {true, ""};
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // EMBARQUER — LA MISSION VÉCUE [GDD 9, décision 18]
+  // ═══════════════════════════════════════════════════════════════════════════
+  // « Vol habité vécu INCLUS » (décision 18) : le joueur peut monter à bord et
+  // devenir responsable scientifique de la mission [GDD 9.1]. Tout le modèle
+  // existait — `Crew.hpp` calculait les consommables, `AgencyFinance::suspended`
+  // gardait déjà l'adjoint, `career::journal_absence` attendait d'être écrite —
+  // mais AUCUN chemin ne menait à cet état : `CrewMissionSlot::try_embark`
+  // n'était appelé nulle part, et `suspended` n'était posé que par les tests. Un
+  // chapitre entier du GDD sans porte d'entrée.
+  //
+  // LES CONDITIONS SONT CELLES DU GDD, ET AUCUNE N'EST UN RÉGLAGE :
+  //   . la mission est HABITÉE — sinon il n'y a pas d'équipage à rejoindre ;
+  //   . elle est PARTIE — on n'embarque pas sur un vol qui n'a pas décollé ;
+  //   . une seule à la fois [GDD 9.2] ;
+  //   . la confiance autorise l'habité [GDD 13.4] — le même seuil que celui qui
+  //     filtre déjà l'ACCEPTATION d'un contrat habité, pas un second barème ;
+  //   . et si la mission est LONGUE, il faut le RANG TERMINAL et la MATURITÉ :
+  //     « rang + maturité correspondants », dit 9.2. La maturité, c'est le nœud
+  //     `sejour_long` de la branche 4 — le support-vie long séjour est
+  //     littéralement ce qui rend la chose possible [GDD 5.10, 19.1].
+  struct VerdictEmbarquement { bool possible{false}; std::string raison; };
+  std::string dernier_refus_embarquement;
+
+  VerdictEmbarquement peut_embarquer() {
+    if (!jeu.ares.initialisee())    return {false, "agence non initialisee"};
+    mission::Mission* m = mission_courante();
+    if (!m)                         return {false, "aucune mission pilotee"};
+    auto& G = *jeu.ares.etat;
+    if (G.lived.active)
+      return {false, "une seule mission vecue a la fois [GDD 9.2]"};
+    if (!m->contract.crewed)
+      return {false, "mission robotique : aucun equipage a rejoindre"};
+    // ═══ ON MONTE À BORD AVANT LE FEU VERT, JAMAIS APRÈS ═══
+    // Trouvé EN CAPTURE : la première version acceptait `state == Launched`, si
+    // bien que l'Architecte pouvait rejoindre un véhicule déjà en route vers
+    // Mars. Aucun vaisseau ne se rattrape en vol : embarquer est une décision de
+    // PLANIFICATION [GDD 9.2, 4.1] — « le joueur choisit d'embarquer OU de
+    // conduire depuis le sol », et ce choix se prend avant le décollage. Il
+    // engage ensuite pour toute la mission.
+    if (m->state >= mission::MissionState::Launched)
+      return {false, "le vol est deja parti : on n embarque pas en route"};
+    if (m->state < mission::MissionState::Design)
+      return {false, "mission trop tot : concevoir d abord [GDD 4.1]"};
+    if (!economy::crewed_allowed(G.career.confidence_ares))
+      return {false, "confiance insuffisante : missions habitees suspendues [GDD 13.4]"};
+    // ═══ UN PERSONNAGE CONSOMMÉ NE REVOLE PAS ═══ [GDD 6.6]
+    // La limite de dose de carrière est un VERROU, pas un indicateur : c'est
+    // l'arbitrage réel des programmes habités réels. Elle ne se soigne pas et ne
+    // se remet pas à zéro — seule la passation change de personne [GDD 3.5].
+    if (G.dose_architecte.career_exceeded())
+      return {false, "limite de dose de carriere atteinte : inapte au vol [GDD 6.6]"};
+
+    const double rt = mission::crew_round_trip_days(
+        *m, fen::Epoch{jeu.epoch_courant()}, jeu.eph);
+    if (mission::mission_longue(m->contract.family, rt)) {
+      if (!career::terminal_rank(G.career.rank))
+        return {false, "mission longue : reservee a la fin de carriere [GDD 9.2]"};
+      if (!techno_operationnelle("sejour_long"))
+        return {false, "maturite requise : support-vie long sejour [GDD 5.10]"};
+    }
+    return {true, ""};
+  }
+
+  bool embarquer() {
+    const VerdictEmbarquement v = peut_embarquer();
+    dernier_refus_embarquement = v.possible ? std::string() : v.raison;
+    if (!v.possible) return false;
+
+    auto& G = *jeu.ares.etat;
+    mission::Mission* m = mission_courante();
+
+    // LES SOUTES SE REMPLISSENT DU BUDGET QU'ON A PROVISIONNÉ, recalculé depuis
+    // les MÊMES entrées que la conception (famille, géométrie, arbre) plutôt que
+    // recopié du plan : un plan peut avoir été réévalué entre-temps, la
+    // géométrie et l'arbre, eux, sont des faits du monde à cet instant.
+    const double rt = mission::crew_round_trip_days(
+        *m, fen::Epoch{jeu.epoch_courant()}, jeu.eph);
+    const mission::RecyclingLoops loops = mission::loops_from_tech(
+        techno_operationnelle("recyclage_partiel"),
+        techno_operationnelle("recyclage_ferme"));
+    const double jours = mission::crew_occupation_days(m->contract.family, rt);
+    // L'EFFECTIF EMBARQUÉ EST CELUI QUE L'OBJECTIF DEMANDE [GDD 3.1] : ARES dit
+    // combien de personnes doivent être là-bas, l'architecte dit comment les y
+    // mettre. Lu sur le contrat, plus sur une table indexée par famille.
+    const int n = m->contract.terms.crew_required;
+
+    G.lived.try_embark(m->contract.id);
+    G.lived.depart_days = G.clock.now_days();
+    G.lived.n_crew = n;
+    G.lived.loops  = loops;
+    G.lived.vitals = mission::arm_vitals(
+        mission::crew_consumables(n, m->contract.family, rt, loops), n, jours);
+    G.lived.confidence_frozen     = G.career.confidence_ares;
+    G.lived.missions_at_departure = static_cast<int>(G.missions.size());
+    // LE BLINDAGE EMBARQUÉ EST CELUI QU'ON A PAYÉ [GDD 6.6] : celui du plan, dont
+    // la masse a réellement pesé au décollage. Pas un réglage de dernière minute.
+    // LA COQUE COMPTE : ce que l'équipage voit, c'est la structure PLUS ce qui a
+    // été payé. Partir de zéro décrirait un astronaute sans véhicule.
+    G.lived.blindage = mission::blindage_effectif(mission_plan.blindage);
+    // ET LA FIABILITÉ DU VÉHICULE, elle aussi figée ici [GDD 12.3] : elle module
+    // les taux de panne interne. Ce que le joueur a acheté en essais à feu se
+    // paie — ou se récolte — en vol.
+    G.lived.fiabilite_systeme = mission_plan.assessment.p_success > 0.0
+                                    ? mission_plan.assessment.p_success
+                                    : 0.98;
+    // ET LA PRÉPARATION MÉDICALE REÇUE [GDD 11.6] : le module médical de Novellus
+    // « réduit les urgences médicales en vol », `station::effects` le chiffrait
+    // déjà — le tirage, lui, lisait 1,0 en dur. Figé ici avec le reste de ce qui
+    // a été acquis AVANT le décollage.
+    G.lived.facteur_risque_medical = station::effects(G.station).medical_risk_factor;
+    // ET LE RYTHME DES DEUX HORLOGES [GDD 6.7, 14.4] : les demi-grands axes réels
+    // du moment, lus sur les MÊMES éphémérides que la fenêtre et que le Δv.
+    G.lived.horloge = mission::geometrie_horloge(
+        *m, fen::Epoch{jeu.epoch_courant()}, jeu.eph);
+    // ═══ ET LE β QUE L'ANTIMATIÈRE EMBARQUÉE ACHÈTE VRAIMENT ═══ [GDD 19.3]
+    // Le seul régime qui puisse franchir le seuil relativiste [GDD 6.7.2] — et il
+    // n'y a pas d'autre porte : « seule l'antimatière ouvre le régime
+    // relativiste ». On embarque ce que le CONFINEMENT permet de transporter, pas
+    // le stock rêvé, et la masse sèche à pousser est celle du plan (charge utile +
+    // vivres + blindage), pas la charge du contrat.
+    // ═══ ET LE NOMBRE DE POUSSÉES EST CELUI DE L'ARCHITECTURE ═══ [GDD 6.7.4]
+    // Ce β se lisait en ALLER SIMPLE — une seule poussée — pour une mission qui
+    // embarque un équipage, donc qui freine à l'arrivée ET revient. Le GDD appelle
+    // ça « le verrou de l'aller-retour » et le chiffre au ratio à la PUISSANCE
+    // QUATRE ; le lire à la puissance un surestimait la vitesse de bord, et
+    // d'autant plus que l'architecture était contraignante. Mesure : sur une sonde
+    // de 5 t et le stock d'équilibre, 0,301 en aller simple contre 0,131 en
+    // aller-retour. Le verrou que le modèle savait calculer ne s'appliquait pas
+    // là où il compte — sur l'horloge de l'équipage.
+    // ON EMBARQUE AVANT LE FEU VERT (piège n°71), donc `m->beta_croisiere` n'est
+    // pas encore figé : on prend la même expression, par le même appel. Le feu
+    // vert la refigera, à l'identique tant que le plan n'a pas bougé.
+    G.lived.horloge.beta_croisiere =
+        m->beta_croisiere > 0.0 ? m->beta_croisiere : beta_croisiere_de(*m);
+    // Nouvelle mission : ni avarie héritée, ni fenêtre d'événements déjà tirée.
+    G.avaries.clear();
+    G.lived.jour_evenements_tire = -1.0;
+    // Nouvelle mission : le compteur de MISSION repart, celui de CARRIÈRE non.
+    G.dose_architecte.mission_sv = 0.0;
+    G.dose_architecte.mission_acute_gy = 0.0;
+
+    // ═══ ARES CONTINUE SANS LUI, ET NE PEUT PLUS ÊTRE PERDUE ═══ [GDD 9.3]
+    // « La chaîne de fin de partie financière est SUSPENDUE. » Nécessaire, dit le
+    // GDD, « car une mission relativiste peut couvrir plusieurs décennies
+    // terrestres ». `AgencyFinance` consultait déjà ce drapeau en tête de sa
+    // chaîne ; personne ne le levait jamais.
+    G.finance.suspended = true;
+    jeu.agence.log("Embarquement : " + m->contract.title
+                   + " — ARES passe sous l'adjoint [GDD 9.3]");
+    return true;
+  }
+
+  // LE RETOUR. Dégèle l'agence et écrit la page que [GDD 9.3, 15.4] promettent :
+  // « journal de reconstitution d'une absence ». Sans elle, une absence de
+  // plusieurs années serait un trou noir pour un joueur à qui l'on a promis une
+  // agence qui « fonctionne normalement » — donc qui a des comptes à rendre.
+  bool debarquer() {
+    if (!jeu.ares.initialisee()) return false;
+    auto& G = *jeu.ares.etat;
+    if (!G.lived.active) return false;
+
+    const double retour = G.clock.now_days();
+    const int menees = static_cast<int>(G.missions.size()) - G.lived.missions_at_departure;
+    G.notebook.write(career::journal_absence(
+        G.lived.depart_days, retour, menees < 0 ? 0 : menees, G.finance.treasury_me));
+    G.finance.suspended = false;
+    G.lived.disembark();
+    G.avaries.clear();          // les avaries appartenaient au vol qui s'achève
+    jeu.agence.log("Retour de mission — l'Architecte reprend son poste");
+    return true;
+  }
+
+  // ═══ CE QUE L'ÉQUIPAGE PEUT Y OPPOSER ═══ [GDD 9.1, 5.10]
+  // « Diagnostics / réparations. » La capacité vient de l'ARBRE, pas d'un dé : on
+  // répare ce que l'architecture permet de réparer, et ça prend le temps que ça
+  // prend. C'est le premier effet EN VOL de la branche 4 après le recyclage.
+  mission::CapaciteBord capacite_bord() const {
+    mission::CapaciteBord c;
+    c.maintenance_locale    = techno_operationnelle("maintenance_locale");
+    c.diagnostics_autonomes = techno_operationnelle("diagnostics_autonomes");
+    c.medecine_embarquee    = techno_operationnelle("medecine_embarquee");
+    c.redondance_base       = techno_operationnelle("redondance_base");
+    return c;
+  }
+
+  // Engage la réparation de l'avarie `idx`. L'avarie CONTINUE de coûter pendant
+  // les travaux — c'est ce qui fait qu'on répare tôt plutôt que tard.
+  std::string dernier_refus_reparation;
+  bool reparer_avarie(std::size_t idx) {
+    dernier_refus_reparation.clear();
+    if (!jeu.ares.initialisee()) return false;
+    auto& G = *jeu.ares.etat;
+    if (idx >= G.avaries.size()) return false;
+    mission::Avarie& av = G.avaries[idx];
+    const double now = G.clock.now_days();
+    if (av.reparee) { dernier_refus_reparation = "avarie deja reparee"; return false; }
+    if (av.en_reparation(now)) {
+      dernier_refus_reparation = "reparation deja engagee"; return false;
+    }
+    const mission::CapaciteBord cap = capacite_bord();
+    if (!mission::reparable(av.kind, cap)) {
+      // LE REFUS NOMME LA TECHNO MANQUANTE : sans ça, le joueur ne peut pas
+      // savoir quoi rechercher (piège n°42).
+      dernier_refus_reparation =
+          av.kind == mission::EventKind::MedicalEmergency
+              ? "aucune capacite medicale a bord : rechercher medecine_embarquee [GDD 5.10]"
+              : "aucune capacite de reparation a bord : rechercher maintenance_locale [GDD 5.10]";
+      return false;
+    }
+    av.fin_reparation_days = now + mission::duree_reparation_jours(av, cap);
+    return true;
+  }
+
+  // ═══ LES RÉSERVES NE SUFFISENT PAS ═══ [GDD 9.4, 10.3]
+  // « Une mission mal calculée avant lancement se traduit en dérives coûteuses,
+  // VOIRE EN ÉCHEC si les réserves ne suffisent pas. » Le joueur est à bord : la
+  // gravité n'est donc pas décrétée niveau 5, elle y MONTE — on déclare une perte
+  // grave (Critique) assortie du modificateur d'exposition humaine, et c'est le
+  // barème de [GDD 10.3] (« niveau final augmenté d'un palier si une présence
+  // humaine est exposée à un risque létal ») qui en fait une catastrophe. Écrire
+  // Catastrophe directement court-circuiterait la règle au lieu de l'appliquer.
+  void verifier_reserves_vitales() {
+    if (!jeu.ares.initialisee()) return;
+    auto& G = *jeu.ares.etat;
+    if (!G.lived.active) return;
+    if (G.character.operational_death) return;          // déjà soldé
+
+    // DEUX FAÇONS DE NE PAS RENTRER, et une seule est une faute de calcul.
+    const bool vivres = G.lived.consumables_exhausted();
+    // DOSE AIGUË LÉTALE [GDD 6.6] : `ACUTE_LETHAL_GY` = 4,5 Gy, la DL50 sans
+    // soins. Elle vient d'une éruption, pas d'un oubli de provisionnement — d'où
+    // l'absence de `player_error_causal` sur cette branche : l'environnement est
+    // un ACTEUR [GDD 7.7], et le blindage est un pari, pas une case à cocher.
+    const bool irradie = G.dose_architecte.acute_lethal();
+    if (!vivres && !irradie) return;
+
+    mission::Mission* m = nullptr;
+    for (auto& mm : G.missions)
+      if (mm.contract.id == G.lived.mission_id) { m = &mm; break; }
+    if (!m) { G.lived.disembark(); return; }
+
+    mission::AnomalyEvent ev;
+    ev.mission_id = m->contract.id;
+    ev.date_days  = G.clock.now_days();
+    ev.what       = vivres ? "reserves vitales epuisees a bord"
+                           : "dose aigue letale : blindage insuffisant";
+    ev.severity   = mission::Severity::Critical;
+    ev.modifiers.human_lethal_exposure = true;          // le palier monte ici
+    ev.modifiers.primary_objective_lost = true;
+    ev.modifiers.player_error_causal = vivres;          // provisionner était son métier
+    G.apply_anomaly(*m, ev);
+
+    // ═══ ET LE PERSONNAGE ÉTAIT À BORD ═══ [GDD 3.4, 10.3 niveau 5]
+    // `consequences_for` refuse expressément de trancher : « game_over est décidé
+    // par l'appelant : SEUL le décès du PERSONNAGE (pas d'un équipage PNJ)
+    // termine la partie ». C'est ici, et nulle part ailleurs, qu'on sait qui
+    // volait — d'où le fait que `lived.active` soit la condition d'entrée. Les
+    // deux faits restent distincts : le modificateur d'exposition humaine porte
+    // la GRAVITÉ (un équipage est mort), `lived.active` porte la FIN DE PARTIE
+    // (c'était le joueur).
+    G.character.alive = false;
+    G.character.operational_death = true;
+    // Rendu VISIBLE : une mort opérationnelle que rien n'affiche serait un
+    // drapeau de plus que personne ne lit. La modale de fin de partie existe
+    // déjà ; elle porte désormais deux motifs, et le dit.
+    jeu.game_over = true;
+    jeu.raison_faillite =
+        std::string("MORT OPERATIONNELLE — ")
+        + (vivres ? "reserves vitales epuisees" : "dose aigue letale")
+        + " a bord de " + m->contract.title
+        + ". [GDD 3.4] Aucune passation ne releve d'un deces en mission.";
+
+    m->flight_flown = true;
+    m->flight_success = false;
+    // La chaîne financière se rouvre : il n'y a plus d'absent à protéger.
+    G.finance.suspended = false;
+    G.lived.disembark();
   }
 
   // Quitter la partie : on sauve, puis retour au menu.
@@ -1202,6 +1587,10 @@ struct Session {
 
     // couche ARES : création/reset/rattrapage mensuel (lecture seule sur l'agence)
     jeu.ares.assurer(jeu.agence, jeu.epoch_courant());
+
+    // LES CONSOMMABLES SE SONT CONSOMMÉS DANS LE SOUS-PAS (GameState::tick) ; on
+    // regarde ici s'il en reste. Après `assurer`, donc jamais sur un état absent.
+    verifier_reserves_vitales();
 
     // NOVELLUS EST PUBLIÉE TÔT, ET C'EST UNE DÉPENDANCE, PAS UN RANGEMENT : le vol
     // de caméra ci-dessous lit l'ATTITUDE de la station sur le pont

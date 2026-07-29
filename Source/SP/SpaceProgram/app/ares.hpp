@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "fen/game/GameState.hpp"
+#include "fen/mission/MissionLoop.hpp"   // mission_seed : le tirage reste rejouable
 
 namespace fen::app {
 
@@ -44,6 +45,24 @@ inline const std::vector<OffreModule>& offres_modules() {
       {station::ModuleType::Power,       180.0, 100.0, 150.0, "generation 2 : fonctions energivores"},
   };
   return v;
+}
+
+// ═══ LE PALIER DE LA FILIÈRE ANTIMATIÈRE, LU SUR LA BRANCHE 6 ═══
+// [GDD 5.12.12] « Le rendement énergétique COUPLE la production à la branche
+// énergie et au budget. » Une seule lecture, dans l'ordre décroissant : le
+// palier le plus haut qualifié fait foi, exactement comme le verrou le plus
+// contraignant de [GDD 5.4] mais dans l'autre sens. Le débit cesse ainsi d'être
+// une propriété de la station pour devenir ce que le GDD en fait : le résultat
+// de ce que l'agence sait produire comme ÉNERGIE.
+inline rel::AntimatterTier antimatter_tier(const game::GameState& G) {
+  auto ok = [&G](const char* id) {
+    const tech::TechNode* n = G.tree.find(id);
+    return n && n->operational();
+  };
+  if (ok("antimatiere"))      return rel::AntimatterTier::Mature;
+  if (ok("fusion"))           return rel::AntimatterTier::Fusion;
+  if (ok("fission_spatiale")) return rel::AntimatterTier::Fission;
+  return rel::AntimatterTier::None;
 }
 
 // ---------------------------------------------------------------------------
@@ -134,15 +153,238 @@ struct AresLayer {
   template <class AgenceT>
   void sync_lecture(const AgenceT&) {}
 
+  // ═══ TIRER LES ÉVÉNEMENTS DE BORD ═══ [GDD 9.5, 7.3]
+  // Par FENÊTRES D'UN JOUR de calendrier, et jamais par frame : l'index de
+  // fenêtre EST le numéro du jour, si bien que le tirage ne dépend ni de la
+  // cadence, ni de la fréquence d'image, ni du nombre de fois où l'on a
+  // sauvegardé. `jour_evenements_tire` retient jusqu'où l'on est allé — et une
+  // avance de six mois rattrape ses 180 fenêtres au lieu d'en sauter 179.
+  //
+  // GARDE-FOU : on borne le rattrapage. Une partie qui charge après des années de
+  // temps accéléré ne doit pas tirer dix mille fenêtres dans une frame ; au-delà,
+  // on saute au présent, ce qui est DÉCLARÉ [GDD 6.8] — les pannes d'une période
+  // que le joueur n'a pas vécue ne l'intéressent pas.
+  static constexpr int MAX_FENETRES_PAR_FRAME = 400;
+  static void tirer_evenements_bord(game::GameState& G, const mission::Mission& m,
+                                    double maintenant) {
+    const double jour = std::floor(maintenant);
+    // L'ORIGINE DU TIRAGE EST LE DÉCOLLAGE, PAS LA PREMIÈRE FRAME. Ancrer sur
+    // « maintenant » à la première visite rendait le tirage dépendant de l'instant
+    // où l'on a regardé : une avance de 400 jours d'un seul tenant n'ouvrait
+    // AUCUNE fenêtre (l'index se posait à l'arrivée), et un vol pouvait traverser
+    // deux ans sans la moindre panne. La date d'entrée en vol, elle, est un FAIT
+    // de la mission — même valeur quel que soit le découpage du temps.
+    if (G.lived.jour_evenements_tire < 0.0)
+      G.lived.jour_evenements_tire = std::floor(m.state_entered_days);
+    if (jour <= G.lived.jour_evenements_tire) return;
+    if (jour - G.lived.jour_evenements_tire > MAX_FENETRES_PAR_FRAME) {
+      G.lived.jour_evenements_tire = jour;                // rattrapage borné
+      return;
+    }
+
+    mission::EventContext ctx;
+    ctx.crewed = true;                                     // on est à bord
+    ctx.phase = m.phase;
+    ctx.system_reliability = G.lived.fiabilite_systeme;
+    // La préparation de l'équipage réduit le risque médical : c'est un effet de
+    // Novellus [GDD 11.6], calculé par `station::effects` depuis toujours, écrit
+    // en dur à 1,0 ICI jusqu'au 2026-07-29 — le module médical coûtait 110 M€ et
+    // ne changeait aucun tirage. On lit la valeur GELÉE à l'embarquement, pas
+    // l'état courant de la station : c'est un entraînement reçu avant de partir,
+    // et le relire en vol rendrait les tirages dépendants de ce que l'adjoint
+    // construit ou démonte pendant l'absence.
+    ctx.medical_risk_factor = G.lived.facteur_risque_medical;
+
+    const Rng rng_mission(mission::mission_seed(G.seed, m.contract.id));
+    for (double j = G.lived.jour_evenements_tire + 1.0; j <= jour; j += 1.0) {
+      // ═══ L'ACTIVITÉ SOLAIRE EST CELLE DE LA FENÊTRE, PAS DE « MAINTENANT » ═══
+      // Défaut trouvé par l'oracle de rejouabilité : évaluée une fois pour toutes
+      // à l'instant du tick, elle appliquait à 400 fenêtres la valeur du DERNIER
+      // jour — si bien qu'avancer d'un bloc ou par tranches ne donnait pas les
+      // mêmes éruptions. Le cycle solaire a une période de 11 ans, une année de
+      // fenêtres n'est pas un instant. `WorldEpoch::at` existait déjà pour ça.
+      ctx.solar_activity01 = G.solar.activity01(G.clock.world_epoch().at(j));
+      const auto tirages = mission::sample_events(
+          rng_mission, static_cast<std::uint64_t>(j), j, 1.0, ctx);
+      for (const auto& s : tirages) {
+        if (s.kind == mission::EventKind::SolarParticleEvent) {
+          // ═══ L'ÉRUPTION EST UN INSTANT, ET LE BLINDAGE DÉCIDE ═══ [GDD 6.6]
+          // Là où le GCR résiste au blindage, le SPE y cède exponentiellement :
+          // c'est CE risque-là que la masse achète, et c'est la raison d'être de
+          // l'abri anti-tempête des projets réels.
+          G.dose_architecte.add_acute_gy(
+              mission::dose_aigue_spe_gy(s.magnitude01, G.lived.blindage));
+          continue;                                        // rien à réparer
+        }
+        mission::Avarie av;
+        av.kind = s.kind;
+        av.debut_days = s.t_days;
+        av.gravite01 = s.magnitude01;
+        G.avaries.push_back(av);
+      }
+    }
+    G.lived.jour_evenements_tire = jour;
+
+    // Les réparations engagées arrivent à terme d'elles-mêmes.
+    for (auto& av : G.avaries)
+      if (!av.reparee && av.fin_reparation_days > av.debut_days &&
+          maintenant >= av.fin_reparation_days)
+        av.reparee = true;
+  }
+
+  // Le rapport dτ_bord / dτ_Terre à cet instant [GDD 6.7]. À terre — c'est-à-dire
+  // partout sauf entre le décollage et le débrief d'un vol vécu — il vaut 1 par
+  // construction, et c'est un FAIT, pas un raccourci : l'Architecte partage alors
+  // l'horloge du monde. La phase de vol, elle, est déjà dérivée de la chronologie ;
+  // rien de nouveau n'est à renseigner pour que les deux horloges divergent.
+  static double rapport_horloge_courant(const game::GameState& G) {
+    if (!G.lived.active) return 1.0;
+    for (const auto& mm : G.missions)
+      if (mm.contract.id == G.lived.mission_id) {
+        if (mm.state < mission::MissionState::Launched ||
+            mm.state > mission::MissionState::Debrief) return 1.0;
+        return mission::rapport_horloge_bord(mm.phase, G.lived.horloge);
+      }
+    return 1.0;
+  }
+
   template <class AgenceT>
   void avancer(AgenceT& a) {
     auto& G = *etat;
     const double delta_mois = a.mois - dernier_mois;
     const double delta_jours = delta_mois * ARES_MONTH_S / cst::DAY;
 
-    // horloge + vieillissement (temps propre == temps de jeu hors relativiste)
     G.clock.restore(a.mois * ARES_MONTH_S);
-    G.character.age_bio_s += delta_mois * ARES_MONTH_S;
+
+    // ═══ DEUX HORLOGES, ET UNE SEULE EST LE CALENDRIER ═══ [GDD 6.7, 14.4, 3.4]
+    // `rel::DualClock` était déclaré sur GameState, sauvegardé, rechargé — et
+    // AVANCÉ NULLE PART. Le « vieillissement différentiel qui pèse sur la carrière
+    // et la passation » valait donc exactement zéro, pour toute mission, y compris
+    // celle que le GDD range en régime relativiste. Et l'âge biologique avançait du
+    // temps du CALENDRIER, ce qui n'est vrai que si l'on ne quitte jamais le sol.
+    //
+    // Le rapport vaut 1 tant qu'on est à terre : le coût quand on n'est pas à bord
+    // est une comparaison de chaîne et une addition. Il n'y a pas de raison de
+    // n'accumuler que pendant les vols — l'écart d'une CARRIÈRE est précisément ce
+    // que [GDD 3.4] veut pouvoir opposer au moment de la passation.
+    const double dt_s = delta_mois * ARES_MONTH_S;
+    const double ratio_horloge = rapport_horloge_courant(G);
+    G.dual_clock.advance_ratio(dt_s, ratio_horloge);
+    // L'ÂGE BIOLOGIQUE SUIT LE TEMPS PROPRE, pas le temps du monde [GDD 6.7.4].
+    G.character.age_by_proper_time(dt_s * ratio_horloge);
+
+    // ═══ LA VIE À BORD SE CONSOMME [GDD 9.1, 9.4] ═══
+    // ICI, et pas dans `GameState::tick` — qui n'a aucun appelant (voir l'avis en
+    // tête de cette fonction-là). Le piège a coûté un cycle : le code compilait,
+    // les oracles de `Crew.hpp` passaient, et rien ne se consommait jamais.
+    //
+    // PAS BESOIN DE SOUS-PAS ICI, et ce n'est pas un relâchement : la
+    // consommation est LINÉAIRE en dt, donc l'appeler une fois avec le total
+    // donne EXACTEMENT le même état que N fois avec dt/N. `delta_jours` est déjà
+    // quantifié par `Jeu::faire_couler_le_temps` (sous-pas de 1/64 j), si bien
+    // que 4 frames et 100 frames donnent le même résultat — au flottant près, et
+    // c'est vérifié par oracle. (La recherche, elle, n'est pas linéaire : d'où
+    // l'approximation déclarée qui la concerne, et qui ne s'applique pas ici.)
+    // ET SEULEMENT UNE FOIS LE VOL PARTI : embarquer est une décision prise
+    // AVANT le feu vert (voir `Session::peut_embarquer`), or l'équipage ne vit
+    // pas sur ses réserves de bord pendant la qualification — il est encore à
+    // terre. La condition se LIT sur l'état de la mission plutôt que sur un
+    // second drapeau à tenir à jour.
+    if (G.lived.active && delta_jours > 0.0) {
+      for (const auto& mm : G.missions)
+        if (mm.contract.id == G.lived.mission_id) {
+          if (mm.state >= mission::MissionState::Launched &&
+              mm.state <= mission::MissionState::Debrief) {
+            const double maintenant = G.clock.now_days();
+
+            // ═══ CE QUI PEUT ARRIVER, ARRIVE ═══ [GDD 9.5, 7.3]
+            // `Events.hpp` tirait des anomalies calibrées depuis le premier jour
+            // et personne ne les consommait : la bibliothèque existait sans
+            // qu'aucune anomalie ne se produise jamais. Le tirage se fait par
+            // FENÊTRES D'UN JOUR indexées sur le calendrier — même exigence que
+            // les sous-pas du temps : le même vol rejoué donne les mêmes pannes
+            // aux mêmes dates, quelle que soit la cadence ou la fréquence
+            // d'image. Un tirage par frame serait un dé de plus à chaque GPU.
+            tirer_evenements_bord(G, mm, maintenant);
+
+            // ═══ ET CE QUI EST TOMBÉ EN PANNE COÛTE, CHAQUE JOUR ═══
+            // Les avaries n'appliquent aucun « malus » : elles dégradent les
+            // grandeurs qui existent déjà, et c'est `VitalState::consume` qui en
+            // tire les conséquences. Une panne de support-vie est une hémorragie
+            // de vivres, pas une icône.
+            const mission::EffetsAvaries eff =
+                mission::effets_avaries(G.avaries, maintenant);
+            G.lived.vitals.consume(
+                G.lived.n_crew, delta_jours,
+                mission::boucles_degradees(G.lived.loops, eff));
+            // Fuites (brèche) et surconsommation (malade à bord) : au prorata du
+            // temps écoulé, comme tout le reste.
+            G.lived.vitals.o2_kg    -= eff.fuite_o2_kg_j  * delta_jours;
+            G.lived.vitals.water_kg -= eff.fuite_eau_kg_j * delta_jours;
+            if (eff.surconso_vivres > 1.0)
+              G.lived.vitals.food_kg -=
+                  (eff.surconso_vivres - 1.0) * mission::MetabolicRates{}.food_dry_kg
+                  * G.lived.n_crew * delta_jours;
+            // L'épuration du CO2 se consomme plus vite quand la puissance manque.
+            if (eff.facteur_co2 > 1.0)
+              G.lived.vitals.co2_scrub_capacity_kg -=
+                  (eff.facteur_co2 - 1.0) * mission::MetabolicRates{}.co2_out_kg
+                  * G.lived.n_crew * delta_jours;
+
+            // ═══ ET LA DOSE, QUI NE SE DÉPENSE QUE DANS UN SENS ═══ [GDD 6.6]
+            // `env/Radiation.hpp` était un modèle complet, ancré sur l'Annexe B,
+            // et SANS AUCUN CONSOMMATEUR : [GDD 7.7] déclare l'environnement
+            // « acteur de mission », il n'était que décor. La phase de vol donne
+            // la fraction de ciel ouverte, le cycle solaire la modulation GCR —
+            // les deux existaient déjà, il ne manquait que cette ligne.
+            G.dose_architecte.add_chronic(mission::dose_chronique_sv(
+                delta_jours, mm.phase, G.lived.blindage,
+                G.solar.activity01(G.clock.now_epoch())));
+          }
+          break;
+        }
+    }
+
+    // ═══ LES DÉBRIS RETOMBENT ═══ [GDD 7.8, 10.5]
+    // `add_breakup` était sur le chemin vif (via `apply_anomaly`) mais `tick` ne
+    // vivait que dans `GameState::tick`, qui n'a aucun appelant : les nuages
+    // s'accumulaient SANS JAMAIS DÉCROÎTRE. La promesse de 7.8 — « les couloirs
+    // LEO se nettoient, les couloirs hauts restent pollués » — n'avait donc que
+    // sa moitié punitive. La traînée dépend de l'activité solaire, d'où le même
+    // cycle que ci-dessus.
+    if (delta_jours > 0.0)
+      G.debris.tick(delta_jours, G.solar.activity01(G.clock.now_epoch()));
+
+    // ═══ L'ANTIMATIÈRE S'ACCUMULE — ET FUIT ═══ [GDD 5.12.12, 19.3]
+    // Le DÉBIT n'est pas tabulé, il se dérive de la PUISSANCE de l'usine — et
+    // c'est là qu'était le défaut. La puissance prise était la MARGE DE NOVELLUS
+    // (38 kW au départ, 5 MW au mieux), donc AUCUNE recherche de branche 6 ne
+    // pouvait déplacer le débit : le « vrai levier d'équilibrage » du GDD n'était
+    // pas branché sur son levier. Or 5.12.12 dit exactement où le prendre — « le
+    // rendement énergétique COUPLE la production à la branche énergie » — et une
+    // usine à antimatière n'est pas un module de station.
+    // ET LA FUITE NE S'ARRÊTE JAMAIS, elle : un stock mal confiné se perd que la
+    // filière soit qualifiée ou non — d'où l'argument séparé.
+    // Le palier est reposé À CHAQUE PASSAGE, temps arrêté compris : le poste
+    // AGENCE lit `prod` pour afficher débit et plafond, et une partie en pause
+    // afficherait sinon le palier d'avant la dernière recherche.
+    G.antimatiere.prod = rel::AntimatterProduction::for_tier(antimatter_tier(G));
+    if (delta_jours > 0.0) {
+      const tech::TechNode* n_am = G.tree.find("antimatiere");
+      G.antimatiere.tick(delta_jours, n_am && n_am->operational());
+    }
+
+    // ═══ LA CONFIANCE EST GELÉE PENDANT L'ABSENCE ═══ [GDD 9.3]
+    // « La chaîne de fin de partie financière est suspendue et la confiance GELÉE
+    // à sa valeur de départ : aucune faillite ni perte de crédibilité ne peut
+    // survenir en l'absence du joueur. » On la REPOSE au lieu de garder chaque
+    // écriture : l'adjoint conduit de vraies missions pendant l'absence, donc de
+    // vraies anomalies passent par `apply_anomaly`. Les intercepter une par une
+    // demanderait de n'en oublier aucune, et il suffirait d'en ajouter une demain
+    // pour trouer la promesse ; restaurer l'état la tient par construction.
+    // Posé AVANT le score et la promotion ci-dessous, pour qu'ils lisent la
+    // valeur gelée et non celle que l'adjoint vient d'entamer.
+    if (G.lived.active) G.career.confidence_ares = G.lived.confidence_frozen;
 
     // FINANCES v1.2 [GDD 13.2, 14.2] : un tick par mois ENTIER FRANCHI. Compté
     // par FRONTIÈRE, et non plus par `round(delta_mois)` : depuis que le temps
@@ -475,28 +717,13 @@ struct AresLayer {
              {"antimatiere", "sejour_long", "radioprotection", "nav_profonde"}, inf);
     }
 
-    // LES TERMES PHYSIQUES DU CONTRAT [GDD 4.1] : masse à emporter, budget,
-    // délai, P(succès) exigée. Sans eux, `assess()` n'a rien à évaluer et la
-    // boucle de mission est creuse. Valeurs DÉCLARÉES par famille, PROVISOIRES —
-    // la « matrice mission × technologies » chiffrée est différée [GDD 20].
-    for (auto& e : c.entries()) {
-      mission::Contract& t = e.contract.terms;
-      const std::string& f = e.contract.family;
-      // Budgets calés pour qu'un plan raisonnable au rang requis soit VIABLE
-      // (vérifié par oracle sur le contrat de départ) — le joueur garde la
-      // marge non dépensée [GDD 3.1]. Provisoires [GDD 20].
-      if (f == "sat")            { t.payload_kg = 3000; t.budget_musd = 175; t.deadline_months = 30; t.min_success_prob = 0.85; }
-      else if (f == "science")   { t.payload_kg = 1200; t.budget_musd = 150; t.deadline_months = 40; t.min_success_prob = 0.80; }
-      else if (f == "surface")   { t.payload_kg = 1800; t.budget_musd = 240; t.deadline_months = 48; t.min_success_prob = 0.75; }
-      else if (f == "logistique"){ t.payload_kg = 5000; t.budget_musd = 200; t.deadline_months = 24; t.min_success_prob = 0.90; }
-      else if (f == "service")   { t.payload_kg = 2000; t.budget_musd = 190; t.deadline_months = 30; t.min_success_prob = 0.85; }
-      else if (f == "habite")    { t.payload_kg = 8000; t.budget_musd = 360; t.deadline_months = 36; t.min_success_prob = 0.95; }
-      else if (f == "mars")      { t.payload_kg = 2200; t.budget_musd = 380; t.deadline_months = 54; t.min_success_prob = 0.80; }
-      else if (f == "mars_habite"){t.payload_kg = 20000; t.budget_musd = 1200; t.deadline_months = 72; t.min_success_prob = 0.90; }
-      else if (f == "nep")       { t.payload_kg = 12000; t.budget_musd = 650; t.deadline_months = 60; t.min_success_prob = 0.85; }
-      else if (f == "relativiste"){t.payload_kg = 5000; t.budget_musd = 2500; t.deadline_months = 120; t.min_success_prob = 0.80; }
-      else                       { t.payload_kg = 1500; t.budget_musd = 150; t.deadline_months = 36; t.min_success_prob = 0.80; }
-    }
+    // LES TERMES PHYSIQUES DU CONTRAT [GDD 4.1] — la table vit désormais dans
+    // `MissionLoop.hpp` (`contract_terms_for_family`), pour qu'une mission
+    // construite HORS catalogue puisse en hériter au lieu de naître avec des
+    // termes nuls. Voir le commentaire là-bas : le harnais de capture souffrait
+    // exactement de ça, et affichait un verrou de viabilité faux dans chaque image.
+    for (auto& e : c.entries())
+      e.contract.terms = mission::contract_terms_for_family(e.contract.family);
 
     // Le corps du mail vient du CONTRAT, jamais de l'interface [GDD 10.2].
     // ASCII STRICT (convention du projet) : les std::string sont affichees en

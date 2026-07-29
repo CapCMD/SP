@@ -132,10 +132,34 @@ inline std::vector<SampledEvent> sample_events(const Rng& mission_rng,
   return out;
 }
 
-// Dose SPE brute d'un événement tiré : magnitude01 -> Gy non blindés (0.1..5).
-// Log-uniforme : les monstres sont rares mais existent [GDD 6.6].
+// ═══ DOSE SPE BRUTE D'UN ÉVÉNEMENT TIRÉ ═══ [GDD 6.6, Annexe B, Annexe E]
+//
+// ⚠ RECALIBRÉ LE 2026-07-28, ET LE DÉFAUT ÉTAIT MESURABLE. La version précédente
+// (`0.1 * pow(50, magnitude01)`, magnitude UNIFORME) disait en commentaire « les
+// monstres sont rares » et faisait l'inverse : une loi log-uniforme sur une
+// magnitude uniforme donne **41 % d'événements au-dessus du gray**. Couplée aux
+// 1 à 10 SPE/an de `spe_rate_per_year`, elle produisait **19,9 Gy** d'aigu sur
+// une seule croisière martienne — mesuré, et incompatible avec l'Annexe B du GDD
+// qui ancre l'aller-retour martien à ~0,3-0,7 Sv. Un équipage y mourait
+// systématiquement, quelle que soit l'architecture.
+//
+// TROIS PARAMÈTRES DÉCLARÉS, et une CIBLE DE CALIBRATION explicite [Annexe E] :
+// derrière la seule coque d'un véhicule habité, la dose SPE cumulée sur un
+// aller-retour martien doit être du MÊME ORDRE que la dose GCR sur le même
+// trajet — c'est ce que dit la littérature (les deux contributions sont
+// comparables, l'une chronique et l'autre en pics). Cette cible est VÉRIFIÉE PAR
+// ORACLE : si l'un de ces trois nombres bouge, l'oracle le dit.
+inline constexpr double SPE_DOSE_MIN_GY  = 0.002;  // événement courant, quelques mGy
+inline constexpr double SPE_DOSE_MAX_GY  = 5.0;    // classe août 1972, une par cycle
+inline constexpr double SPE_TAIL_EXPOSANT = 6.0;   // sévérité de la queue (rareté)
+
 inline double spe_unshielded_gy(double magnitude01) {
-  return 0.1 * std::pow(50.0, magnitude01);
+  // La magnitude tirée est uniforme ; c'est ICI qu'on lui donne sa loi. Élever à
+  // une puissance > 1 écrase la masse de probabilité vers les petits événements
+  // et rend les monstres réellement rares — ce que le commentaire d'origine
+  // promettait déjà.
+  const double y = std::pow(magnitude01, SPE_TAIL_EXPOSANT);
+  return SPE_DOSE_MIN_GY * std::pow(SPE_DOSE_MAX_GY / SPE_DOSE_MIN_GY, y);
 }
 
 } // namespace fen::mission

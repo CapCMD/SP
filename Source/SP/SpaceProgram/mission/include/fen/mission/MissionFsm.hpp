@@ -74,6 +74,17 @@ struct Mission {
   // parti. 0 = cible non nommée par le contrat, croisière non datée [GDD 6.8].
   double tof_days{0.0};
 
+  // ═══ LE β DE CROISIÈRE, FIGÉ AU FEU VERT ═══ [GDD 6.7, 19.4, décision 10]
+  // « β découle de l'architecture » : il se calcule une fois, depuis l'antimatière
+  // embarquée et la masse sèche du plan, et il est FIGÉ comme `tof_days` et le
+  // tirage de navigation — un vol déjà parti ne change pas de vitesse parce que
+  // l'usine a produit trois grammes de plus. Il vivait auparavant sur
+  // `Lived::horloge`, donc il n'existait QUE pour une mission vécue : une sonde
+  // relativiste robotique n'en avait pas, alors que c'est elle qui va le plus
+  // vite. C'est une propriété du VOL, pas de la présence du joueur à bord.
+  // 0 pour toute architecture non relativiste, c'est-à-dire toutes les autres.
+  double beta_croisiere{0.0};
+
   // ═══ LA NAVIGATION RÉELLEMENT OBTENUE ═══ [GDD 8.1, 8.2]
   // Le Δv de correction que l'erreur d'injection RÉELLEMENT COMMISE exige.
   // Tirée au feu vert sur un sous-flux de la graine de mission (donc rejouable),

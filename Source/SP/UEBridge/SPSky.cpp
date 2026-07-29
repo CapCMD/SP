@@ -73,8 +73,114 @@ TStatId USPSkySubsystem::GetStatId() const
 // ---------------------------------------------------------------------------
 // Une carte du ciel : asset importé si présent, sinon décodage du JPEG livré
 // avec le jeu de référence. ImageWrapper est déjà une dépendance du module.
+#if 0   // ═══ DIAGNOSTIC ARCHIVÉ — voir SPSky.h, « ce que trois mesures ont dit »
+// Conservé DÉSACTIVÉ et non supprimé : il porte la seule instrumentation qui
+// sache répondre à « ce champ d'étoiles est-il une vraie carte du ciel ? ». Le
+// jour où la texture change, il se rallume en une ligne. Le supprimer
+// obligerait à le réécrire — et à repayer les deux instruments ratés.
+// ═══ DANS QUEL SENS COURT LA LONGITUDE GALACTIQUE ? ═══
+// Le repère de la carte est galactique (mesuré : centroïde à V = 0,496). Reste
+// le SENS de l, qu'aucune convention ne fixe : les panoramas astronomiques sont
+// dessinés vus de l'intérieur, l croissant vers la gauche, mais une texture de
+// sphère peut avoir été retournée à la fabrication. Se tromper mirore le ciel en
+// longitude — exactement la faute qu'on vient de corriger.
+//
+// ON MESURE SUR LES NUAGES DE MAGELLAN : les deux objets brillants les plus
+// nets HORS du plan galactique, à des coordonnées connues.
+//     GN de Magellan : l = 280,5°  b = −32,9°   ->  V = 0,683
+//     PN de Magellan : l = 302,8°  b = −44,3°   ->  V = 0,746
+//   . si l CROÎT avec U : U = 0,5 + l/360 mod 1 -> 0,279 et 0,341
+//   . si l DÉCROÎT      : U = 0,5 − l/360 mod 1 -> 0,721 et 0,659
+// On cherche donc les deux taches les plus lumineuses sous la bande et on lit U.
+static void DiagnostiquerSensLongitude(const TCHAR* Fichier)
+{
+	const FString Chemin = FPaths::Combine(
+		FPaths::ProjectDir(), TEXT("Space Program/assets/textures"), Fichier);
+	TArray<uint8> Brut;
+	if (!FFileHelper::LoadFileToArray(Brut, *Chemin)) return;
+	IImageWrapperModule& Mod =
+		FModuleManager::LoadModuleChecked<IImageWrapperModule>(TEXT("ImageWrapper"));
+	const TSharedPtr<IImageWrapper> W2 = Mod.CreateImageWrapper(EImageFormat::JPEG);
+	if (!W2.IsValid() || !W2->SetCompressed(Brut.GetData(), Brut.Num())) return;
+	TArray64<uint8> Px;
+	if (!W2->GetRaw(ERGBFormat::BGRA, 8, Px)) return;
+	const int64 W = W2->GetWidth(), H = W2->GetHeight();
+
+	// Grille grossière (144 x 72 cases, 2,5° de côté) : on cherche des TACHES,
+	// pas des étoiles. Une case porte la luminance MOYENNE de son carré.
+	const int GX = 144, GY = 72;
+	TArray<double> Case; Case.Init(0.0, GX * GY);
+	TArray<double> Cnt;  Cnt.Init(0.0, GX * GY);
+	for (int64 y = 0; y < H; ++y)
+	{
+		const int gy = int((y * GY) / H);
+		for (int64 x = 0; x < W; ++x)
+		{
+			const int gx = int((x * GX) / W);
+			const int64 i = y * W + x;
+			const double L = (Px[i * 4 + 2] * 77 + Px[i * 4 + 1] * 150 + Px[i * 4 + 0] * 29) / 256.0;
+			Case[gy * GX + gx] += L; Cnt[gy * GX + gx] += 1.0;
+		}
+	}
+	for (int k = 0; k < GX * GY; ++k) if (Cnt[k] > 0.0) Case[k] /= Cnt[k];
+
+	// ═══ ON CHERCHE DES TACHES COMPACTES, PAS DES ZONES BRILLANTES ═══
+	// Deux essais à la brillance ABSOLUE n'ont rien prouvé : les maxima sortaient
+	// à U ≈ 0,5, c'est-à-dire le HALO DU BULBE, qui reste le plus lumineux
+	// jusqu'à b ≈ −38°. L'instrument était le mauvais — un halo est LISSE, un
+	// Nuage de Magellan est COMPACT. On mesure donc le CONTRASTE LOCAL : la case
+	// moins la moyenne d'une couronne autour d'elle. Un fond lisse s'annule, une
+	// tache ressort. *Quand deux mesures donnent la même mauvaise réponse, c'est
+	// l'instrument qu'il faut changer, pas la fenêtre.*
+	TArray<double> Contraste; Contraste.Init(-1.0e9, GX * GY);
+	for (int gy = 3; gy < GY - 3; ++gy)
+		for (int gx = 0; gx < GX; ++gx)
+		{
+			double somme = 0.0; int n = 0;
+			for (int dy = -3; dy <= 3; ++dy)
+				for (int dx = -3; dx <= 3; ++dx)
+				{
+					if (FMath::Abs(dx) <= 1 && FMath::Abs(dy) <= 1) continue;   // le coeur
+					const int y2 = gy + dy, x2 = ((gx + dx) % GX + GX) % GX;
+					somme += Case[y2 * GX + x2]; ++n;
+				}
+			if (n > 0) Contraste[gy * GX + gx] = Case[gy * GX + gx] - somme / n;
+		}
+
+	for (int rang = 0; rang < 3; ++rang)
+	{
+		int best = -1; double bv = -1.0e9;
+		for (int gy = 0; gy < GY; ++gy)
+		{
+			const double V = (gy + 0.5) / GY;
+			// Fenêtre : b de −29° à −54°, qui encadre les deux Nuages
+			// (V = 0,683 et 0,746) en excluant la zone du bulbe.
+			if (V < 0.66 || V > 0.80) continue;
+			for (int gx = 0; gx < GX; ++gx)
+				if (Contraste[gy * GX + gx] > bv) { bv = Contraste[gy * GX + gx]; best = gy * GX + gx; }
+		}
+		if (best < 0) break;
+		const int gx = best % GX, gy = best / GX;
+		const double U = (gx + 0.5) / GX, V = (gy + 0.5) / GY;
+		UE_LOG(LogTemp, Warning,
+		       TEXT("[SPSky][DIAG-l] tache %d : U=%.3f V=%.3f (contraste %.2f) "
+		            "| l croissant attend U=0.279/0.341 | l decroissant attend U=0.721/0.659"),
+		       rang + 1, U, V, bv);
+		// On efface un voisinage pour que le rang suivant trouve une AUTRE tache.
+		for (int dy = -3; dy <= 3; ++dy)
+			for (int dx = -3; dx <= 3; ++dx)
+			{
+				const int y2 = gy + dy, x2 = ((gx + dx) % GX + GX) % GX;
+				if (y2 >= 0 && y2 < GY) Contraste[y2 * GX + x2] = -1.0e9;
+			}
+	}
+}
+
+#endif // diagnostic archivé
+
 UTexture2D* USPSkySubsystem::ChargerCarteCiel(const TCHAR* CheminAsset, const TCHAR* Fichier)
 {
+
 	if (UTexture2D* Asset = LoadObject<UTexture2D>(nullptr, CheminAsset))
 	{
 #if WITH_EDITOR
@@ -195,9 +301,27 @@ void USPSkySubsystem::BuildSky()
 	SkyActor->Dome->bAffectDistanceFieldLighting = false;
 	SkyActor->Dome->bAffectIndirectLightingWhileHidden = false;
 	SkyActor->Dome->bVisibleInRayTracing = false;
-	// L'ÉCHELLE NÉGATIVE retourne la sphère : on en voit l'intérieur même avec
-	// un matériau à une seule face.
-	SkyActor->Dome->SetWorldScale3D(FVector(-SKY_RADIUS_UU / RayonMesh));
+	// ═══ L'ÉCHELLE EST POSITIVE, ET C'EST UNE CORRECTION ═══ (2026-07-28)
+	// Elle valait `-SKY_RADIUS_UU / RayonMesh` : une échelle négative sur les
+	// TROIS axes, pour voir l'intérieur de la sphère « même avec un matériau à
+	// une seule face ». Or `M_SP_Starfield` est DEUX FACES depuis sa création
+	// (`Tools/make_sky.py` : `two_sided = True`) — la négation ne servait donc
+	// plus à rien, et elle coûtait cher.
+	//
+	// CE QU'ELLE FAISAIT, exactement : une homothétie de rapport négatif uniforme
+	// est une INVERSION PAR LE CENTRE. L'œil étant à l'origine, regarder dans la
+	// direction v atteignait le point de maillage situé en −v : **tout le ciel
+	// était vu à son ANTIPODE**. Ce n'est pas « un miroir » comme l'annonçait
+	// l'ancien commentaire — c'est plus fort, et ça expliquait pourquoi personne
+	// ne l'avait vu : la Voie lactée est un GRAND CERCLE, et un grand cercle est
+	// invariant par inversion centrale. La bande tombait au bon endroit ; seul
+	// son CONTENU était retourné, bulbe galactique compris.
+	//
+	// Positive, avec le matériau deux faces : chaque direction retrouve son texel.
+	// Le repli du moteur (`EmissiveTexturedMaterial`) est à une seule face — s'il
+	// sert, la voûte disparaît, ce qui est un défaut VISIBLE donc diagnosticable,
+	// là où l'antipode était silencieux.
+	SkyActor->Dome->SetWorldScale3D(FVector(SKY_RADIUS_UU / RayonMesh));
 
 	if (UMaterialInstanceDynamic* M = UMaterialInstanceDynamic::Create(Base, SkyActor->Dome))
 	{

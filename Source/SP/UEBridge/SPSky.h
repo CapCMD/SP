@@ -37,12 +37,59 @@
 // de 1,5x. Le calcul est juste et n'expliquait RIEN : ce n'était pas 8192 px qui
 // s'affichaient mais 32. Voir ChargerTextureEtoiles.
 //
-// APPROXIMATION DÉCLARÉE [GDD 6.8] : la sphère est retournée par une échelle
-// négative uniforme, donc le ciel est vu en MIROIR, et son orientation n'est
-// pas calée sur le repère équatorial J2000. Les étoiles ponctuelles sont
-// PROCÉDURALES (graine fixe), pas un catalogue : aucune constellation réelle.
-// C'est un décor, pas une carte du ciel : aucune mesure du jeu n'en dépend.
-// À lever avec la passe IAU / un catalogue Hipparcos.
+// ═══ CE QUE LA VOÛTE MONTRE, ET DANS QUEL REPÈRE ═══ (mesuré le 2026-07-28)
+//
+// ~~la sphère est retournée par une échelle négative, le ciel est vu en MIROIR~~
+// **CORRIGÉ** : l'échelle est positive (voir `BuildSky`). Le défaut n'était
+// d'ailleurs pas un miroir mais une INVERSION CENTRALE — tout le ciel à son
+// antipode. Invisible parce qu'un grand cercle (la Voie lactée) est invariant
+// par cette inversion : seule sa garniture était retournée.
+//
+// LE REPÈRE DE LA CARTE EST **GALACTIQUE**, et c'est une MESURE, pas une
+// supposition : le centroïde des 1 % de pixels les plus brillants de
+// `8k_stars_milky_way.jpg` (8192x4096) tombe à **U = 0,5133, V = 0,4962**.
+// C'est le V qui tranche — en galactique la bande suit exactement b = 0, donc
+// V = 0,5 ; en équatorial elle balaierait V de 0,16 à 0,84 (grand cercle incliné
+// de 62,9°) et son centroïde serait tiré vers le bulbe, à V = 0,661.
+//
+// ═══ CE QUE TROIS MESURES ONT DIT, ET POURQUOI ON S'ARRÊTE LÀ ═══
+//
+// La convention UV du maillage n'est PAS un obstacle : `Tools/diag_body_uv.py`
+// l'a mesurée sur l'asset livré le 2026-07-27 —
+//     U = 0,5 + lon/360   V = (90 − lat)/180   (−X = lon 0, +Z = pôle nord)
+// Restait UN bit : le SENS de la longitude galactique dans la texture. Se
+// tromper mirore le ciel en longitude, soit exactement la faute qu'on vient de
+// corriger — on ne pouvait donc pas le deviner.
+//
+// TROIS MESURES, DEUX INSTRUMENTS, AUCUNE RÉPONSE (diagnostic archivé sous
+// `#if 0` dans SPSky.cpp) :
+//   1. brillance absolue hors plan (V > 0,60) -> maxima à U ≈ 0,50 : le HALO DU
+//      BULBE, pas les Nuages ;
+//   2. fenêtre resserrée (b de −29° à −54°)   -> encore U ≈ 0,50, luminance 2-4
+//      sur 255. *Deux mesures qui donnent la même mauvaise réponse accusent
+//      l'instrument, pas la fenêtre* ;
+//   3. CONTRASTE LOCAL (case moins couronne), le bon détecteur pour une tache
+//      compacte sur fond lisse -> trois candidats à contraste 1,58 / 1,65 / 1,67
+//      sur 255, indiscernables entre eux, et AUCUN aux positions attendues
+//      (Grand Nuage V = 0,683, Petit Nuage V = 0,746).
+//
+// CONCLUSION, ET ELLE VAUT MIEUX QUE LA MESURE MANQUÉE : les Nuages de Magellan
+// ne sont pas détectables dans cette image. Joint au centroïde suspectement
+// symétrique (U = 0,5133, V = 0,4962), cela dit que `8k_stars_milky_way.jpg` est
+// un panorama STYLISÉ, pas une carte photométrique du ciel. **Le caler sur J2000
+// serait une fausse précision** — habiller un décor en instrument, ce que
+// [GDD 12.5 / 19.6] refuse explicitement : « une approximation identifiée est
+// autorisée ; une approximation déguisée en certitude ne l'est pas. »
+//
+// LE VRAI REMÈDE EST AILLEURS, et le §6 point 10 le disait déjà : des étoiles en
+// POINTS depuis un CATALOGUE réel (Hipparcos). Les points sont nets à tout zoom
+// (taille donnée à l'écran), portent de vraies constellations, et un catalogue
+// EST daté en J2000 — l'alignement devient alors exact par construction au lieu
+// d'être ajusté sur une image. La voûte resterait ce qu'elle est : une nébulosité
+// de fond. Les étoiles ponctuelles actuelles sont PROCÉDURALES (graine fixe).
+//
+// D'ici là, DÉCLARÉ [GDD 6.8] : la voûte n'est pas orientée sur le ciel réel.
+// C'est un décor — aucune mesure du jeu n'en dépend.
 #pragma once
 
 #include "CoreMinimal.h"

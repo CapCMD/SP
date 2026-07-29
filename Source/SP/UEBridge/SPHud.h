@@ -151,8 +151,19 @@ private:
 
 	fen::app::Session* Session = nullptr;
 	TSharedPtr<class SBox> Host;
+	// Les avaries en cours, en TÊTE du poste CONTRÔLE [GDD 9.5] : une alarme se
+	// place avant le reste, pas sous la ligne de flottaison.
+	void AjouterAvaries(const TSharedRef<class SVerticalBox>& Col,
+	                    fen::app::Session& Se, fen::game::GameState& G);
+
 	int32 PosteAffiche = -2;             // dernier poste construit (-2 = jamais)
 	float Echelle = 1.0f;
+	// ═══ UN POSTE DOIT VIVRE QUAND LE MONDE VIT ═══ [GDD 9.1, 14.2]
+	// Date du modèle au moment de la dernière construction, et instant réel de
+	// celle-ci : le poste se reconstruit quand le CALENDRIER a bougé, à rythme
+	// borné. Voir SSPPoste::Tick.
+	double MoisAffiche = -1.0;
+	double DernierRefresh = 0.0;
 };
 
 // ---------------------------------------------------------------------------

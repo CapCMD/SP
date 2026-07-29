@@ -81,6 +81,15 @@ celle de la VRAIE fenêtre, et la position dans la chronologie est **calculée**
 durée change, la capture suit toute seule. `injection` et `insertion` sont la
 MÊME phase (manœuvre critique) à deux instants : la première et la dernière.
 
+**`-spvecu`** **met le joueur À BORD** [GDD 9, décision 18] : la MISSION VÉCUE.
+Réutilise toute la machinerie de `-spvol` (dont il implique `=croisiere`, la seule
+phase où le monde peut être accéléré) au lieu d'en poser une seconde, et **pose
+les conditions de [GDD 9.2] dans le MODÈLE plutôt que de désactiver la porte** :
+rang terminal, `sejour_long` et recyclage qualifiés, puis `Session::embarquer()` —
+la porte du bouton. L'état demande autrement une carrière entière : sans ce
+drapeau, ni la télémétrie vitale du poste CONTRÔLE ni le gel de l'agence [GDD 9.3]
+ne se photographient. À combiner avec `-sppost=3` et `-spcadence=4`.
+
 **`-spcode[=vol]`** **ouvre l'ATELIER LOGICIEL du mode PRO** [GDD 15.1, 15.5] :
 la partie de capture démarre en PRO, et le poste CONTRÔLE s'ouvre sur sa face
 éditeur. `-spcode=vol` reste sur la CONDUITE DE MISSION, en PRO — l'autre face,
@@ -88,6 +97,17 @@ celle où le logiciel embarqué décide. Même office que `-spvol` : le mode d'a
 se choisit à la création d'une partie, écran qu'une capture ne traverse pas ;
 sans ce drapeau, l'éditeur serait un écran que rien ne peut photographier.
 À combiner avec `-sppost=3`.
+
+**`-spantimatiere`** **qualifie la filière de fin d'arbre et fait couler son
+stock** [GDD 5.12.12, 19.3]. Le bloc ANTIMATIÈRE du poste AGENCE — débit de
+l'usine avec sa puissance et son rendement, plafond réel **avec sa cause**, écart
+au seuil relativiste — ne s'affiche que filière qualifiée, délibérément (sinon il
+ferait du bruit pendant toute la partie). Il était donc invisible à toute
+capture, alors qu'il porte toute la calibration de fin de jeu [Annexe E]. Même
+office que `-spvol` et `-spvecu` : on pose l'**état du modèle**, et le stock est
+obtenu en faisant **couler la production réelle** sur l'horizon de calibration —
+jamais en écrivant un nombre de grammes, qui ne prouverait que l'existence de la
+ligne d'affichage. À combiner avec `-sppost=0`.
 
 **`-sphandoff`** (avec `-spscene=map`) **gèle l'instant de la reprise** en 1re
 personne au bout du vol [M] : plan système actif, caméra amarrée sur l'œil du
@@ -128,8 +148,39 @@ conservées dans `Space Program/_archive/imgui_20260724/`.
 | **LE RYTHME DU TEMPS EN MISSION [GDD 14.3]** : une phase critique IMPOSE un plafond de cadence | **FAIT (2026-07-27), VÉRIFIÉ PAR CAPTURE.** « Toute manœuvre fine RAMÈNE le temps à un rythme lent » — le verbe du GDD est actif, donc le plafond est OPPOSABLE, pas suggéré. **`mission/MissionTempo.hpp`** (C++ pur) le DÉDUIT au lieu de le saisir : à la cadence r, une phase de durée propre D disparaît en D/r secondes réelles ; on exige qu'elle en dure au moins `OBSERVATION_MIN_S` = 20 s (SEUL paramètre libre de la loi, déclaré [GDD 6.8]), d'où le cran le plus rapide admissible. Les DURÉES sont des grandeurs sourcées, pas des réglages : ascension ~9 min (Falcon 9 SECO T+8 min 40), EDL ~7 min (MSL), insertion ~10 min (Apollo LOI 6 min 2 s). Aux cinq crans de `TimeRate`, toute phase < ~10 jours retombe sur le TEMPS RÉEL — résultat attendu, mais CALCULÉ, donc il se déplacera tout seul quand une phase durera des semaines. PLANCHER : jamais la pause — le modèle empêche d'aller trop vite, il ne fige pas le monde à la place du joueur [GDD 14]. **La phase de vol est DÉRIVÉE** (`flight_phase_of` : état FSM + temps passé dedans + famille) : `Mission::phase` était un drapeau que RIEN ne renseignait (piège n°20b) et que seule une saisie manuelle aurait pu remplir ; elle est maintenant vivante, rejouable, et rien de plus à sauvegarder. Le prédicat de phase critique est **partagé avec `Events.hpp`** (taux d'anomalie) : une seule définition pour deux lois qui disent la même chose. Enforcement à DEUX niveaux, pour que la faute soit impossible et non corrigée après coup : `Jeu::regler_cadence()` est la porte unique (les 4 écritures — bandeau, poste AGENCE, touches [P]/[1-5], `-spcadence` — y passent) ET `faire_couler_le_temps()` rappelle le plafond avant de convertir la moindre seconde. Le feu vert d'une mission appelle `appliquer_plafond()` DANS SA FRAME : c'est la manœuvre qui freine le monde, pas le joueur qui doit y penser. AFFICHÉ sur les trois surfaces (piège n°40) : bandeau `SSPTemps` (crans fermés en rouge + « RYTHME IMPOSE : ASCENSION »), poste AGENCE (boutons éteints + motif en toutes lettres), et la barre de la carte qui montre la cadence RÉELLEMENT appliquée. **PREUVE** (`-spvol`, nouveau drapeau §1) : deux captures à 900 frames, même `-spcadence=4` demandé — libre, le monde avance de 3 mois (OCT 27 2026, cran MOIS vert) ; sous ascension, il ne bouge pas (JUL 26 2026, `REAL RATE`, JOUR/SEM/MOIS en rouge). `ue_tempo_libre.png`, `ue_tempo_impose.png`, `ue_tempo_poste_agence.png`. RESTE : ~~l'insertion et l'EDL ne sont pas encore DATÉES~~ — **FAIT le 2026-07-27**, voir la ligne suivante |
 | **LA CHRONOLOGIE DE VOL [GDD 4.1, 9, 14.3]** : le vol DURE, et ses phases ont une date | **FAIT (2026-07-27), VÉRIFIÉ PAR CAPTURE.** `mission/FlightTimeline.hpp`. « Lancer » et « débriefer » étaient deux clics : un vol vers Mars ne consommait PAS UNE SECONDE de temps de jeu, et une phase sans date n'arrive jamais — d'où un plafond de cadence qui ne mordait qu'à l'ascension. Le vol a désormais une suite de segments jointifs depuis le feu vert (ascension → parking → injection → croisière → **insertion** ou **EDL** → exploitation), et **`flight_phase_of` LIT cette chronologie** au lieu de deviner. **AUCUNE DURÉE N'EST UN RÉGLAGE** : les trois durées critiques restent sourcées (Falcon 9 / MSL / Apollo LOI) et **tout le reste est dérivé par Kepler** de l'orbite concernée — une révolution de parking à 200 km (88,5 min), le transit GTO comme demi-période d'ellipse (5 h 15), le phasage de rendez-vous comme profil à 4 orbites. **L'orbite géostationnaire n'est même pas un chiffre** : `geo_radius_m()` = (µ/ω²)^⅓ sur la rotation SIDÉRALE, et on retrouve 42 164 km sans l'avoir écrit. **La croisière interplanétaire n'est pas inventée du tout** : c'est la DURÉE DE TRANSIT de la fenêtre réellement visée — `astro::WindowResult` la calculait déjà (c'est l'axe des durées du porkchop) **sans jamais la publier**, elle ne répondait qu'à « quand partir ? ». Fenêtre 2026 : optimum 310 j, transfert disponible **329 j**. **CE QU'ON NE SAIT PAS CALCULER EST DÉCLARÉ** [GDD 6.8] : une famille dont le contrat ne nomme pas de cible (« science ») et une spirale NEP n'ont PAS de date d'arrivée (`dated == false`), et un vol non daté ne bloque rien. **CONSÉQUENCE, et c'est le point** : `Launched → Debrief` a maintenant un **GATE D'ARRIVÉE** dont le refus CHIFFRE l'attente (« vol en cours : arrivee dans 249 jours »), et le plafond de cadence mord enfin **à l'insertion et à l'EDL**. **PREUVE** : `-spvol=insertion -spcadence=4` → bandeau « RYTHME IMPOSE : MANOEUVRE CRITIQUE », cran REEL vert, JOUR/SEM/MOIS rouges, calendrier immobile (`ue_chrono_insertion.png`) ; `-spvol=edl` → « RYTHME IMPOSE : EDL » (`ue_chrono_edl.png`) ; `-spvol=croisiere` → cran MOIS vert, le monde avance de 4 mois pendant que le poste CONTROLE affiche « PHASE DE VOL : CROISIERE / ARRIVEE : dans 165 jours » (`ue_chrono_poste_controle.png`) |
 
-Oracles hors moteur — **compteurs RELEVÉS en exécutant les 11 suites le
-2026-07-27, après la chronologie de vol.** Ne pas les recopier : les remesurer.
+| **LA MISSION VÉCUE [GDD 9, décision 18]** : le joueur EMBARQUE | **FAIT (2026-07-28), VÉRIFIÉ PAR CAPTURE.** Le chapitre 9 avait un modèle complet et **aucune porte d'entrée** : `try_embark` sans appelant, `VitalState` jamais instancié, `suspended` posé par les seuls tests, `journal_absence` orpheline. Quatre choses désormais réelles : (1) **les vivres pèsent** — leur masse entre dans Tsiolkovsky, la durée est la **période synodique** calculée (779,9 j, écrite nulle part), les boucles se déduisent de la branche 4, et le recyclage quasi fermé rend **16,1 t au décollage** ; (2) **la porte** [GDD 9.2] — mission habitée, une seule à la fois, confiance au seuil habité, et pour une mission LONGUE (> incrément ISS) le **rang terminal + `sejour_long`** ; on embarque **avant le feu vert** (piège n°71) ; (3) **l'absence** [GDD 9.3] — chaîne financière suspendue, confiance REPOSÉE à chaque tick, `journal_absence` écrite au retour ; (4) **les réserves épuisées tuent** — Critique + exposition humaine = catastrophe par le barème de 10.3, et la fin de partie tient à `lived.active` parce que `consequences_for` refuse expressément de trancher. Sauvegarde **V2** (`Reader::version()`, premier usage : une V1 se relit intacte). Surface : bloc « VIE À BORD » au poste CONTRÔLE + EMBARQUER/DÉBARQUER avec motif de refus. **PREUVE** : `ue_vecu_poste_controle.png` (`-spvecu`) — 6 à bord, 896,9 j d'autonomie, boucles 93 %/85 %, « ARES : sous l'adjoint — confiance gelée à 70 », croisière, arrivée dans 322 j. Voir §2, « LA MISSION VÉCUE » |
+
+| **LE VERROU DES RADIATIONS [GDD 6.6, 7.7, 19.7]** : l'environnement devient un ACTEUR | **FAIT (2026-07-28), VÉRIFIÉ PAR CAPTURE.** `env/Radiation.hpp` était complet, ancré sur l'Annexe B, et **sans aucun consommateur** ; `debris.tick` ne vivait que dans le tick mort, si bien que les nuages s'accumulaient **sans jamais retomber**. Désormais : (1) **le blindage est une masse DÉRIVÉE** — 25 m³/personne (NASA), cylindre L=2D, d'où 164 m² pour six et **32,8 t à 20 g/cm²** ; (2) **la dose s'accumule** sur le chemin vif, géométrie du ciel lue sur la phase, GCR anti-corrélé au cycle solaire ; (3) **elle appartient au personnage** (`dose_architecte`), verrouille `peut_embarquer` à 1 Sv et se sérialise ; (4) **les débris retombent** — 300 km : 698 → 0 objets en 2 ans, 1200 km : inchangé [GDD 7.8, 10.5]. **ET LE MODÈLE ENSEIGNE CE QUE PERSONNE N'A ÉCRIT** : doubler la masse au décollage (205 → 397 t) n'achète que **11 % de dose en moins** (0,94 → 0,83 Sv) — le GCR ne se blinde pas, la réponse est un transit plus court. Un aller-retour martien nu = 0,94 Sv contre 1,0 Sv de limite de carrière. Surface : curseur de blindage (masse + dose promise) et deux lignes de dose dans « VIE À BORD ». Voir §2, « LE VERROU DES RADIATIONS » |
+
+| **LES ANOMALIES [GDD 9.5, 9.1]** : la bibliothèque se produit enfin | **FAIT (2026-07-28), VÉRIFIÉ PAR CAPTURE.** `Events.hpp` tirait des événements calibrés depuis toujours et **personne ne les consommait**. `mission/Avaries.hpp` : une éruption est un INSTANT (une dose, le blindage décide), une panne est un ÉTAT qui coûte CHAQUE JOUR — boucles dégradées, épuration usée, fuites, surconsommation, boucle sol coupée. **Réparer est une CAPACITÉ, pas un dé** [GDD 5.10] : la branche 4 l'achète, deux nœuds raccourcissent le travail, et l'avarie coûte pendant les travaux. **SYMÉTRIE DU BLINDAGE** : inutile contre le GCR, **exponentiel contre un SPE** — 5,00 Gy létaux nus, 1,32 Gy derrière 20 g/cm² (survivable, pas inoffensif) : la raison d'être des abris anti-tempête. **TROIS DÉFAUTS DU MODÈLE TROUVÉS PAR LA MESURE** : paramètres SPE incohérents avec l'Annexe B (19,9 Gy par croisière — recalibrés sur cible vérifiée par oracle, 1,55 Sv SPE contre 0,91 GCR, 3,8 % au-dessus du gray contre 41 %) ; blindage partant de zéro (un équipage n'est jamais nu — coque 7,5 g/cm² déclarée, non facturée) ; activité solaire évaluée à « maintenant » au lieu de la date de fenêtre. Tirage **rejouable** : 400 j d'un bloc ou 8 × 50 j → mêmes pannes, mêmes dates, même dose. Voir §2, « LES ANOMALIES SE PRODUISENT ENFIN » |
+
+| **LES DEUX HORLOGES [GDD 6.7, 14.4, 3.4]** : le vieillissement différentiel existe | **FAIT (2026-07-29), VÉRIFIÉ PAR MESURE.** `rel::DualClock` était déclaré, **sauvegardé, rechargé — et `advance` n'avait aucun appelant** : l'écart d'âge que 3.4 fait peser sur la passation valait zéro pour toute mission, et l'âge biologique avançait du **calendrier**. Taux retenu : `dτ/dt = (1 + Φ/c²)/γ(v)` — **exact en v** (tout β), premier ordre en Φ/c² (borné à 1e-8, terme négligé en 1e-16, déclaré). **Deux identités képlériennes EXACTES** remplacent toute intégration : ⟨1/r⟩ = 1/a ⇒ ⟨v²⟩ = μ/a et ⟨Φ⟩ = −μ/a, sans hypothèse sur l'excentricité ; corollaire vérifié à 1e-12, **|⟨Φ⟩| vaut exactement 2× le terme cinétique**. **CONFRONTÉ AUX VALEURS PUBLIÉES** : GPS **+38,574 µs/j** (publié +38,6), ISS **−24,584** (≈ −25), v_RMS Terre **29 784,7 m/s** (29 784,8), Hohmann **258,9 j** (259). **LE SIGNE CONTREDIT LE CLICHÉ** : vers Mars le vaisseau est plus HAUT dans le potentiel ET plus LENT que la Terre — les deux termes vont dans le même sens, le voyageur revient **PLUS VIEUX de 0,25 s** ; en orbite basse le signe s'inverse, avec une seule formule. Et 6.7.2 est **démontré** au lieu d'être affirmé : sous la seconde par aller-retour, contre **2,9 ans sur 10** à β = 0,7. Géométrie **gelée au départ** (mêmes éphémérides que la fenêtre), sauvegarde **V3**. Au passage : **`medical_risk_factor` écrit en dur à 1,0** — le module médical de Novellus coûtait 110 M€ pour rien [GDD 11.6] ; et **`GameState::tick` SUPPRIMÉ** (piège n°72 soldé). Voir §2, « LES DEUX HORLOGES » |
+
+| **L'ANTIMATIÈRE [GDD 5.12.12, 19.3, 11.5]** : le verrou de fin de jeu s'exécute | **FAIT (2026-07-29), VÉRIFIÉ PAR MESURE.** Dernier maillon de la chaîne relativiste **sans aucun appelant hors tests** : quatre paramètres de production, **pas un gramme nulle part**. Le **débit n'est pas un paramètre libre** — `ṁ = P/E` — donc il se dérive de la **marge de puissance de Novellus**, ce qui fait de l'infrastructure le levier annoncé (les 5 MW de CAT-11 rendent 1,58e-3 g/an, l'ordre de grandeur exact du défaut tabulé : les deux champs étaient cohérents, seulement débranchés). **Un stock qui fuit est un ÉQUILIBRE, pas un cumul** : `dS/dt = ṁ − λS` intégrée **exactement**, donc 1 bloc de 3 650 j = 365 tranches de 10 j à 1e-15. **VERDICT MESURÉ** : équilibre **4,32 mg** sous 5 MW (38 kW seulement au départ), quand β = 10⁻⁴ — indétectable — réclame **750 g** pour 1 g de confinement. Ce n'est pas long, c'est **impossible** : c'est le **confinement** le verrou, et la **fuite** qui borne (230× sous la capacité). [GDD 19.3] le disait ; le modèle le chiffre. **Non recalibré** : le GDD diffère ces nombres [Annexe E] et son invariant est justement le hors-échelle. CAT-11 reste volable, aucun verrou nouveau. Le poste AGENCE **affiche le cul-de-sac au lieu de le subir** (plafond réel *avec sa cause*). `beta_croisiere` bascule l'horloge sur la cinématique **pure** au-delà du seuil — exercé à β = 0,7 : le bord bat à 71 % du sol. Sauvegarde **V4**. Voir §2, « L'ANTIMATIÈRE EXISTE — ET ELLE DIT NON ». ⚠ **LE VERDICT « HORS D'ÉCHELLE » ÉTAIT FAUX, ET SA CAUSE AUSSI** — voir la ligne suivante : la puissance était prise sur la **marge de Novellus**, donc aucune recherche de branche 6 ne pouvait la déplacer |
+
+| **LA CALIBRATION DE FIN DE JEU [Annexe E, 6.7.2, 3.5]** : le régime relativiste devient atteignable | **FAIT (2026-07-29), TRANCHÉ PAR LE CORPS DU GDD.** La passe précédente concluait « structurellement impossible, c'est une donnée de calibration, pas un défaut de code », et laissait trois issues au choix du GDD. **Les deux affirmations étaient fausses.** (1) **L'Annexe E ne diffère pas la question, elle en nomme la dépendance** — « vitesse maximale souhaitée en fin d'arbre » — et le corps du GDD la dit à trois endroits : [6.7.2] « seule l'antimatière **franchit** β ≳ 0,3 », [3.4] β ≈ 0,9 « se mérite par l'ingénierie », [3.5] la fin de la branche 6 « demande souvent **plusieurs vies** ». L'issue (a) — « c'est voulu, CAT-11 est une asymptote » — est donc **réfutée par le document**. (2) **C'était bien un défaut de code, le 8ᵉ « nommé mais non connecté » de la série** : la puissance de production était `station.power_margin_kw()`, la **marge de Novellus** — 38 kW au départ, 5 MW au mieux. Le « vrai levier d'équilibrage » du GDD n'était pas branché sur son levier : *aucune* recherche de branche 6 ne pouvait bouger le débit. Or [5.12.12] dit où le prendre — « le rendement énergétique **couple la production à la branche énergie** » — et une usine à antimatière n'est pas un module de station. **CE QUI N'EST PLUS UN RÉGLAGE** : `energy_j_per_g` avait un **plancher physique** ignoré — on ne fait pas un antiproton sans son proton, donc E ≥ 2mc² = **1,7975e14 J/g**. Le champ est remplacé par un **rendement η**, et l'ancien défaut de 1e17 J/g **supposait η = 1,8e-3**, soit six ordres au-dessus du CERN (≈ 1e-9) — une hypothèse de fin d'arbre posée sans être déclarée [GDD 6.8, 12.5]. **LES PALIERS SONT INVERSÉS DES ÉNONCÉS, PAS CHOISIS** : fusion (η = 1e-6, 1e13 W) doit rester pré-relativiste [5.12.11] → β = 6e-7, **sous le seuil** ✓ ; abouti (η = 1e-4, 2 PW, confinement 1e7 g, fuite 1e-5/j) doit franchir 0,3 [6.7.2] → **β = 0,481 à l'équilibre**, atteint en **139 ans** ✓ = « plusieurs vies » [3.5]. Et le confinement à 1 g n'était pas un plafond [5.12.12] mais **un mur** : la cible en réclame 3,83e6. **CE QUI RESTE HORS D'ATTEINTE L'EST PAR LA PHYSIQUE** : l'aller-retour [6.7.4] coûte le ratio **puissance quatre** (26× l'aller simple) et reste refusé ; β = 0,9 est **impossible sur la sonde de 5 t, possible sur 100 kg en 152 ans** — donc « β découle de l'**architecture** » [décision 10] cesse d'être une phrase. **ET UN ORACLE QUI PASSAIT POUR UNE RAISON FAUSSE** : « le stock CONVERGE — 200 ans de plus n'ajoutent rien » était vert parce que **le calendrier s'arrêtait à la faillite**, pas parce que le stock convergeait. Le fait de jeu qui le remplace vaut mieux : les 140 ans de [3.5] **exigent une agence qui produit pendant 140 ans** — la pression d'inactivité [13.2] et le programme de fin de jeu sont couplés. Piège **n°82**. **PREUVE** : `SPEditor` Succeeded, **3 600 oracles au vert** sur les 12 suites, nouveau drapeau `-spantimatiere`, et `ue_antimatiere_calibree.png` — débit 3,511e4 g/an sous 2e15 W à rendement 1e-4, plafond réel 9,613e6 g *borné par la fuite*, seuil β = 0,3 **ATTEINT** |
+
+| **LE BILAN DE VIABILITÉ DIT ENFIN QUELQUE CHOSE [GDD 4.1]** | **FAIT (2026-07-29), TROUVÉ EN AUDITANT UNE CAPTURE.** Trois défauts en chaîne, chacun masquant le suivant. (1) La table des **termes de contrat** vivait dans une boucle interne à `seed_catalogue` : toute mission hors catalogue naissait avec des termes NULS, d'où « 0 / 0 M EUR » et un VERROU rouge dans **chaque capture en vol** — que la doc *expliquait* au lieu de corriger. (2) `MissionPlan::evaluated` existait et **personne ne le lisait** : une mission fraîchement acceptée, donc avant tout passage au poste CONCEPTION, s'annonçait ratée sur les quatre axes. (3) `finalize` faisait `why.clear()` et remplaçait la cause exacte (« AUCUN LANCEUR NE SOULEVE CETTE MASSE ») par une liste de symptômes dont **trois quarts n'avaient jamais été calculés** — piège n°42 au cœur du modèle. La capture montre désormais : masse 193 235 kg, *« coût, calendrier et fiabilité NON ÉVALUÉS : l'étude s'arrête à la masse »*, `VERROU : AUCUN LANCEUR NE SOULEVE CETTE MASSE`. **Et le chiffre révélé** : 193 t pour un aller-retour martien habité, hors de portée de tout lanceur — la réponse réelle est l'assemblage en orbite, désormais dit au lieu d'être noyé. Piège **n°77** : une alarme rouge dans TOUTES les images de référence est un bug de l'alarme jusqu'à preuve du contraire. Voir §2, « L'AUDIT DES POSTES » |
+
+| **LE CATALOGUE EST RÉALISABLE [GDD 4.1, 5.4, 12.1]** : il ne l'était qu'à 45 % | **FAIT (2026-07-29), MESURÉ CONTRAT PAR CONTRAT.** Arbre entier TRL 9, rang Directeur — donc la limite PHYSIQUE : **6 contrats sur 11 étaient inachevables**, dont 3 dont la charge **nue** dépassait le plafond des lanceurs. Deux causes, toutes deux « nommé mais non connecté » : **`lanceur_super_lourd` était un prérequis de CAT-09 qui ne débloquait AUCUN lanceur** (le catalogue s'arrêtait à 8,3 t), et **les 4 nœuds « lanceur » ne gardaient RIEN** — toute la gamme était disponible dès la première mission, la branche 1 était décorative. Corrections **ancrées sur des lignées réelles** [GDD 12.1] : `L-D super-lourd` 130 t / 1 400 M$ / R = 0,970 (Saturn V, SLS Block 2 — fiabilité **plus basse** que le lourd, car un géant vole peu donc démontre peu) ; `L-C lourd` **8,3 → 22,8 t** (Falcon 9 Block 5 — un « lourd » à 8,3 t n'a aucune lignée réelle, et ce trou de **15,7×** forçait CAT-04, dépassant de 4 %, à acheter un Saturn V à 1 457 M$ pour un contrat à 240) ; **filtrage par l'arbre** avec deux verdicts distincts — « NON QUALIFIÉ : RECHERCHER *x* » (direction) vs « AUCUN LANCEUR NE SOULÈVE » (impasse) ; **budget CAT-09 1 200 → 3 000 M$**, il ne payait pas son propre lanceur et violait l'invariant déclaré de sa table. **RÉSULTAT : 9 sur 11 réalisables.** Les 2 restants sont physiques, vérifiés en balayant 2/3/4 étages : CAT-10 plafonne à 152 t (assemblage orbital, non nommé par le GDD — à ne pas inventer), CAT-11 demande **346 495 t** en chimique — d'où [GDD 19.3] et l'antimatière. **Et [GDD 6.6] mord enfin** : **121 t sans blindage → 182 t avec 10 g/cm², plafond 130 t** — la seule décision de protection rend le vol non lançable. Voir §2, « LE CATALOGUE ÉTAIT INACHEVABLE À 55 % » |
+
+| **L'ASSEMBLAGE EN ORBITE [GDD 5.2 br.1]** : la masse s'achète, elle ne se contourne pas | **FAIT (2026-07-29), MESURÉ.** Le GDD nommait « transfert de propergol orbital, rendez-vous automatisé robuste » et l'arbre portait les trois nœuds — **aucun ne débloquait rien** (7ᵉ cas de la série). `mission/Assemblage.hpp` en fait un **arbitrage**, jamais un contournement : N tirs = N fois le prix ET **R^N de fiabilité** (neuf tirs à 0,98 → 0,83), la campagne **dure** (cadence du pas de tir, 30 j / 20 j avec robotique), et **les ergols cryogéniques s'évaporent** pendant l'attente — 0,2 %/j, réel 0,1 à 1 %/j. La fraction survivante a une **forme close exacte** (série géométrique sur les temps de séjour, vérifiée terme à terme contre la somme brute). L'ébullition est un **point fixe qui peut diverger**, et le refus le distingue d'un « trop lourd » : *« RECHERCHER `transfert_ergols` »*. **Défaut trouvé en route** : « le moins cher qui soulève » devenait un mauvais conseil (CAT-05 : 2 tirs légers, −13 M$, −14 pts de fiabilité, VIABLE → RISQUE). Corrigé **par déduction** — `p_success ≤ p_segment`, donc une campagne sous l'exigence est *garantie* d'échouer. Résultat : c'est désormais **la fiabilité qui force le super-lourd** sur CAT-09, la raison réelle d'un SLS. **10 contrats sur 11 réalisables** (CAT-10 : 2 super-lourds, P = 0,937) ; seul CAT-11 reste hors de portée — 346 495 t, aucun assemblage ne rattrape une exponentielle [GDD 19.3]. **Et [GDD 6.6] devient gradué** : 121 t / 1 tir / P = 0,970 / 1 560 M€ → **182 t / 2 tirs / P = 0,931 / 3 016 M€**. Un arbitrage vaut mieux qu'un mur. Voir §2, « L'ASSEMBLAGE EN ORBITE » |
+
+| **ARES IMPOSE L'ENVELOPPE, L'ARCHITECTE DÉDUIT LE VÉHICULE [GDD 3.1]** | **FAIT (2026-07-29), sur précision de l'utilisateur** — « c'est le joueur qui crée la mission de A à Z, ARES dit juste : on doit aller là pour faire ça », que [GDD 3.1] confirme mot pour mot (« décide COMMENT concevoir, dans des enveloppes imposées ; il ne fixe pas le budget »). `payload_kg = 20 000` pour Mars habité n'était pas un objectif mais **une masse d'habitat** — une architecture imposée par le client, superposée à des consommables et un blindage déjà calculés. La coque pressurisée est désormais **déduite** de deux décisions d'architecte (équipage, volume par personne) et d'un fait mesuré : **137 kg/m³**, la densité des modules pressurisés de l'ISS — Destiny, Columbus et Kibo donnent la même valeur **à 1 % près**. Contrôle : 6 × 25 m³ × 137 = 20 550 kg, soit l'ancien forfait à **2,7 % près** — il était juste, il était simplement **posé au lieu d'être déduit** (piège n°81 : vérifier QUI décide d'une grandeur avant de vérifier COMBIEN elle vaut). **Et la décision mord** : 25 → 15 m³/personne fait passer la croisière martienne de **131 t à 100 t** au décollage, et joue deux fois puisque serrer l'habitat réduit aussi la surface à blinder. Un vol near-Earth n'emporte **pas** d'habitat — il s'amarre à une station, et le critère est un fait déjà calculé (aller-retour daté), pas une liste de familles. CAT-10 devient **VIABLE**. Voir §2, « ARES DIT OÙ ALLER » |
+
+Oracles hors moteur — **compteurs RELEVÉS en exécutant les 12 suites le
+2026-07-29, après la calibration de fin de jeu.** Ne pas les recopier : les remesurer.
+⚠ Le relevé ci-dessous **date d'avant cette passe** et sa ligne TOTAL était déjà
+fausse : la somme de ses propres lignes donne 3 577, pas 3 430. Relevé du
+2026-07-29 après calibration, suite par suite : `test_astro_core` **1 626**,
+`test_contenu_gdd` **613**, `test_session` **684**, `test_carte_flotte` 135,
+`test_reentry_perturb` 108, `test_api_sol` 59, `test_ares_modules` **128**,
+`test_gdd_manques` 57, `test_mission_loop` 95, `test_economie_v12` 46,
+`test_code_qualif` 25, `test_toolchain` 24 — **TOTAL 3 600, tous au vert**.
+Puis **3 615** après le verrou de l'aller-retour, **3 635** après la destination
+relativiste, **3 643** après les trois murs du vol habité lointain, et **3 649**
+après le recalibrage sur l'ancre habitée (`test_ares_modules` **165**,
+`test_session` **696**).
 Le relevé précédent était faux de plus du double, et pas d'un peu — il donnait
 300 à `test_astro_core` là où la suite en imprime 1 626. Un compteur recopié de
 mémoire ne vaut rien ; seule la sortie du binaire compte.
@@ -138,17 +189,17 @@ mémoire ne vaut rien ; seule la sortie du binaire compte.
 | :--- | ---: |
 | `Space Program/tests/test_astro_core.cpp` | **1 626** (+6 pour la durée de transit de la fenêtre) |
 | `tests/test_contenu_gdd.cpp` | 612 |
-| `tests/test_session.cpp` | **470** (222 avant, **+42** chronologie, **+29** trace, **+65** navigation et manœuvre, **+9** graphe, **+43** logiciel de vol du mode Pro, **+28** le prix de l'inaction, **+12** délai de communication, **+7** boucle sol, **+13** rythme de mesure) |
+| `tests/test_session.cpp` | **672** (222 avant, **+42** chronologie, **+29** trace, **+65** navigation et manœuvre, **+9** graphe, **+43** logiciel de vol du mode Pro, **+28** le prix de l'inaction, **+12** délai de communication, **+7** boucle sol, **+13** rythme de mesure, **+22** carnet et bascule, **+46** mission vécue, **+21** dose et débris, **+27** anomalies et réparations, **+25** les deux horloges et la préparation médicale, **+12** le stock d'antimatière, **+13** les termes de contrat et le bilan de viabilité, **+11** l'audit exhaustif du catalogue et le verrou des lanceurs, **+4** l'assemblage orbital vu du catalogue, **+21** ARES impose l'enveloppe, l'architecte deduit le vehicule) |
 | `tests/test_carte_flotte.cpp` | 135 |
 | `tests/test_reentry_perturb.cpp` | 108 |
 | `tests/test_api_sol.cpp` | 59 |
-| `tests/test_ares_modules.cpp` | 58 |
+| `tests/test_ares_modules.cpp` | **118** (+15 : les deux horloges, confrontées aux valeurs publiées GPS / ISS / GEO ; **+19** : production, fuite et verdict de l'antimatière ; **+26** : l'assemblage orbital, forme close de l'ébullition et divergence du point fixe) |
 | `tests/test_gdd_manques.cpp` | 57 |
-| `tests/test_mission_loop.cpp` | **60** (+7 : le logiciel de vol hors domaine) |
+| `tests/test_mission_loop.cpp` | **95** (+7 : le logiciel de vol hors domaine ; **+14** : ce que pèse un équipage ; **+17** : le verrou des radiations ; **+3** : la cible de calibration SPE) |
 | `tests/test_economie_v12.cpp` | 46 |
 | `tests/test_code_qualif.cpp` | **25** (+3 : la dilution du domaine) |
 | `tests/test_toolchain.cpp` | **24** (toolchain embarquee, bac a sable, job object, horizon) |
-| **TOTAL** | **3 280**, tous au vert |
+| **TOTAL** | **3 430**, tous au vert |
 
 ⚠ `test_mission_loop` et `test_session` ont besoin de **`app/jeu.cpp`** en plus des
 TU du cœur (ils incluent `app/session.hpp`) : sans lui, huit symboles de
@@ -1556,6 +1607,1369 @@ mémoire, oracle d'effaçabilité) datent de la même journée.
 *Une ligne de reste-à-faire qu'on ne raye pas devient un mensonge sur l'état du
 projet — plus coûteux qu'un oubli, parce qu'elle envoie retravailler du fait.*
 
+### LE CARNET ET LA BASCULE (2026-07-28) — deux manques du GDD, un seul chantier
+
+**`career::Notebook` était sérialisé, transmis au successeur en passation… et
+VIDE.** Personne n'y écrivait, personne ne le lisait. La famille est connue :
+`Mission::phase` (piège n°20b), `show_moons` (n°41), `ModeAide`, `comms_delay_s`
+— *un conteneur fidèlement persisté n'est pas une fonctionnalité*.
+
+**ET LA BASCULE NORMAL → PRO N'EXISTAIT PAS.** `GameState.hpp` la déclarait
+pourtant en commentaire depuis toujours (« Bascule Normal → Pro unidirectionnelle
+et irréversible [GDD 2.3] ») ; en fait `agence.mode` n'était écrit qu'à la
+CRÉATION d'une partie et au chargement. Les deux manques n'en font qu'un, parce
+que [GDD 2.3] les relie : « les graphes existants sont **archivés en lecture seule
+dans le carnet** ».
+
+**`career/Carnet.hpp`** (C++ pur, sous oracle) — quatre pages, toutes DÉRIVÉES
+d'un événement du modèle. *Le carnet ne s'écrit pas à la main : un carnet qu'il
+faudrait remplir soi-même serait vide chez tout le monde, et « transmis en
+passation » ne vaudrait rien.*
+
+| Page | Quand | Contenu |
+| :--- | :--- | :--- |
+| **Man pages de l'API** | à la bascule | une LECTURE de `noeuds_disponibles()` : chaque primitive avec la fonction qu'elle EST, plus son typage. Pas une copie — le jour où un nœud change, la page suit |
+| **Archive de graphe** | à la bascule [GDD 2.3] | les nœuds assemblés, en texte |
+| **Débrief de mission** | à chaque débrief | qui a conduit les corrections, manque au but, Δv dépensé/provisionné, arc de poursuite, logiciel embarqué et son domaine |
+| **Reconstitution d'absence** | au retour [GDD 9.3] | ce qu'ARES a fait sans l'Architecte |
+
+**« LECTURE SEULE » SE TIENT SANS DRAPEAU.** Une entrée de carnet est du TEXTE, et
+il n'existe aucun chemin qui reconstruise un graphe exécutable depuis une chaîne
+de caractères. L'archive est consultable et rien d'autre **par construction, pas
+par interdiction** — c'est plus solide qu'un booléen `readonly` que quelqu'un
+finirait par contourner.
+
+**LA BASCULE COÛTE, ET C'EST ÉCRIT DANS LE GDD** : « cette perte est
+intentionnelle ». `Session::basculer_en_pro()` archive, VIDE le graphe, bascule, et
+refuse la seconde fois — sous oracle. Le poste VIGIE annonce le prix AVANT le clic
+(« passer en PRO archive vos N nœud(s) et les efface », piège n°64) et porte le
+carnet, les pages les plus récentes d'abord, tronquées : le cadre d'un poste
+CLIPPE (piège n°42) et une carrière en écrit des dizaines.
+
+**PREUVE** : build `SPEditor` Succeeded, **3 302 oracles au vert** (+22), dont la
+man page qui NOMME les 8 primitives et leur appel d'API, l'archive où chaque nœud
+se relit, l'unidirectionnalité, et la survie du carnet à la sauvegarde **au
+caractère près** — c'est LE bien transmis en passation [GDD 3.5], il ne peut pas
+s'évaporer.
+
+### LE CIEL N'ÉTAIT PAS EN MIROIR — IL ÉTAIT À L'ANTIPODE (2026-07-28)
+
+La dette de §6 point 10 disait « la voûte étoilée est vue EN MIROIR et n'est pas
+calée sur le repère équatorial J2000 ». Les deux moitiés étaient à revoir.
+
+**LE DÉFAUT ÉTAIT PLUS FORT QUE « MIROIR ».** L'échelle du dôme valait
+`-SKY_RADIUS_UU / RayonMesh` — un rapport négatif sur les TROIS axes, c'est-à-dire
+une **INVERSION PAR LE CENTRE**. L'œil étant à l'origine, regarder dans la
+direction *v* atteignait le point de maillage situé en *−v* : **tout le ciel était
+vu à son antipode**, bulbe galactique compris.
+
+**ET VOICI POURQUOI PERSONNE NE L'AVAIT VU** : la Voie lactée est un GRAND CERCLE,
+et un grand cercle est **invariant par inversion centrale**. La bande tombait donc
+au bon endroit à l'écran ; seule sa garniture était retournée. *Un défaut qui
+préserve la silhouette de ce qu'il casse ne se voit pas — il se démontre.*
+
+**LA CAUSE ÉTAIT PÉRIMÉE.** L'échelle négative existait pour « voir l'intérieur
+même avec un matériau à une seule face ». Or `M_SP_Starfield` est **deux faces
+depuis sa création** (`Tools/make_sky.py` : `two_sided = True`). La négation ne
+servait plus à rien depuis ce jour-là. Passée en positif : chaque direction
+retrouve son texel. Vérifié par capture (`echelle=X=Y=Z=+100000`,
+`rendu_recemment=1`, scène intacte).
+Bénéfice de sûreté : le repli du moteur (`EmissiveTexturedMaterial`) étant à une
+seule face, s'il sert un jour la voûte DISPARAÎT — un défaut visible, donc
+diagnosticable, là où l'antipode était silencieux.
+
+**LE REPÈRE DE LA CARTE EST GALACTIQUE, ET C'EST MESURÉ.** On ne peut pas caler
+un ciel sans savoir ce qu'il représente. Diagnostic temporaire (retiré après
+lecture) : centroïde des 1 % de pixels les plus brillants de
+`8k_stars_milky_way.jpg` (8192x4096) → **U = 0,5133, V = 0,4962**.
+**C'est le V qui tranche** : en galactique la bande suit exactement b = 0, donc
+V = 0,5 ; en équatorial c'est un grand cercle incliné de 62,9° qui balaie V de
+0,16 à 0,84, et son centroïde serait tiré vers le bulbe, à V = 0,661. Le U, lui,
+ne prouve rien (la bande est symétrique en longitude dans les deux repères) —
+*mesurer deux grandeurs et ne retenir que celle qui discrimine*.
+
+**LA CONVENTION UV N'ÉTAIT PAS UN OBSTACLE — ELLE ÉTAIT DÉJÀ MESURÉE.** J'avais
+écrit qu'elle « se mesure, elle ne se devine pas » et laissé le point ouvert :
+`Tools/diag_body_uv.py` l'avait mesurée sur l'asset livré **le 2026-07-27**, et son
+en-tête porte le résultat (`U = 0,5 + lon/360`, `V = (90 − lat)/180`, −X = lon 0,
++Z = pôle nord). *Chercher avant de déclarer un blocage — l'outil existait, avec sa
+réponse dans son en-tête.*
+
+**RESTAIT UN SEUL BIT : LE SENS DE LA LONGITUDE GALACTIQUE.** Se tromper mirore le
+ciel en longitude, soit exactement la faute qu'on venait de corriger — donc pas
+question de le deviner. On le mesure sur les **Nuages de Magellan**, les deux
+objets compacts les plus nets hors du plan, à coordonnées connues.
+
+**TROIS MESURES, DEUX INSTRUMENTS, AUCUNE RÉPONSE :**
+1. brillance absolue hors plan (V > 0,60) → maxima à U ≈ 0,50 : le **halo du
+   bulbe**, pas les Nuages ;
+2. fenêtre resserrée (b de −29° à −54°) → encore U ≈ 0,50, luminances de 2 à 4 sur
+   255. *Deux mesures qui donnent la même mauvaise réponse accusent l'INSTRUMENT,
+   pas la fenêtre* ;
+3. **contraste local** (case moins couronne) — le bon détecteur pour une tache
+   compacte sur fond lisse → trois candidats à contraste 1,58 / 1,65 / 1,67 sur
+   255, **indiscernables entre eux**, et aucun aux positions attendues.
+
+**ET CE RÉSULTAT VAUT MIEUX QUE LA MESURE MANQUÉE.** Les Nuages de Magellan ne
+sont pas détectables dans cette image. Joint au centroïde suspectement symétrique
+(U = 0,5133, V = 0,4962), cela dit que `8k_stars_milky_way.jpg` est un panorama
+**STYLISÉ**, pas une carte photométrique du ciel. **Le caler sur J2000 serait une
+fausse précision** — habiller un décor en instrument, ce que [GDD 12.5, 19.6]
+refuse en toutes lettres. On s'arrête donc, et on le déclare.
+
+**LE VRAI REMÈDE EST AILLEURS**, et le §6 point 10 le disait déjà : des étoiles en
+POINTS depuis un **catalogue Hipparcos**. Nettes à tout zoom (taille donnée à
+l'écran), vraies constellations, et un catalogue **EST daté en J2000** —
+l'alignement devient exact par construction au lieu d'être ajusté sur une image.
+La voûte resterait ce qu'elle est : une nébulosité de fond.
+
+Le diagnostic est **archivé sous `#if 0`** plutôt que supprimé : il porte la seule
+instrumentation qui sache répondre à « ce champ d'étoiles est-il une vraie carte
+du ciel ? ». Le supprimer obligerait à réécrire les deux instruments ratés.
+
+### LA MISSION VÉCUE (2026-07-28) — le chapitre 9 avait un MODÈLE et AUCUNE PORTE
+
+**Décision 18 du GDD : « vol habité vécu INCLUS ». Elle était inatteignable.**
+`mission/Crew.hpp` était complet, juste et sous oracle depuis toujours — et rien
+n'y menait :
+
+| Ce qui existait | Ce qui l'appelait |
+| :--- | :--- |
+| `CrewMissionSlot::try_embark` [GDD 9.2] | **personne** — et le champ n'était même pas sérialisé |
+| `VitalState` / `vital_budget` [GDD 9.4] | **un test unitaire**, jamais le jeu |
+| `AgencyFinance::suspended` [GDD 9.3] | **les tests eux-mêmes**, qui posaient le drapeau à la main |
+| `career::journal_absence` [GDD 9.3, 15.4] | **personne** |
+| `Contract::payload_kg` d'un vol habité | un **forfait par famille** : deux ans à bord pesaient le poids de deux semaines |
+
+C'est la famille déjà nommée ici quatre fois (`Mission::phase` n°20b,
+`show_moons` n°41, `ModeAide`, le carnet) : *un conteneur fidèlement persisté
+n'est pas une fonctionnalité*. La nouveauté est l'échelle — un CHAPITRE entier.
+
+**1. LE POIDS DE LA VIE — les vivres entrent dans Tsiolkovsky [GDD 6.1, 9.4].**
+« Une mission mal calculée AVANT LANCEMENT se traduit en dérives coûteuses, voire
+en échec si les réserves ne suffisent pas » : la phrase était inapplicable tant
+que les consommables ne pesaient rien. `MissionPlan::evaluate` ajoute désormais
+leur masse à ce qu'il faut propulser — **sans toucher aux termes du contrat**,
+qui restent ce que le client veut voir livré.
+- **LA DURÉE N'EST PAS UN RÉGLAGE** : un vol habité vers une cible datée est un
+  ALLER-RETOUR, et sa durée est la **période synodique** des deux corps. On la
+  calcule sur les deux états héliocentriques du moment (vis-viva → demi-grand axe
+  → Kepler → `astro::synodic_period`). **779,9 j sortent sans être écrits nulle
+  part** — le chiffre que `launch_window` cite déjà comme récurrence.
+- **DIMENSIONNER SUR L'ALLER SEUL AURAIT ÉTÉ PIRE QUE DE NE RIEN FAIRE** : un
+  chiffre calculé, donc crédible, mais faux d'un facteur ~2,4 — et l'équipage
+  meurt au retour. [GDD 12.5, 19.6] refusent exactement cela.
+- **LA BRANCHE 4 ACHÈTE ENFIN QUELQUE CHOSE** [GDD 5.10, 19.1] : les boucles se
+  DÉDUISENT de l'arbre (`recyclage_partiel` → ISS, `recyclage_ferme` → quasi
+  fermé), et les deux valeurs traînaient depuis toujours en commentaire dans
+  `Crew.hpp` sans être atteignables.
+- **MESURÉ** (`test_mission_loop`) : 6 personnes, 780 jours →
+  **33,7 t** de vivres sans recyclage, **14,6 t** avec les boucles ISS, **11,9 t**
+  en quasi fermé. Au décollage : **127,4 t → 205,4 t** en passant d'un séjour de
+  30 j à l'aller-retour réel — 14,6 t de vivres en coûtent **78** *(c'est
+  Tsiolkovsky, pas une pénalité)*. Le recyclage quasi fermé rend **16,1 t**.
+- La nourriture ne se recycle jamais : c'est le plancher, identique dans les
+  trois cas, et un oracle l'exige — un modèle qui la ferait tomber serait faux.
+
+**2. LA PORTE [GDD 9.2] — et ses conditions sont toutes DÉRIVÉES.**
+`Session::peut_embarquer()` / `embarquer()` / `debarquer()`. Aucun seuil libre :
+- mission **habitée**, **une seule à la fois**, et la **confiance** au seuil qui
+  filtre déjà l'acceptation d'un contrat habité [GDD 13.4] — un barème, pas deux ;
+- **mission LONGUE ⇒ rang TERMINAL + maturité** : « le personnage ne quitte ARES
+  que lorsqu'il n'a plus de carrière à construire » désigne UN état, et
+  `promotion_ready` l'exprimait déjà en dur — il devient `terminal_rank()`, lu par
+  les deux. La frontière du mot « longue » est l'**incrément ISS (180 j)**, seul
+  étalon réel d'un tour de service ordinaire. La maturité est `sejour_long`,
+  littéralement le support-vie long séjour de la branche 4.
+- **ON MONTE À BORD AVANT LE FEU VERT**, jamais après — voir piège n°71.
+
+**3. CE QUE DEVIENT ARES PENDANT L'ABSENCE [GDD 9.3].** `finance.suspended` est
+enfin levé par le jeu, et la confiance est **REPOSÉE** à sa valeur de départ à
+chaque tick plutôt que gardée écriture par écriture : l'adjoint conduit de vraies
+missions, donc de vraies anomalies passent par `apply_anomaly` ; les intercepter
+une à une demanderait de n'en oublier aucune, et il suffirait d'en ajouter une
+demain pour trouer la promesse. *Restaurer un état la tient par construction.*
+Au retour, `journal_absence` trouve enfin son appelant.
+
+**4. LES RÉSERVES ÉPUISÉES TUENT [GDD 9.4, 10.3].** Et la gravité n'est pas
+décrétée : on déclare une perte CRITIQUE assortie du modificateur d'exposition
+humaine, et c'est le barème (« niveau final augmenté d'un palier si une présence
+humaine est exposée ») qui en fait une catastrophe. La **fin de partie**, elle,
+tient à `lived.active` — `consequences_for` refuse expressément de trancher
+(« SEUL le décès du PERSONNAGE, pas d'un équipage PNJ ») parce que seul l'appelant
+sait qui volait. Deux faits distincts, deux mécanismes distincts.
+
+**5. SÉRIALISATION V2.** `SCHEMA_VERSION` passe à 2 et `Reader::version()` trouve
+son premier usage : le bloc `lived` se lit sous `if (r.version() >= 2)`, donc une
+sauvegarde V1 se recharge **sans rien perdre** — elle décrit une partie où
+personne n'était embarqué, ce qu'elle était. Sans ce bloc, recharger remettrait le
+joueur au sol au milieu de sa croisière et dégèlerait une chaîne que 9.3 promet
+suspendue.
+
+**6. LA SURFACE.** Poste CONTRÔLE : bloc « VIE À BORD » (autonomie restante,
+O2/eau/vivres/épuration CO2, boucles réellement embarquées, et ce que devient
+l'agence), bouton EMBARQUER/DÉBARQUER, et **le motif du refus en clair** — c'est
+ce qui rend lisibles les conditions de 9.2 au lieu de les laisser deviner
+(piège n°42).
+
+**PREUVE** : build `SPEditor` Succeeded, **3 362 oracles au vert** (+60), et
+`ue_vecu_poste_controle.png` (`-spvecu -sppost=3 -spcadence=4`) — 6 à bord,
+**896,9 jours d'autonomie**, boucles eau 93 % / O2 85 %, « ARES : sous l'adjoint —
+confiance gelée à 70 », phase de vol CROISIÈRE, arrivée dans 322 jours, cran MOIS
+vert. Le journal du moteur confirme le chemin : `embarque=1 — autonomie 897 j,
+agence gelee=1`, passé par `Session::embarquer()`, la porte du bouton.
+*~~Réserve d'affichage, antérieure et sans rapport : le contrat fabriqué par
+`-spvol` a des termes nuls, d'où le « BILAN DE VIABILITÉ » en rouge sur cette
+capture comme sur `ue_chrono_poste_controle.png`.~~* — **CORRIGÉ le 2026-07-29,
+et ce n'était PAS une simple réserve d'affichage** : c'était le premier des trois
+défauts en chaîne de la section « L'AUDIT DES POSTES », et il rendait le bilan de
+viabilité invérifiable par capture. Avoir écrit ici qu'un rouge était normal l'a
+rendu invisible pendant des semaines — c'est le piège n°77.
+
+**`-spvecu`** (nouveau drapeau, §1) réutilise toute la machinerie de `-spvol` au
+lieu d'en poser une seconde, et **pose les conditions dans le MODÈLE plutôt que de
+désactiver la porte** : rang terminal, `sejour_long` et recyclage qualifiés, puis
+`embarquer()`. Sans lui, l'état demanderait une carrière entière et aucune capture
+ne pourrait le photographier.
+
+**TROIS PIÈGES PAYÉS.**
+- **n°71 — ON NE RATTRAPE PAS UN VAISSEAU EN ROUTE.** La première version
+  autorisait l'embarquement sur `state == Launched` : l'Architecte rejoignait un
+  véhicule déjà parti vers Mars. Trouvé **en regardant la capture**, pas en
+  relisant le code. Embarquer est une décision de PLANIFICATION [GDD 9.2, 4.1] ;
+  corollaire, les vivres ne se consomment qu'une fois le vol parti (pendant la
+  qualification l'équipage est à terre), et cette condition se **lit** sur l'état
+  de la mission au lieu d'être un second drapeau à tenir à jour.
+- **n°72 — `GameState::tick` EST DU CODE MORT, et j'y ai branché la vie à bord.**
+  Aucun appelant dans tout le dépôt : ni le jeu, ni le pont, ni une suite
+  d'oracles. Le tick vivant est `AresLayer::avancer` (`app/ares.hpp`), piloté par
+  le calendrier de l'agence depuis que le temps coule. Tout compilait, les oracles
+  de `Crew.hpp` passaient, et rien ne se consommait jamais. *Avant de brancher un
+  système sur un tick, vérifier que ce tick est appelé* — la fonction porte
+  désormais l'avertissement en tête. Les deux ne font d'ailleurs pas la même
+  chose (`age_by_proper_time` ici, `age_bio_s +=` là-bas).
+- **n°73 — L'ORACLE DEMANDAIT L'IMPOSSIBLE, ET LE MODÈLE AVAIT RAISON DEUX FOIS.**
+  Un `printf` de diagnostic (un chiffre mesuré, pas une relecture) a montré
+  `cadence_ok=0`, cadence bornée à `REEL`, calendrier immobile : (a) le **plafond
+  de cadence** [GDD 14.3] mordait — la mission venait de décoller, donc phase
+  critique ; (b) au temps réel, 0,5 s n'atteint pas le **sous-pas de 1/64 j** et
+  ne convertit rien. Puis, l'oracle des sous-pas comparait 40 frames de 0,05 s à
+  4 frames de 0,5 s : le **garde-fou des 0,25 s** (« un gel de shaders ne coûte
+  pas des mois ») tronquait les secondes. Trois refus du modèle, trois fois
+  justifiés. Le premier est devenu un oracle à part entière — *une mission vécue a
+  besoin que le temps passe, et [GDD 14.3] dit exactement quand il le peut*.
+
+**Constat annexe, non traité (hors périmètre de cette passe)** : `env::Debris`
+n'est tické par aucun chemin vivant non plus — il ne l'était que par
+`GameState::tick`. À vérifier avant de croire la pollution orbitale vivante.
+
+**Correction GDD v1.1 → v1.2 au passage** : `career::Succession::inherit_career`
+appliquait encore la règle v1.1 (rang ramené à Junior, confiance à 40). Les
+décisions **6 et 7** du journal v1.2 disent l'inverse, et le tableau de 3.5 le
+répète : le rang est **transmis** (« propriété du POSTE, non de la personne »), la
+confiance repart à **70**. Corrigé. *(La fonction n'a pas encore d'appelant — la
+passation reste un chantier à part.)*
+
+### LE VERROU DES RADIATIONS (2026-07-28) — l'environnement cesse d'être un décor
+
+**[GDD 7.7] déclare l'environnement « ACTEUR de mission ». Il était SPECTATEUR.**
+Constat fait en cherchant les appelants, pas en relisant les modèles :
+
+| Modèle | Ce qui le consommait |
+| :--- | :--- |
+| `env/Radiation.hpp` — GCR, SPE, Van Allen, `DoseAccumulator`, limite de carrière, seuils aigus, tout ancré sur l'Annexe B | **rien** |
+| `env/Debris.hpp` — `add_breakup` | `apply_anomaly` ✔ (vif) |
+| `env/Debris.hpp` — `tick` (la DÉCROISSANCE) | **`GameState::tick`, c'est-à-dire personne** (piège n°72) |
+| `mission/Events.hpp` — `EventSampler` [GDD 9.5] | **rien** (reste à faire) |
+| `env/SpaceWeather.hpp` — `SolarCycle` | *sans état, fonction pure de l'époque : rien à ticker, pas un défaut* |
+
+Les débris **s'accumulaient sans jamais retomber** : la promesse de [GDD 7.8] —
+« les couloirs LEO se nettoient, les couloirs hauts restent pollués » — n'avait
+que sa moitié punitive.
+
+**1. LE BLINDAGE EST UNE MASSE, et elle est DÉRIVÉE** [GDD 6.6 « l'arbitrage
+masse / protection / mission »]. Un seul nombre sourcé — le **volume habitable
+par personne** (~25 m³, limite basse NASA en longue durée) ; le reste est de la
+géométrie : un module pressurisé est un cylindre, élancement L = 2·D déclaré,
+celui d'un Destiny à 1 % près. D'où une surface, d'où une masse (1 g/cm² =
+10 kg/m²). **164 m² pour six personnes** → 8,2 t à 5 g/cm², **32,8 t à 20**.
+
+**2. ET LA MESURE DIT QUELQUE CHOSE QUE PERSONNE N'A ÉCRIT** :
+
+| | nu | 5 g/cm² | 20 g/cm² |
+| :--- | ---: | ---: | ---: |
+| Dose aller-retour Mars (780 j, **minimum** solaire) | 0,94 Sv | 0,91 Sv | **0,83 Sv** |
+| Masse au décollage | 205,4 t | — | **397,3 t** |
+
+**Doubler la masse au décollage n'achète que 11 % de dose en moins.** C'est le
+plancher de `gcr_transmission` (les secondaires de spallation), et c'est la vraie
+physique : le GCR ne se blinde pas. La leçon — *la réponse n'est pas la masse,
+c'est un transit plus court ou un départ au maximum solaire* — **sort du modèle,
+elle n'a été écrite nulle part**. Et 0,94 Sv nu contre une limite de carrière de
+1,0 Sv : un seul aller-retour martien consomme presque une carrière, comme dans
+la réalité (Annexe B : 0,3-0,7 Sv).
+
+**3. LA DOSE S'ACCUMULE, ET AU BON ENDROIT.** Sur le chemin VIF
+(`AresLayer::avancer`, jamais `GameState::tick` — piège n°72 déjà payé), avec le
+facteur de géométrie du ciel LU sur la phase de vol (0 au sol, 0,4 en LEO sous la
+magnétosphère, 0,5 sur un sol planétaire, 1 en croisière — les chiffres déclarés
+de `Radiation.hpp`) et la modulation GCR **anti-corrélée** à l'activité solaire.
+Sous oracle : 30 j de croisière coûtent plus que 30 j en LEO, et la dose baisse au
+maximum solaire.
+
+**4. LA DOSE APPARTIENT AU PERSONNAGE, PAS À LA MISSION.** Corrigé en cours de
+route : je l'avais d'abord posée sur `LivedMission`, qui se vide au débarquement —
+« un personnage consommé ne revole pas » [GDD 6.6] n'aurait eu aucun sens avec un
+compteur remis à zéro à chaque retour. Elle vit sur `GameState::dose_architecte`,
+et `DoseAccumulator` portait DÉJÀ la distinction `mission_sv` / `career_sv` : il
+suffisait de la ranger au bon endroit. Le verrou ferme `peut_embarquer`, et il est
+sérialisé — le perdre au rechargement rendrait apte quelqu'un qui ne l'est plus.
+
+**5. DEUX FAÇONS DE NE PAS RENTRER, et une seule est une faute.** Les réserves
+épuisées portent `player_error_causal` (provisionner était son métier) ; la dose
+aiguë létale ne le porte PAS — elle vient d'une éruption, et [GDD 7.7] fait de
+l'environnement un acteur, pas un piège à cocher. Le motif affiché dit laquelle
+des deux morts c'est.
+
+**6. LES DÉBRIS RETOMBENT.** Une ligne sur le chemin vif, et [GDD 7.8] devient
+vrai. **PREUVE** : deux nuages identiques, 2 ans de temps de jeu → **300 km :
+698 → 0 objets ; 1200 km : 698 → 698**. La traînée fait son travail en bas, et
+l'empreinte reste durable en haut [GDD 10.5].
+
+**7. SURFACE.** Poste CONTRÔLE : curseur de **BLINDAGE ÉQUIPAGE** (visible pour
+les seuls vols habités — un curseur inutile enseigne une fausse leçon) avec sa
+masse et **la dose qu'il promet** à côté, sans quoi il ne serait pas décidable ;
+et deux lignes de dose dans « VIE À BORD », mission et carrière, juste sous les
+vivres — c'est le même équipage et ce sont ses deux horloges.
+
+**PREUVE** : build `SPEditor` Succeeded, **3 400 oracles au vert** (+38), et
+`ue_vecu_poste_controle.png` recapturée — arrivée dans **204 jours**, autonomie
+**778,4 j**, **DOSE MISSION 0,093 Sv** à 10 g/cm², carrière 9 %. L'écran concorde
+au chiffre près avec le journal du modèle (784 j et 0,0886 Sv relevés à f=801).
+
+**PIÈGE PAYÉ, et il ne concernait pas les radiations.**
+- **n°74 — LES POSTES ÉTAIENT FIGÉS À LEUR OUVERTURE.** `SSPPoste::Tick` ne
+  reconstruisait qu'au CHANGEMENT de poste, avec un commentaire qui l'assumait :
+  « pas à chaque frame — les actions internes appellent Rebuild() elles-mêmes ».
+  Règle juste **tant que rien ne bougeait sans clic** ; fausse depuis que le temps
+  COULE [GDD 14.2]. La capture annonçait encore *897 jours d'autonomie* et
+  *« arrivée dans 322 jours »* après quatre mois de vol — pendant que le modèle
+  était à 784 jours. **Ce n'est pas ma télémétrie qui était morte : c'était tout
+  l'écran**, et il aura fallu la première grandeur qui varie CONTINÛMENT pour que
+  ça se voie. Corrigé : reconstruction quand le calendrier a bougé, **bornée à
+  5 Hz** (une télémétrie n'a pas besoin de la fréquence d'image), et rien ne se
+  reconstruit en pause — l'état par défaut d'une partie.
+- **LA MÉTHODE, une fois de plus** : un `UE_LOG` de trois lignes dans le vrai
+  chemin a tranché en une exécution entre « le modèle ne consomme rien » et
+  « l'écran ne se rafraîchit pas » — deux hypothèses qu'une capture ne peut pas
+  départager, puisque l'image est justement ce qui est en cause. Le diagnostic est
+  gardé sous `#if 0`, comme celui du ciel.
+
+### LES ANOMALIES SE PRODUISENT ENFIN (2026-07-28) — `mission/Avaries.hpp`
+
+**Le dernier gros modèle sans appelant.** `mission/Events.hpp` tirait des
+événements calibrés (processus de Poisson par type, substream dédié, taux modulés
+par la phase, la fiabilité et le cycle solaire) depuis le premier jour, et
+**personne ne les consommait** : la « bibliothèque d'anomalies » de [GDD 9.5]
+existait sans qu'aucune anomalie ne se produise jamais.
+
+**DEUX NATURES, et la distinction est physique.** `Avaries.hpp` est ce qui
+manquait — ce qu'un événement FAIT, combien de temps, et ce qu'on peut y opposer :
+- l'**ÉRUPTION SOLAIRE** est un INSTANT : une dose reçue, rien à réparer, et c'est
+  le blindage embarqué qui décide seul ;
+- les **PANNES** sont des ÉTATS : elles durent tant qu'on ne les répare pas, et
+  leur effet se paie CHAQUE JOUR sur les consommables.
+
+**AUCUN « MALUS » ABSTRAIT.** Une avarie dégrade des grandeurs qui existent déjà
+et qui sont déjà vivantes : une panne de support-vie **dégrade les boucles de
+recyclage** (donc `VitalState::consume` mange la marge), une panne électrique
+**use l'épuration du CO2** (poste électrique) et l'ECLSS avec, une micrométéorite
+**fait fuir** l'air et l'eau, une urgence médicale **fait surconsommer**, une perte
+de communication **coupe la boucle sol** [GDD 9.6]. Réparer, c'est arrêter une
+hémorragie de vivres — pas éteindre une icône.
+
+**RÉPARER EST UNE CAPACITÉ, PAS UN DÉ** [GDD 9.1, 5.10]. « Rien n'est un coup de
+dé nu » : on répare ce que l'architecture permet de réparer, et ça prend le temps
+que ça prend. La branche 4 achète cette capacité (`maintenance_locale`,
+`medecine_embarquee`), et deux nœuds RACCOURCISSENT le travail plutôt que de
+l'autoriser — le diagnostic autonome trouve la panne, la redondance permet de
+basculer pendant les travaux. **L'avarie continue de coûter pendant la
+réparation** : c'est ce qui fait qu'on répare tôt.
+
+**ET VOICI LA SYMÉTRIE QUE LE GCR SEUL CACHAIT** [GDD 6.6] : contre le fond
+permanent, blinder ne sert presque à rien (11 % gagnés en doublant la masse au
+décollage) ; contre une éruption, l'atténuation est **EXPONENTIELLE**. Mesuré :
+une éruption majeure fait **5,00 Gy non blindée — létale — et 1,32 Gy derrière
+20 g/cm²**. Le blindage ne rend pas l'éruption inoffensive (1,32 > 1,0 Gy de seuil
+de syndrome aigu, et **c'est la mesure qui a corrigé ce que j'avais écrit ici**),
+il fait rentrer l'équipage. C'est exactement la raison d'être des abris
+anti-tempête réels : *la masse ne sert pas contre le fond, elle sauve la vie le
+jour où le Soleil s'emporte.*
+
+**TROIS DÉFAUTS DU MODÈLE TROUVÉS PAR LA MESURE.**
+
+**A. Les paramètres SPE étaient incohérents avec l'Annexe B du GDD.**
+`spe_unshielded_gy` disait en commentaire « les monstres sont rares » et faisait
+l'inverse : une loi log-uniforme sur une magnitude UNIFORME donne **41 %
+d'événements au-dessus du gray**. Couplée aux 1-10 SPE/an de `spe_rate_per_year`,
+elle produisait **19,9 Gy d'aigu sur une seule croisière martienne** (mesuré) —
+un équipage y mourait systématiquement, quelle que soit l'architecture, alors que
+l'Annexe B ancre l'aller-retour à ~0,3-0,7 Sv. Recalibré avec **trois paramètres
+déclarés** et une **CIBLE explicite vérifiée par oracle** : derrière la seule
+coque, la dose SPE d'un aller-retour martien doit être du même ordre que la dose
+GCR du même trajet. Résultat mesuré : **1,55 Sv de SPE contre 0,91 Sv de GCR**, et
+**3,8 %** d'éruptions au-dessus du gray. *Si l'un des trois nombres bouge,
+l'oracle le dit.*
+
+**B. Un équipage n'est jamais nu dans le vide.** Le modèle partait d'un blindage
+ZÉRO, ce qui décrit un astronaute sans véhicule. La structure, les équipements et
+les consommables forment un blindage de fait : **7,5 g/cm² déclarés** (ordre de
+grandeur du module de commande Apollo). La distinction compte pour la masse — la
+coque est déjà dans la masse sèche, **seul l'ajout se facture**. La richesse en
+hydrogène se moyenne au prorata : ajouter du polyéthylène améliore la QUALITÉ du
+blindage, pas seulement sa quantité, et c'est pourquoi on choisit ce matériau.
+
+**C. L'activité solaire était évaluée à « maintenant », pas à la date de la
+fenêtre.** Trouvé par l'oracle de rejouabilité, qui a refusé de valider : évaluée
+une fois par tick, elle appliquait à 400 fenêtres la valeur du DERNIER jour, si
+bien qu'avancer d'un bloc ou par tranches ne donnait pas les mêmes éruptions. Le
+cycle solaire a une période de onze ans — une année de fenêtres n'est pas un
+instant. `WorldEpoch::at` existait déjà pour ça.
+
+**LE TIRAGE EST REJOUABLE, et c'est la même exigence que les sous-pas du temps**
+[GDD 14.2] : fenêtres d'UN JOUR indexées sur le calendrier, ancrées sur la **date
+de décollage** et non sur la première frame (sans quoi un saut de 400 jours
+n'ouvrait aucune fenêtre et un vol traversait deux ans sans la moindre panne —
+défaut trouvé et corrigé). Sous oracle : une avance de 400 jours d'un bloc et huit
+de cinquante donnent **les mêmes pannes, aux mêmes dates, et la même dose aiguë**.
+
+**PREUVE** : build `SPEditor` Succeeded, **3 430 oracles au vert** (+30), et
+`ue_vecu_avaries.png` — « AVARIES EN COURS (1) : défaut électrique (gravité 64 %),
+boucles dégradées eau 84 % O2 84 % du nominal », dose 0,194 Sv derrière 17,5 g/cm²
+(coque + conception), autonomie 490 j, arrivée dans 130 jours.
+
+**UN PIÈGE PAYÉ, d'ergonomie.**
+- **n°75 — LE CADRE CLIPPE, IL NE REPLIE PAS.** La conduite de mission a fini par
+  porter plus de lignes qu'un poste n'en affiche : « ARES » chevauchait
+  « [ECHAP] FERMER » et les boutons sortaient du cadre. Vu **en capture**, pas en
+  relisant le code. Même remède que les postes AGENCE et PLANIFICATION, qui
+  portaient déjà des listes longues : **la LECTURE défile, les ACTIONS restent
+  ancrées en bas** — un bouton qu'il faut aller chercher en défilant est un bouton
+  qu'on ne trouve pas. Et **les avaries sont remontées EN TÊTE du poste** : sous
+  la ligne de flottaison, une alarme n'est pas une alarme ; le bilan de viabilité,
+  lui, est une préoccupation de conception, pas de conduite.
+
+### LES DEUX HORLOGES (2026-07-29) — `rel/Relativity.hpp` enfin branché
+
+**LE MÊME DÉFAUT, POUR LA CINQUIÈME FOIS, ET C'ÉTAIT LE DERNIER GROS.**
+`rel::DualClock` était déclaré sur `GameState`, **sauvegardé**, **rechargé** — et
+`advance` n'avait **aucun appelant**. Le « vieillissement différentiel qui pèse
+sur la carrière et la passation » [GDD 3.4, 14.4] valait donc rigoureusement
+**zéro**, pour toute mission, y compris celles que le GDD range en régime
+relativiste. Et l'âge biologique avançait du temps du **calendrier**, ce qui n'est
+vrai que si l'on ne quitte jamais le sol.
+
+**LA DILATATION CINÉMATIQUE N'EST QUE LA MOITIÉ DU TIERS DE L'HISTOIRE.** Une
+horloge bat aussi selon le **potentiel** où elle se trouve, et dans le système
+solaire les deux termes sont du même ordre (~1e-9). N'en garder qu'un ferait
+mentir le modèle d'un **facteur 3**, pas d'un epsilon. Le taux retenu :
+
+> `dτ/dt = (1 + Φ/c²) / γ(v)` — **exact en v** (tout β, ce que le régime
+> antimatière exige), **premier ordre en Φ/c²**, borné et déclaré [GDD 6.8] :
+> |Φ|/c² ≤ 1e-8 partout où un vaisseau peut aller, le terme négligé est en 1e-16.
+
+**DEUX IDENTITÉS KÉPLÉRIENNES EXACTES REMPLACENT TOUTE INTÉGRATION.** Sur une
+orbite, la moyenne **temporelle** de 1/r vaut **exactement** 1/a (l'intégrale en
+anomalie excentrique se simplifie). D'où, sans hypothèse sur l'excentricité :
+⟨v²⟩ = μ/a et ⟨Φ⟩ = −μ/a. Corollaire vérifié par oracle à 1e-12 : **|⟨Φ⟩|/c² vaut
+exactement le DOUBLE du terme cinétique**, et de signe opposé.
+
+**LE MODÈLE EST CONFRONTÉ À DES VALEURS PUBLIÉES, PAS À LUI-MÊME.** C'est le rare
+cas où la réalité a déjà mesuré la réponse :
+
+| | modèle | valeur publiée |
+|---|---:|---:|
+| GPS (r = 26 560 km) | **+38,574 µs/j** | +38,6 µs/j |
+| ISS (400 km) | **−24,584 µs/j** | ≈ −25 µs/j |
+| GEO | **+46,58 µs/j** | ≈ +46 µs/j |
+| Vitesse orbitale RMS de la Terre | **29 784,7 m/s** | 29 784,8 m/s |
+| Hohmann Terre→Mars | **258,9 j** | 259 j |
+
+**ET LE RÉSULTAT DE FOND CONTREDIT LE CLICHÉ.** Sur un transfert vers Mars, le
+vaisseau est **plus haut dans le potentiel solaire ET plus lent que la Terre** :
+les deux termes vont dans le **même sens**, son horloge **gagne**, et le voyageur
+revient **PLUS VIEUX** de **0,25 s** sur un aller-retour complet. Le signe est un
+RÉSULTAT du calcul, pas une hypothèse ; `aging_gap()` documente désormais ses deux
+signes, et `diverged()` prend la valeur absolue. En orbite basse le signe
+s'inverse (la vitesse l'emporte), avec **une seule formule pour les deux régimes**.
+
+Et c'est **précisément pourquoi [GDD 6.7.2] a raison** de dire l'effet
+imperceptible sous β ≈ 0,7 : le GDD l'**affirmait**, le modèle le **chiffre** —
+sous la seconde sur un aller-retour, contre **2,9 ans sur 10** à β = 0,7, par le
+même code.
+
+**CE QUI EST GELÉ AU DÉPART L'EST POUR UNE RAISON DE REJOUABILITÉ**, pas de
+commodité : les demi-grands axes sont lus **une fois**, à l'embarquement, sur les
+**mêmes éphémérides** que la fenêtre de lancement et le Δv (`geometrie_horloge`).
+Un vol rechargé bat donc au même rythme. Même motif pour le facteur médical
+ci-dessous. Sauvegarde **V3** ; une archive V2 retombe sur des défauts qui
+reproduisent **exactement** son comportement d'origine (géométrie invalide ⇒
+rapport 1), sans dérive silencieuse.
+
+**DEUXIÈME DÉFAUT DE LA MÊME FAMILLE, RÉGLÉ AU PASSAGE.**
+`EventContext::medical_risk_factor` était **écrit en dur à 1,0** dans le tick
+alors que `station::effects` calculait 0,6 depuis toujours et qu'un oracle le
+vérifiait : **le module médical de Novellus coûtait 110 M€ et ne changeait aucun
+tirage** [GDD 11.6, 9.4]. Gelé à l'embarquement comme la fiabilité — c'est un
+**entraînement reçu avant le décollage**, et le lire en vol laisserait l'adjoint
+changer les taux de panne d'un vol en cours en démontant un module.
+
+**TROISIÈME : `GameState::tick` EST SUPPRIMÉ.** Piège n°72 soldé. Chaque système
+qu'il contenait a été **cherché par appelants, pas relu** : `research.tick`,
+`debris.tick`, `deliver_unlocked_contracts` et le vieillissement vivent dans
+`AresLayer::avancer` ; `treasury.tick` ne vit **nulle part, et c'est correct** —
+la trésorerie en M$ est l'économie v1.1, neutralisée à l'initialisation, dont
+l'autorité v1.2 (`AgencyFinance::tick_month`, `FinancialStage`) est vivante. Il
+n'y a plus **qu'un seul endroit** où brancher un système, donc plus d'endroit où
+se tromper.
+
+**PREUVE** : build `SPEditor` Succeeded, **3 470 oracles au vert** (+40), et — le
+bloc « VIE À BORD » étant sous la ligne de flottaison du défilement, **aucune
+capture ne peut montrer ce chiffre** — une **mesure en jeu** :
+`[DIAG horloge] t_terre=182,6 j → 212,9 j, ecart +32,26 → +40,77 ms,
+a_croisiere=1,2816 UA`. Soit **0,10264 s/an mesuré** contre **0,10259 s/an**
+prédit par 3μ☉/2c²·(1/a⊕ − 1/a_transfert) : **quatre chiffres significatifs**.
+`ue_horloges_poste_controle.png` montre le poste vivant (avaries, 656,8 j
+d'autonomie, 6 à bord) ; le diagnostic est réarchivé sous `#if 0`.
+
+**UNE ERREUR DE MANIPULATION, PAS DU MODÈLE** : la première capture est revenue
+sur le MENU. `ArmerCapture` sort si `-spscene` vaut 0 — j'avais omis le drapeau de
+scène, que `-spvecu` n'implique pas. À retenir : **`-spvecu` exige `-spscene=iss`**.
+
+### L'ANTIMATIÈRE EXISTE — ET ELLE DIT NON (2026-07-29)
+
+**LE DERNIER MAILLON DE LA CHAÎNE RELATIVISTE SANS CONSOMMATEUR.**
+`AntimatterProduction`, `antimatter_needed_g`, `beta_from_antimatter`,
+`annihilation_energy_j` : **aucun appelant hors des suites d'oracles**. Quatre
+paramètres décrivaient le processus qui, dit le GDD, « est le vrai levier
+d'équilibrage » de la fin de jeu — et **pas un gramme n'existait nulle part**.
+
+**LE DÉBIT N'EST PAS UN PARAMÈTRE LIBRE : C'EST DE LA PUISSANCE.**
+`production_g_per_yr` et `energy_j_per_g` décrivaient le même processus sans
+jamais se parler. On ne peut pas choisir les deux : `ṁ = P / E`. Le débit se
+dérive donc de la **marge de puissance de Novellus** [GDD 11.5], ce qui fait de
+l'infrastructure le levier annoncé au lieu d'un nombre écrit à la main.
+Vérification qui rassure : les 5 000 kW que CAT-11 exige rendent **1,58e-3 g/an**,
+l'ordre de grandeur exact du débit tabulé — les deux champs étaient cohérents,
+seulement débranchés.
+
+**UN STOCK QUI FUIT EST UN ÉQUILIBRE, PAS UN CUMUL.** `dS/dt = ṁ − λS`, intégrée
+**exactement** (`S∞ + (S − S∞)·e^(−λdt)`), jamais par un pas d'Euler : un bloc de
+3 650 jours et 365 tranches de 10 donnent le même stock à **1e-15 près**. Même
+exigence que les sous-pas du temps [GDD 14.2], appliquée à une ressource.
+
+**ET LE VERDICT MESURÉ, QUI EST CELUI DU GDD.**
+
+| | |
+|---|---:|
+| Stock d'équilibre sous les 5 MW de CAT-11 | **4,32 mg** |
+| Marge réelle de Novellus au départ | **38 kW** → 9,9e-6 g/an |
+| Antimatière pour β = 10⁻⁴ (γ−1 = 5e-9, indétectable) | **750 g** |
+| Capacité de confinement déclarée | **1 g** |
+
+Ce n'est pas « long », c'est **structurellement impossible** : même à puissance
+infinie, le confinement à 1 g interdit β = 10⁻⁴. **C'est le confinement le
+verrou, pas le débit** — et l'équilibre est 230 fois sous la capacité, donc c'est
+la **fuite** qui borne le stock, pas le réservoir. [GDD 19.3] le disait déjà
+(« viser β = 0,3 demande des tonnes — hors échelle ») ; le modèle branché le
+**chiffre**. C'est une donnée de calibration [Annexe E], **pas un défaut de code**,
+et je ne l'ai pas recalibrée : le GDD diffère explicitement ces nombres, et son
+invariant déclaré est précisément que le régime reste hors d'échelle.
+
+**CE QUI CHANGE QUAND MÊME, ET CE QUI NE CHANGE PAS.** CAT-11 reste volable comme
+aujourd'hui (Δv de 30 km/s) : **aucun verrou nouveau**, la physique se contente de
+dire ce qu'elle achète. Le poste AGENCE affiche désormais les quatre nombres qui
+décident — stock, débit sous la marge courante, **plafond réel avec sa cause**
+(« borné par la fuite » ≠ « borné par le confinement »), et l'écart au seuil
+relativiste. **Le cul-de-sac est affiché au lieu d'être subi** ; le bloc n'apparaît
+que si la filière est qualifiée, pour ne pas faire de bruit pendant toute la
+partie. Et `GeometrieHorloge::beta_croisiere` bascule l'horloge sur la
+**cinématique pure** au-delà du seuil [GDD 6.7.2] — le vaisseau ne suit alors plus
+d'ellipse, il s'échappe, et ⟨1/r⟩ = 1/a n'a plus de sens. Exercé par oracle à
+β = 0,7 : le bord ne bat plus qu'à **71 %** du sol. Le jour où la calibration
+changera, le code sera déjà juste.
+
+**PREUVE** : build `SPEditor` Succeeded, **3 501 oracles au vert** (+31),
+sauvegarde **V4**, et `ue_antimatiere_poste_agence.png` — le poste rend propre,
+cadre intact, bloc correctement **masqué** filière non qualifiée. La mise en page
+est sûre **par construction** et non par chance : `Col->AddSlot().FillHeight(1)`
+donne au défilement la hauteur restante, donc des lignes ajoutées au-dessus le
+rétrécissent sans jamais déborder (contrairement au piège n°75).
+
+### LA CALIBRATION DE FIN DE JEU (2026-07-29) — LE GDD RÉPOND À SA PROPRE ANNEXE
+
+**LA PASSE PRÉCÉDENTE S'EST TROMPÉE DEUX FOIS, ET LES DEUX ERREURS SE TENAIENT.**
+Elle concluait : « le régime relativiste est hors d'atteinte par construction ;
+c'est une donnée de calibration [Annexe E], **pas un défaut de code** ; seul le
+GDD peut trancher entre trois issues ». Fausse sur le diagnostic, fausse sur la
+méthode.
+
+**1. LE GDD AVAIT DÉJÀ TRANCHÉ.** L'Annexe E ne diffère pas la question : elle en
+**nomme la dépendance**, « vitesse maximale *souhaitée* en fin d'arbre ». Et le
+corps du document la dit, à trois endroits :
+
+| Énoncé | Ce qu'il impose |
+| :--- | :--- |
+| [6.7.2] « seule l'antimatière **franchit** β ≳ 0,3 » | 0,3 doit être ATTEIGNABLE au palier abouti |
+| [5.12.11] la fusion donne de grandes vitesses « **sans encore** rendre la dilatation significative » | au palier fusion, β doit rester SOUS le seuil |
+| [3.4] β ≈ 0,9 « se mérite par l'ingénierie » · [3.5] la fin de branche 6 « demande souvent **plusieurs vies** » | l'accumulation est une DURÉE, de l'ordre du siècle |
+
+L'issue (a) — « CAT-11 est une asymptote, le vol relativiste n'a jamais été
+destiné à partir » — est donc **réfutée par le document lui-même**. Il n'y avait
+pas de question de game design à poser : il y avait trois énoncés à **inverser**.
+
+**2. C'ÉTAIT BIEN UN DÉFAUT DE CODE — LE 8ᵉ « NOMMÉ MAIS NON CONNECTÉ ».**
+La puissance de production était `G.station.power_margin_kw() * 1000.0` : la
+**marge de Novellus**, 38 kW au départ, 5 MW au mieux. Conséquence exacte :
+*aucune recherche de branche 6 ne pouvait déplacer le débit d'un facteur.* Le
+« vrai levier d'équilibrage » annoncé par le GDD n'était pas branché sur son
+levier — et le verdict « impossible » qu'on en tirait mesurait donc une station,
+pas une filière. [GDD 5.12.12] dit pourtant où prendre la puissance : « le
+rendement énergétique **couple la production à la branche énergie** et au
+budget ». Une usine à antimatière n'est pas un module de station.
+
+**CE QUI CESSE D'ÊTRE UN RÉGLAGE.** `energy_j_per_g` avait un **plancher
+physique** que personne n'avait écrit : on ne fabrique pas un antiproton sans
+fabriquer son proton, donc E ≥ 2·m·c² = **1,7975e14 J/g**. Le champ libre est
+remplacé par un **rendement η ∈ (0,1]**, et la mesure a sorti l'hypothèse muette :
+l'ancien défaut de **1e17 J/g supposait η = 1,8e-3**, six ordres au-dessus de ce
+que le CERN sait faire (≈ 1e-9). Une hypothèse de fin d'arbre était posée au
+milieu du modèle sans être déclarée [GDD 6.8, 12.5] — piège n°81, encore.
+
+**LES PALIERS SONT DÉDUITS DES TROIS ÉNONCÉS.**
+
+| Palier (branche 6) | η | Puissance usine | Confinement | Énoncé vérifié |
+| :--- | ---: | ---: | ---: | :--- |
+| `fission_spatiale` | 1e-9 (réel) | 1 GW | 1e-3 g | — |
+| `fusion` | 1e-6 | 10 TW | 1e3 g | [5.12.11] pré-relativiste ✓ |
+| `antimatiere` | **1e-2** | **2e16 W** | **1e10 g** | [6.7.2] et [3.4] ✓ |
+
+Le confinement à **1 g** n'était pas « un plafond du stock utile » [5.12.12] mais
+**un mur**. La fuite de 1e-5/j reste assez serrée pour que ce soit encore **la
+fuite qui borne** (9,613e9 g d'équilibre contre 1e10 g de réservoir), ce que le
+poste AGENCE dit en toutes lettres.
+
+⚠ **CES TROIS LIGNES ONT ÉTÉ RECALIBRÉES UNE SECONDE FOIS** le même jour, sur une
+décision de l'utilisateur qui change l'ancre — voir « LE RELATIVISME EST POUR
+L'HABITÉ » plus bas. La première calibration visait une **sonde**, et c'était le
+seul cas qui ne sert à rien.
+
+**LE RÉSULTAT MESURÉ, ET IL EST EXACTEMENT CELUI QUE LE GDD DEMANDE.**
+
+| | |
+|---|---:|
+| Débit au palier abouti | **3,511e4 g/an** |
+| Stock d'équilibre | **9,613e6 g** |
+| β = 0,3 sur une sonde de 5 t, aller simple | **3,83e6 g → 139 ans** |
+| β = 0,9 sur la même sonde | **hors d'atteinte** |
+| β = 0,9 sur 100 kg secs | **4,09e6 g → 152 ans** |
+| Aller-retour à β = 0,3 [6.7.4] | 26× l'aller simple → **hors d'atteinte** |
+
+**ET C'EST LA DERNIÈRE LIGNE QUI FAIT LE DESIGN.** « β découle de
+l'**architecture** » [décision 10] cesse d'être une phrase : le même stock donne
+0,48 à une sonde de 5 t et rien du tout à un vaisseau habité, et l'architecte qui
+veut 0,9 doit descendre à quelques dizaines de kg. Ce qui reste refusé l'est par
+la **physique** — le ratio à la puissance quatre de l'aller-retour [6.7.4] — et
+non par un réservoir arbitrairement petit.
+
+**UN ORACLE QUI PASSAIT POUR UNE RAISON FAUSSE (piège n°82).** « le stock
+CONVERGE — 200 ans de plus n'ajoutent rien » était vert depuis toujours. Il ne
+mesurait pas une convergence : au bout de quelques années sans aucun programme,
+l'agence fait **faillite** et `Jeu::avancer_temps` s'arrête net (« faillite : le
+calendrier s'arrête là »). **Le stock ne convergeait pas, le temps s'arrêtait.**
+Tant que la calibration rendait le stock dérisoire, les deux se ressemblaient
+assez pour que la différence ne se voie pas. Le fait de jeu qui le remplace vaut
+mieux que l'oracle perdu : **les 140 ans de [GDD 3.5] exigent une agence qui
+produit pendant 140 ans.** La pression d'inactivité [13.2] et le programme de fin
+de jeu sont **couplés** — l'accumulation ne s'obtient pas en laissant filer le
+temps. C'est sous oracle, dans les deux sens.
+
+**CONSTANTE DE TEMPS.** 1/λ = **274 ans** : quatre siècles ne suffisent pas à
+converger (mesuré : 8,54e6 g sur 9,61e6), cinq constantes y amènent à 1 %. C'est
+elle qui dicte les horizons des oracles, pas un chiffre rond.
+
+**PREUVE** : build `SPEditor` Succeeded ; **3 600 oracles au vert** sur les
+12 suites ; nouveau drapeau **`-spantimatiere`** (§1) et
+`ue_antimatiere_calibree.png` — le bloc affiche débit de l'usine *avec sa
+puissance et son rendement*, plafond réel *avec sa cause*, et le seuil β = 0,3
+**ATTEINT**. Au passage, un troisième verdict manquait à cette ligne : « 0 ans »
+se lisait « c'est instantané » là où cela voulait dire « c'est fait ».
+
+### LE VERROU DE L'ALLER-RETOUR NE MORDAIT PAS SUR L'HORLOGE (2026-07-29)
+
+**TROUVÉ EN SONDANT UN VOL CAT-11 RÉEL**, une fois la calibration faite : quel β
+l'antimatière achète-t-elle *vraiment* à un vol joué ? La sonde a répondu autre
+chose que ce qu'on cherchait.
+
+`antimatter_needed_g(m, β, **n_burns**)` connaissait le nombre de poussées.
+`beta_from_antimatter(m, g)` — **son inverse, dix lignes plus bas dans le même
+fichier** — ne le connaissait pas : il rendait toujours le β d'un **aller
+simple**. Donc tout ce qui LISAIT un β le lisait **surestimé**, et d'autant plus
+que l'architecture était contraignante. Or c'est exactement ce que [GDD 6.7.4]
+appelle « le verrou de l'aller-retour » et qu'il chiffre au **ratio à la puissance
+quatre** — un verrou que le modèle savait calculer (`mass_ratio_for_burns`,
+`round_trip_mass_ratio`) et qui ne s'appliquait pas **là où il compte : sur
+l'horloge de l'équipage**.
+
+**LA CORRECTION EST UNE IDENTITÉ, PAS UN COEFFICIENT.** Le ratio total valant
+R^n et la **rapidité étant additive** [GDD 6.7.3, Annexe A], la rapidité par
+poussée est simplement `(1/n)·(ve/c)·ln(R_total)`. L'inversion redevient donc
+**exacte pour tout n** — sous oracle : partir d'un β, en déduire la masse, la
+relire, retrouver le β à 1e-12, pour n ∈ {1, 2, 4} et β ∈ {0,05 · 0,3 · 0,7}.
+
+**ET LE NOMBRE DE POUSSÉES SE LIT, IL NE SE CHOISIT PAS** (`burns_for_architecture`) :
+un équipage **revient** (4), une sonde qui se pose **freine** (2), un survol ne
+freine pas (1). Mesure, à stock d'équilibre égal sur 5 t secs :
+
+| Architecture | Poussées | β |
+| :--- | ---: | ---: |
+| Survol | 1 | **0,482** |
+| Aller simple avec insertion | 2 | **0,257** |
+| Aller-retour habité | 4 | **0,131** |
+
+Les trois franchissent encore le seuil : la calibration tient, et le verrou du
+GDD **gradue** au lieu d'interdire. L'ancre de calibration est reformulée en
+conséquence — 5 t **en survol**, donc un **majorant** assumé, et non « un aller
+simple » comme elle le disait.
+
+**CE QUE LA SONDE A AUSSI MESURÉ** : sur un véhicule habité réel (coque 6
+personnes + vivres + blindage ≈ 100 à 200 t secs), le même stock donne β ≈ 0,015.
+Le régime relativiste est donc, en pratique, **robotique** — cohérent avec
+[décision 10]. C'est ce constat qui a ouvert la question de la DESTINATION, voir
+la section suivante.
+
+**PREUVE** : `SPEditor` Succeeded, **3 615 oracles au vert** (+15).
+
+### LA MISSION RELATIVISTE A UNE DESTINATION (2026-07-29)
+
+**LE VOL DE FIN DE JEU N'ALLAIT NULLE PART.** `window_target_for_family` ne
+nommait **aucune cible** à la famille « relativiste » : `transfer_tof_days`
+rendait 0, la croisière restait ouverte (`dated == false`) et le vol **n'arrivait
+jamais**. Toute la chaîne — production d'antimatière, β, deux horloges, temps
+propre — existait pour une mission **sans destination**.
+
+**LE GDD SE CONTREDISAIT, DONC ON A DEMANDÉ.** [9.3] « plusieurs décennies
+terrestres » et [3.4] « β ≈ 0,9 → ~5 ans d'écart » (soit ~9 ans de vol à
+γ = 2,294) désignent des **années-lumière** ; [17.3] borne la scène au **système
+solaire 1:1** et [5.6] range la fin de branche 6 sous « système solaire externe ».
+Choisir changeait le PÉRIMÈTRE de la scène : ce n'était pas une déduction mais un
+arbitrage. **Décision de l'utilisateur : l'étoile la plus proche.**
+
+**LA DISTANCE EST UN FAIT, PAS UN RÉGLAGE** : Proxima Centauri, parallaxe
+Gaia DR3 768,0665 mas → 1,30197 pc → **4,2465 al**. C'est aussi le **minorant
+absolu** de toute distance interstellaire — aucune architecture ne fera mieux.
+
+**ET LA MESURE A TRANCHÉ DEUX CHOSES QUE PERSONNE N'AVAIT POSÉES.** L'oracle
+visait « ~5 ans d'écart à β = 0,9 » [GDD 3.4] et **a échoué en rendant 2,66** —
+puis 2 × 2,66 = **5,32**. Donc :
+
+| | |
+|---|---:|
+| Proxima à β = 0,9, aller | **4,72 ans Terre · 2,06 à bord · écart 2,66** |
+| ... **aller-retour** | **écart 5,32 ans** — [GDD 3.4] dit « ~5 » |
+
+Le chiffre du GDD **confirme la destination** (à 2 al ou à 8, il ne tomberait pas)
+**et** dit que le voyage dont il parle est un **aller-retour** — ce que [6.7.4]
+affirme par ailleurs en comptant quatre poussées. Le document ne nommait pas sa
+cible ; ses propres nombres la désignaient. *L'oracle qui échoue vaut mieux que
+celui qu'on ajuste : c'est lui qui a trouvé les deux.*
+
+**`rel::proper_time` A ENFIN SON CONSOMMATEUR** — le dernier modèle de la série.
+τ n'est pas *divisé*, il est **intégré** [GDD 6.7.1], et `relativistic_transit`
+est le seul point d'entrée : le jour où le profil aura une rampe d'accélération,
+rien d'autre ne bougera. Vérifié à profil constant : τ intégré == t/γ à 1e-6.
+
+**APPROXIMATION DÉCLARÉE, ET ELLE BORNE** [GDD 6.8] : trajet rectiligne à β
+constant, poussées impulsionnelles — la même approximation que [GDD 6.3], mais
+ici **optimiste**, car un cœur annihilant est en régime **continu** [GDD 6.4].
+La durée rendue est donc un **MINORANT** du vol réel, et l'écart d'âge un
+minorant de l'écart réel. Dit dans le code.
+
+**β DEVIENT UNE PROPRIÉTÉ DU VOL.** Il vivait sur `Lived::horloge`, donc il
+n'existait **que pour une mission vécue** : une sonde relativiste robotique n'en
+avait pas, alors que c'est elle qui va le plus vite. Il est désormais sur
+`Mission`, **figé au feu vert** comme `tof_days` et le tirage de navigation, et
+**sérialisé (V5)** — un vol déjà parti ne change pas de vitesse parce que l'usine
+a produit trois grammes de plus. Une seule expression le calcule
+(`Session::beta_croisiere_de`), trois sites la lisent.
+
+**L'ORDRE COMPTE, ET C'EST NOUVEAU** : pour cette famille, la durée de transit
+n'est **pas** une géométrie de ciel — c'est la distance divisée par la vitesse que
+l'architecture achète. `beta_croisiere` se fige donc **avant** `tof_days`.
+
+**MESURÉ DE BOUT EN BOUT** : une sonde de 5 t sur le stock d'équilibre, deux
+poussées → β = 0,257 → **Proxima en 16,6 ans** (6 045 j), chronologie **datée**,
+gate d'arrivée capable de chiffrer l'attente. Et un véhicule plus lourd met
+**plus** longtemps : la durée découle de l'architecture [décision 10], elle n'est
+pas une propriété du contrat.
+
+**PREUVE** : `SPEditor` Succeeded, **3 635 oracles au vert** (+20),
+sauvegarde **V5** (une archive V4 se relit, β retombant à 0 — la valeur de toute
+mission non relativiste).
+
+#### CE QUE LA DESTINATION A RÉVÉLÉ — TROIS MURS, ET AUCUN N'EST LE MOTEUR
+
+**LE VOL LE PLUS LONG DU JEU EMPORTAIT TRENTE JOURS DE VIVRES.**
+`crew_round_trip_days` dérivait de `window_target_for_family`, qui ne nommait
+aucune cible à cette famille : elle retombait donc sur
+`crew_stay_days_for_family` — le **séjour court par défaut, 30 jours** — pour un
+vol de seize ans. Trois conséquences d'un seul manque : les vivres étaient sous-
+dimensionnés d'un facteur 200, la mission n'était **pas classée « longue »**
+(donc le gate de [GDD 9.2] — rang terminal + `sejour_long` — ne s'appliquait pas
+à la plus longue mission du jeu), et le véhicule ne portait **aucune coque
+pressurisée** (`masse_habitat_kg_` est conditionnée à cette durée). Corrigé :
+une étoile n'a pas de période synodique, on ne l'attend pas — la durée
+d'occupation est **2× le transit**.
+
+**ET LE BILAN DE MASSE EST UN POINT FIXE QUI DIVERGE.** Même structure que
+l'ébullition des ergols (`Assemblage.hpp`), même raison de fond :
+
+> m_sec → β(m_sec, stock) → durée = 2·d/(βc) → vivres(durée) → m_sec
+
+Alourdir le vaisseau le **ralentit**, ce qui **allonge** le voyage, ce qui
+demande **plus de vivres**. `mission::bilan_relativiste` le détecte en 2
+itérations et **nomme la cause** au lieu du symptôme — sans lui, `assess`
+produisait un véhicule de 1 742 t et refusait par « AUCUN LANCEUR NE SOULÈVE
+CETTE MASSE », verdict exact et inutilisable (piège n°42). Contre-épreuve dans
+l'oracle : la **même structure sans équipage** ne diverge pas — la boucle vient
+bien des vivres, pas de la masse.
+
+**MESURÉ, avec l'arbre entier et le stock d'équilibre :**
+
+| Masse sèche | β (4 poussées) | Aller | Aller-retour | Vivres pour 6 |
+| ---: | ---: | ---: | ---: | ---: |
+| 20 t | 0,0271 | 156,6 ans | 313,1 ans | **1 742 t** |
+| 50 t | 0,0119 | 355,9 ans | 711,9 ans | 3 961 t |
+| 100 t | 0,0062 | 687,3 ans | 1 374,5 ans | 7 649 t |
+
+**Les deux autres murs, indépendants du premier :**
+- **DOSE** — 12,9 Sv derrière 20 g/cm² sur 33 ans, soit **13× la limite de
+  carrière** [Annexe B]. Passer à 50 g/cm² ne la ramène qu'à 11,3 : le GCR ne se
+  blinde pas, il se **fuit**, et on ne fuit pas un voyage de trois siècles.
+- **DURÉE DE VIE** — départ à 32 ans, mort naturelle vers 85 [GDD 3.4] : 53 ans
+  de vie contre 313 ans de vol.
+
+**ET IL EST BRANCHÉ, PAS SEULEMENT ÉCRIT** — un modèle sans consommateur est un
+défaut, et il n'était pas question d'en créer le 9ᵉ cas dans la passe qui déclare
+la famille épuisée. `MissionPlan::evaluate` appelle `bilan_relativiste` **avant**
+`assess_multistage` et le refus **court-circuite** `finalize`, exactement comme
+`Assemblage.hpp` pour l'ébullition. Le stock est posé par le driver
+(`mission_plan.antimatiere_g`), comme les boucles et les lanceurs qualifiés — le
+plan pur ne connaît pas l'état de l'agence. Sous oracle **dans les deux sens** :
+le plan habité est refusé avec la cause exacte, et le **même plan sans
+antimatière** retombe sur l'évaluation ordinaire — le court-circuit ne mord que
+là où la boucle existe.
+
+**CONCLUSION DE CETTE PASSE : avec la calibration visant une SONDE, la mission
+relativiste était robotique** — [GDD 19.1] et [19.7] au mot près. **Et c'est
+précisément ce constat qui a été renversé une heure plus tard**, voir ci-dessous.
+
+### LE RELATIVISME EST POUR L'HABITÉ (2026-07-29) — L'ANCRE ÉTAIT FAUSSE
+
+**DÉCISION DE L'UTILISATEUR, ET ELLE EST STRUCTURANTE** : « en gros le relativisme
+a un intérêt seulement pour les vols habités ». Elle tranche la question laissée
+ouverte, et elle le fait en **rejetant le cadrage** plutôt qu'en choisissant une
+option : une dilatation que **personne ne vit** n'a aucune conséquence de jeu.
+[3.4] fait peser l'écart d'âge sur la carrière et la passation, [14.4] sur le
+vieillissement — et une sonde ne vieillit pas. **Calibrer sur une sonde de 5 t
+revenait donc à calibrer sur le seul cas qui ne sert à rien**, et c'est ce que
+faisait `CALIB_DRY_MASS_KG`.
+
+**LE SEUIL D'EXISTENCE EST MESURÉ, PAS CHOISI.** Dichotomie sur le stock jusqu'à
+ce que le point fixe converge :
+
+| | |
+|---|---:|
+| Seuil sous lequel le vol habité **n'existe pas** | **3,0e8 g** |
+| Stock pour β = 0,3 habité (6 personnes, aller-retour) | **4,26e9 g** |
+| Facteur manquant sur l'ancienne capacité (1e7 g) | **×426** |
+
+**LA NOUVELLE ANCRE EST UN POINT FIXE, PAS UN CHIFFRE ROND.**
+`CALIB_DRY_MASS_KG` = **183 t** — la masse que `bilan_relativiste` rend pour
+l'architecture habitée (coque 20,6 t + blindage 32,8 t + 2 t de charge, plus les
+vivres que la durée impose). Elle vit dans `astro_core`, qui ne peut pas appeler
+`mission/` ; **un oracle interdit aux deux de diverger** en vérifiant que la
+constante EST le point fixe, à 5 %.
+
+**CE QUE LE VOL DEVIENT, MESURÉ :**
+
+| | |
+|---|---:|
+| β de l'architecture habitée | **0,370** |
+| Aller-retour Proxima | **22,9 ans Terre · 21,3 vécus** |
+| Écart d'âge | **1,63 an** |
+| L'architecte part à 32 ans et rentre à | **53 ans** |
+
+Et **[GDD 3.4] tombe une seconde fois** : « β ≈ 0,25 → **~1 an d'écart sur une
+décennie** (invisible) ». C'est exactement ce vol. Les deux points de données du
+chapitre 3.4 sont désormais reproduits par le modèle — le « ~1 an » par le vol
+habité, le « ~5 ans » par l'aller-retour à β = 0,9.
+
+**ET LE VERROU DE [6.7.4] TIENT LÀ OÙ IL COMPTE.** β = 0,9 est désormais
+atteignable — **pour une sonde dépouillée de 5 t** (2,05e8 g) — et reste hors
+d'atteinte de **cinq ordres** en aller-retour habité (4,3e15 g contre 9,6e9).
+C'est [GDD 6.7.2] (« seule une antimatière très aboutie **approche** 0,9 ») et
+[décision 10] (« β découle de l'**architecture** ») dans la même mesure.
+
+**QUATRE ORACLES ONT ÉCHOUÉ EN CHANGEANT L'ANCRE, ET C'EST LEUR MÉTIER.** Trois
+comparaient encore à la sonde ; le quatrième — « un véhicule plus lourd met plus
+longtemps » — s'était **silencieusement inversé** (son comparant de 50 t était
+devenu plus léger que la référence de 183 t). Corrigé en **dérivant** le comparant
+de l'ancre (4 × `CALIB_DRY_MASS_KG`) : le jour où elle bougera, l'oracle suivra au
+lieu de mentir. Le HUD avait le même défaut — il calculait la cible à **une**
+poussée, annonçant un seuil **26 fois trop bas** et donc « ATTEINT » bien avant
+que le vol soit payé.
+
+**RESTE UN MUR, ET IL EST DIFFÉRENT DES AUTRES** : la dose. 10 Sv sur un
+aller-retour de 23 ans derrière 20 g/cm², contre ~1 Sv de limite de carrière
+[Annexe B]. Mais 10 Sv **chroniques sur 23 ans** ne sont pas 10 Sv aigus, et la
+limite d'Annexe B est **institutionnelle** (« référence institutionnelle »), pas
+un seuil de létalité. Le modèle sépare déjà `mission_sv` de `mission_acute_gy` ;
+ce qu'il ne fait pas encore, c'est distinguer une limite de **corps d'astronautes**
+d'un vol terminal volontaire de fin de carrière [GDD 9.2]. C'est le prochain fil,
+et c'est de la modélisation, pas du game design.
+
+**PREUVE** : `SPEditor` Succeeded, **3 649 oracles au vert**,
+`ue_antimatiere_calibree.png` — « VOL HABITE b=0,3 (aller-retour) : 3,66e9 g
+requis — ATTEINT », stock 4,254e9 g, plafond réel 9,613e9 g *borné par la fuite*.
+
+### L'AUDIT DES POSTES (2026-07-29) — ce qu'une capture cachait depuis le début
+
+**L'AUDIT PROMIS, ET IL A TROUVÉ.** L'invariant de `SPHud.h` (« le HUD ne calcule
+RIEN ») tient : les seules opérations dans les postes sont des conversions
+d'unités, et je n'ai pas inventé de défaut pour justifier la passe. Mais en
+**regardant** la capture du poste CONTRÔLE, une chaîne de trois défauts est
+apparue, chacun masquant le suivant.
+
+**A. UNE TABLE CACHÉE DANS UNE BOUCLE.** Les termes physiques du contrat
+(masse, budget, délai, P(succès) exigée) vivaient dans une boucle interne à
+`seed_catalogue`. Toute mission construite **hors catalogue** naissait donc avec
+des termes NULS — et le harnais de capture fabrique la sienne à la main. Chaque
+image en vol affichait « BUDGET CONTRAT 0 M EUR », « CALENDRIER 0 / 0 mois »,
+« P(SUCCES) 0,0 % » et un VERROU rouge. La doc classait ça en « réserve
+d'affichage » ; c'était en réalité **un bilan de viabilité invérifiable par
+capture**, et *une alarme fausse dans chaque image est pire qu'une alarme
+absente : elle apprend à ne plus les lire*. `contract_terms_for_family` vit
+désormais dans `MissionLoop.hpp`, à côté des autres tables par famille, avec un
+seul appelant possible.
+
+**B. « PAS ENCORE ÉVALUÉ » N'EST PAS « RATÉ SUR QUATRE AXES ».** Une fois les
+termes réparés, le poste montrait toujours des zéros. `Assessment` naît avec ses
+quatre `fits_*` à false ; le poste les affichait tels quels. Conséquence pour un
+vrai joueur, pas seulement pour une capture : **toute mission fraîchement
+acceptée** — donc avant tout passage au poste CONCEPTION, ce qui est l'ordre
+normal de la boucle [GDD 4.1] — s'annonçait comme une catastrophe sur les quatre
+axes. `MissionPlan::evaluated` existait exactement pour ça et **personne ne le
+lisait** : même famille que les modèles sans consommateur.
+
+**C. `finalize` DÉTRUISAIT LE DIAGNOSTIC — un piège n°42 en plein cœur du
+modèle.** `assess` s'arrête net dès qu'aucun lanceur ne soulève la masse, et il
+DIT pourquoi : « AUCUN LANCEUR NE SOULEVE CETTE MASSE ». `finalize` faisait
+ensuite `why.clear()` et reconstruisait la chaîne depuis les quatre `fits_*`,
+remplaçant **une cause précise par une liste de symptômes** — « MASSE BUDGET
+CALENDRIER RISQUE » — dont **trois quarts n'avaient jamais été calculés**. Coût,
+calendrier et fiabilité valaient zéro parce que l'étude ne les avait pas
+atteints, et le poste les peignait en rouge comme des échecs. *Un refus doit
+nommer ce qui manque, pas énumérer tout ce qu'on ignore.*
+
+**CE QUE LA CAPTURE MONTRE MAINTENANT**, et c'est enfin exploitable :
+`MASSE AU DECOLLAGE 193 235 kg` · *« coût, calendrier et fiabilité NON ÉVALUÉS :
+l'étude s'arrête à la masse »* · `VERROU : AUCUN LANCEUR NE SOULEVE CETTE MASSE`.
+Les trois lignes libérées rendent au passage visibles les vivres et les boucles
+de recyclage.
+
+**ET LE CHIFFRE QUE TOUT CELA RÉVÈLE** : un aller-retour martien habité pèse
+**193 t au décollage** — consommables et blindage compris — et **aucun lanceur du
+catalogue ne le soulève**. C'est physiquement juste (un vol martien réel demande
+un assemblage en orbite, pas un lancement unique), et c'est désormais **dit** au
+lieu d'être noyé. À reprendre avec l'assemblage orbital, pas avec un lanceur
+imaginaire.
+
+**PREUVE** : build `SPEditor` Succeeded, **3 514 oracles au vert** (+13), et
+`ue_horloges_poste_controle.png` recapturée.
+
+### LE CATALOGUE ÉTAIT INACHEVABLE À 55 % (2026-07-29)
+
+**LA QUESTION EXACTE, POSÉE À TOUS LES CONTRATS.** Le « 193 t, aucun lanceur »
+de la section précédente n'était pas une curiosité : c'était la pointe d'un
+défaut structurel. Mesure de départ, **arbre entier qualifié TRL 9 et rang
+Directeur** — donc la limite PHYSIQUE, pas un manque de progression :
+
+| | contrats | verdict |
+|---|---|---|
+| CAT-01, 02, 03, 05 | 4 | viables |
+| CAT-04, 06, 08, 09, 10 | **5** | **bloqués net par le plafond des lanceurs** |
+| CAT-11 | 1 | Δv hors de portée |
+
+**Six contrats sur onze étaient inachevables quoi que fasse le joueur**, et trois
+d'entre eux avaient une charge utile **nue** au-dessus du plafond — aucune
+ingénierie ne pouvait les sauver.
+
+**DEUX CAUSES, TOUTES DEUX « NOMMÉ MAIS NON CONNECTÉ ».**
+1. **`lanceur_super_lourd` était un nœud d'arbre, prérequis de CAT-09, qui ne
+   débloquait AUCUN lanceur.** Le catalogue s'arrêtait à 8,3 t. *Un prérequis qui
+   ne débloque rien est un prérequis qui ment.*
+2. **Les quatre nœuds « lanceur » de la branche 1 ne gardaient RIEN.** `launchers()`
+   était une liste plate sans aucun filtre : le joueur disposait de toute la gamme
+   dès la première mission, et « Accès à l'orbite » était une branche décorative.
+
+**LES CORRECTIONS, ANCRÉES SUR DES LIGNÉES RÉELLES** [GDD 12.1 : « pièces réelles
+ou extrapolées de lignées réelles, jamais génériques »] :
+- **`L-D super-lourd`, 130 t, 1 400 M$, R = 0,970** — Saturn V (140 t) et SLS
+  Block 2 (130 t). Fiabilité **plus basse** que le lourd, et c'est le fait réel :
+  un lanceur géant vole peu, donc il démontre peu. *On n'achète pas de la
+  fiabilité en achetant de la taille.*
+- **`L-C lourd` : 8,3 t → 22,8 t (Falcon 9 Block 5)**. Un « lourd » à 8,3 t n'a
+  aucune lignée réelle — c'est un moyen déguisé, et cette sous-évaluation créait
+  un **trou de 15,7×** entre 8,3 t et 130 t. Conséquence mesurée : CAT-04, qui
+  dépassait le plafond de **356 kg (4 %)**, devait acheter un Saturn V à
+  1 457 M$ pour un contrat à 240 M$. Prix inchangé à 95 M$ — conservateur, un
+  Falcon 9 réel se vend ~67 M$.
+- **Filtrage par l'arbre**, avec le même prédicat que partout (TRL ≥ 7). Et le
+  refus **distingue deux verdicts** que le joueur ne doit pas confondre :
+  « LANCEUR NON QUALIFIÉ : RECHERCHER *x* » est une **direction**, « AUCUN LANCEUR
+  NE SOULÈVE CETTE MASSE » est une **impasse**. Une seule des deux se résout en
+  cherchant (piège n°42).
+- **CAT-09 : budget 1 200 → 3 000 M$.** Il ne payait même pas son lanceur
+  (1 400 M$), ce qui **violait l'invariant déclaré de sa propre table** (« calé
+  pour qu'un plan raisonnable au rang requis soit VIABLE »). 3 000 M$ ≈ 1,9× le
+  coût nu mesuré, et reste très en dessous du réel — Artemis III : ~4 100 M$ pour
+  **un** lancement.
+
+**RÉSULTAT MESURÉ : 9 contrats sur 11 réalisables en masse** (contre 5). Les deux
+restants le sont pour des raisons **physiques**, vérifiées en faisant varier le
+nombre d'étages — une décision du joueur que ma première mesure avait oubliée :
+
+| | 2 étages | 3 étages | 4 étages |
+|---|---:|---:|---:|
+| CAT-10 (cargo NEP) | 181 t | 158 t | **152 t** — jamais sous 130 t |
+| CAT-11 (relativiste) | infaisable | infaisable | **346 495 tonnes** |
+
+CAT-10 demanderait un **assemblage en orbite** — *fait le jour même, voir la
+section suivante : le GDD le nommait bien, au tableau de la branche 1, et j'avais
+conclu à une absence sur une recherche incomplète*. CAT-11 à 346 000 t, c'est Tsiolkovsky appliqué à 30 km/s en
+chimique : **c'est précisément pourquoi [GDD 19.3] réserve ce régime à
+l'antimatière**, et la cohérence avec la passe précédente est totale.
+
+**ET L'ARBITRAGE MASSE / PROTECTION / MISSION MORD ENFIN** [GDD 6.6]. Le GDD le
+nommait depuis toujours ; il ne coûtait rien tant qu'aucun plafond n'existait.
+Mesuré sur l'aller-retour martien habité :
+
+> **121 t sans blindage ajouté → 182 t avec 10 g/cm², contre un plafond de 130 t.**
+
+**La seule décision de blindage fait basculer une architecture lançable en
+architecture qui ne l'est pas.** C'est exactement pourquoi les architectures
+martiennes réelles assemblent en orbite (DRA 5.0 : ~850 t, 7 à 9 lancements) —
+le modèle **redécouvre** la contrainte au lieu de la contourner. La capture du
+poste CONTRÔLE montre donc toujours un verrou rouge : il est désormais **vrai**,
+et il nomme sa cause.
+
+**PREUVE** : build `SPEditor` Succeeded, **3 525 oracles au vert** (+11), dont un
+**audit exhaustif du catalogue** qui épingle pour de bon : bijection lanceur ↔
+nœud d'arbre, la branche 1 garde vraiment, aucun budget sous le prix de sa fusée,
+et **exactement deux** contrats hors de portée d'un lancement unique — une
+régression sur l'un de ces nombres devient impossible à ne pas voir.
+
+### L'ASSEMBLAGE EN ORBITE (2026-07-29) — `mission/Assemblage.hpp`
+
+**RIEN À INVENTER : LE GDD LE NOMMAIT DÉJÀ.** Branche 1, tableau du ch. 5.2 —
+« transfert de propergol orbital, **rendez-vous automatisé robuste**, cadence
+élevée » — et l'arbre portait les trois nœuds (`rdv_automatise`,
+`transfert_ergols`, `robotique_orbitale`). **Aucun ne débloquait quoi que ce
+soit.** C'est la septième fois de la série, et la méthode reste la même : chercher
+les appelants, pas relire le modèle.
+
+**CE N'EST PAS UN CONTOURNEMENT DU PLAFOND DE MASSE, C'EST UN ARBITRAGE.** Chacun
+de ses quatre termes est un fait d'ingénierie réel :
+
+1. **N tirs, c'est N fois le prix**, et le sélecteur choisit désormais la
+   *campagne* la moins chère, pas le *tir* le moins cher.
+2. **Et surtout R^N de fiabilité** : le segment de mise en orbite vaut
+   `R_lanceur^N · R_amarrage^(N−1)`. Neuf tirs à 0,98 rendent **0,83**. *La masse
+   s'achète en risque.*
+3. **L'assemblage dure** — la cadence d'un pas de tir n'est pas instantanée — et
+   ce temps tombe sur l'axe CALENDRIER du contrat.
+4. **Les ergols cryogéniques s'évaporent pendant ce temps.** C'est LA contrainte
+   réelle des architectures assemblées.
+
+**L'ÉBULLITION EST UN POINT FIXE, ET IL PEUT DIVERGER.** Il faut lancer plus
+d'ergols que nécessaire, ce qui ajoute des tirs, ce qui allonge l'attente, ce qui
+en évapore davantage. Le modèle **itère** jusqu'à stabilité du nombre de tirs (un
+entier : la convergence est franche ou elle n'a pas lieu), borné à 20 tirs. Quand
+il diverge, le refus le **distingue** d'un simple « trop lourd » :
+*« L'ÉBULLITION DES ERGOLS DIVERGE : RECHERCHER `transfert_ergols` »* — parce que
+cette impasse-là ne se résout pas en ajoutant des tirs.
+
+**LA FRACTION SURVIVANTE A UNE FORME CLOSE EXACTE.** Les ergols n'arrivent pas
+d'un coup : la charge *i* attend (n−i)·Δt. La moyenne des survies est une **série
+géométrique**, donc
+
+> (1 − e^(−λ·n·Δt)) / ( n · (1 − e^(−λ·Δt)) )
+
+Aucune intégration numérique, et n=1 rend exactement 1. Vérifié par oracle
+**terme à terme** contre la somme brute, pour n ∈ {1, 2, 5, 9, 20}. Utiliser la
+durée totale aurait doublement puni : la première charge attend tout, la dernière
+rien.
+
+**CONSTANTES DÉCLARÉES, CHACUNE ADOSSÉE À UN FAIT** [GDD 6.8] : intervalle entre
+tirs **30 j** (Navette ~2 mois entre vols d'un orbiteur ; Ares V visait ~1/mois),
+**20 j** avec robotique d'assemblage ; ébullition **0,2 %/jour** (réel : 0,1 à
+1 %/j — Centaur ~1-3 %/j sur les premières versions ; hypothèse **optimiste**,
+donc honnête à déclarer) ; amarrage **0,990** / **0,996** avec robotique.
+
+**UN DÉFAUT TROUVÉ EN COURS DE ROUTE, ET IL COMPTE.** Avec l'assemblage, « le
+moins cher qui soulève » est devenu un mauvais conseil : CAT-05 basculait sur
+**2 tirs légers** (126 M$, P = 0,843) au lieu d'un lourd (139 M$, P = 0,980) —
+13 M$ économisés contre 14 points de fiabilité, un marché qu'aucun responsable de
+programme ne prendrait, et le contrat passait de VIABLE à RISQUE. Corrigé **par
+déduction, pas par réglage** : puisque `p_success ≤ p_segment`, une campagne dont
+le segment est déjà sous l'exigence du client est **garantie d'échouer** — l'écarter
+ne retire aucune option viable. **Et le résultat est superbe** : c'est
+maintenant l'**exigence de fiabilité** qui force CAT-09 sur le super-lourd (six
+tirs moyens rendent 0,868 quand le contrat exige 0,90), très exactement la raison
+réelle pour laquelle on construit SLS au lieu d'empiler des Falcon 9 sous un
+équipage.
+
+**CE QUE ÇA CHANGE, MESURÉ.**
+
+| | avant | après |
+|---|---:|---:|
+| Contrats réalisables en masse | 9 / 11 | **10 / 11** |
+| CAT-10 (cargo NEP, 181 t) | impossible | **2 super-lourds, 20 j, P = 0,937** |
+| CAT-09 blindé (182 t) | **non lançable** | 2 tirs, P = 0,931 |
+
+Ne reste hors de portée que **CAT-11** : 346 495 t en chimique pour 30 km/s, soit
+plus de vingt lancements. *Aucun assemblage ne rattrape une exponentielle* — et
+c'est pourquoi [GDD 19.3] réserve ce régime à l'antimatière. Cohérence complète
+avec les deux passes précédentes.
+
+**ET L'ARBITRAGE DU [GDD 6.6] A CHANGÉ DE NATURE, PAS DE SÉVÉRITÉ.** Avant,
+protéger l'équipage rendait le vol **non lançable** — une falaise. Mesuré
+maintenant :
+
+> **121 t / 1 tir / P = 0,970 / 1 560 M$  →  182 t / 2 tirs / P = 0,931 / 3 016 M$**
+
+Le vol reste possible, mais la protection se **paie** — en tirs, donc en risque et
+en argent. *Un arbitrage gradué vaut mieux qu'un mur* : le joueur choisit combien
+de protection il achète au lieu de buter dessus. Le budget CAT-10 est passé de
+650 à 4 500 M$ pour la même raison que CAT-09 : il ne payait pas le tiers de sa
+campagne (Europa Clipper, sans propulsion nucléaire : ~5 200 M$).
+
+**PREUVE** : build `SPEditor` Succeeded, **3 555 oracles au vert** (+30), et
+`ue_assemblage_poste_controle.png` — « ASSEMBLAGE EN ORBITE : 2 lancements sur
+30 jours », « SEGMENT DE MISE EN ORBITE : P = 0,931 (3,9 t d'ergols évaporés) »,
+coût 3 030 / 3 000 M€ (dépassement de 1 %, la bonne tension), VIE À BORD et
+avaries présentes.
+
+### ARES DIT OÙ ALLER ; L'ARCHITECTE DIT COMMENT (2026-07-29)
+
+**PRÉCISION DE L'UTILISATEUR, ET LE GDD LA CONFIRME MOT POUR MOT.** « C'est le
+joueur qui crée la mission de A à Z, ARES dit juste : on doit aller là pour faire
+ça. » [GDD 3.1] : « L'Architecte Mission décide ***comment*** concevoir et
+conduire, **dans des enveloppes budgétaires imposées par ARES**. Il ne fixe pas
+le budget. »
+
+**LE DÉFAUT QUE ÇA DÉSIGNE.** `Contract::payload_kg = 20 000` pour Mars habité
+n'était pas un objectif : c'était **une masse d'habitat**, donc une architecture
+déjà choisie, imposée par le client. Pire, elle se superposait à des consommables
+et à un blindage déjà calculés, sans qu'on sache ce que ces 20 t contenaient.
+
+**CE QUI RESTE AU CONTRAT, ET CE QUI PASSE À L'ARCHITECTE.**
+- ARES impose l'**enveloppe** — budget, délai, fiabilité exigée — et l'**objectif**
+  (où, pour quoi, avec combien de personnes). Inchangé.
+- ARES garde `payload_kg` **quand la masse EST l'objectif** : un satellite, du
+  fret, des instruments. Là, le client fournit la charge.
+- La **coque pressurisée** devient une **conséquence** de deux décisions
+  d'architecte — combien d'équipage, combien de volume chacun — et d'un fait.
+
+**ET LE FAIT EST REMARQUABLEMENT STABLE.** Modules pressurisés de l'ISS :
+
+| | masse | volume | densité |
+|---|---:|---:|---:|
+| Destiny | 14 515 kg | 106 m³ | **137 kg/m³** |
+| Columbus | 10 275 kg | 75 m³ | **137 kg/m³** |
+| Kibo JPM | 15 900 kg | 116 m³ | **137 kg/m³** |
+
+Trois modules, trois agences, trois décennies : **137 kg/m³ à 1 % près**. Ce n'est
+pas une coïncidence, c'est ce que coûte une coque qualifiée pour du vol habité.
+Vérification qui rassure : 6 personnes × 25 m³ × 137 = **20 550 kg**, soit le
+forfait de 20 000 kg à **2,7 % près**. Le forfait était bien choisi — il était
+simplement **posé** au lieu d'être **déduit**.
+
+**LE VOLUME PAR PERSONNE EST DEVENU UNE DÉCISION, ET ELLE MORD.** Mesuré sur la
+croisière martienne :
+
+> **25 m³/personne → 20,6 t d'habitat, 131 t au décollage
+> 15 m³/personne → 12,3 t d'habitat, 100 t au décollage**
+
+**31 tonnes** d'écart pour une seule décision d'architecte — et elle joue deux
+fois, parce que serrer l'habitat réduit aussi la **surface à blinder** [GDD 6.6].
+Les deux décisions ne sont pas indépendantes, et le modèle le montre au lieu de
+le dire.
+
+**UN VOL NEAR-EARTH N'EMPORTE PAS D'HABITAT.** Il s'amarre à une station
+existante — c'est très exactement à ça qu'une station sert. Le critère n'est pas
+une liste de familles à tenir à jour mais un fait **déjà calculé** : y a-t-il un
+aller-retour daté vers une cible nommée. CAT-06/07/08 sont donc **inchangés**.
+
+**CE QUE ÇA CHANGE AU CATALOGUE, MESURÉ.**
+
+| | avant | après |
+|---|---:|---:|
+| CAT-09 (Mars habité) | 121 t, 1 tir, 1 560 / 3 000 M€ | **131 t, 2 tirs, 2 969 / 3 000** |
+| CAT-10 (cargo NEP) | 3 060 / 650 → BUDGET | **3 060 / 4 500 → VIABLE** |
+| CAT-06/07/08 (LEO) | inchangés | inchangés |
+
+**PREUVE** : build `SPEditor` Succeeded, **3 573 oracles au vert** (+18), dont la
+densité confrontée aux trois modules de l'ISS, la linéarité de la déduction, le
+fait qu'un vol near-Earth n'emporte rien, et — le plus important — que la décision
+de volume **traverse tout le modèle jusqu'à Tsiolkovsky** au lieu de rester un
+champ décoratif.
+
+**ET L'ARBITRAGE DU [GDD 6.6] A ÉTÉ REMESURÉ, avec une correction de ma part.**
+J'affirmais que blinder ajoute *toujours* un lancement. **Faux** : c'était décrire
+l'endroit où la base se trouvait, pas une loi. Ce qui est une loi : blinder ajoute
+toujours de la masse et toujours du coût, et ne fait jamais baisser le nombre de
+tirs ni monter la fiabilité. Le **franchissement de palier**, lui, se démontre
+séparément — 30 g/cm² font passer de 2 à **3 tirs** et P de 0,937 à 0,905.
+
+**SUITE (même jour) — L'EFFECTIF REJOINT L'OBJECTIF, ET LA ZONE D'OMBRE SE FERME.**
+
+**1. L'ÉQUIPAGE EST PORTÉ PAR LE CONTRAT, plus par une table indexée sur une
+chaîne de famille.** `Contract::crew_required` : c'est ARES qui dit combien de
+personnes doivent être là-bas, et deux contrats de la même filière peuvent donc
+demander des équipages différents. La table par famille reste la **source** (elle
+porte ses références réelles — incrément ISS, STS-125, DRA 5.0) mais elle
+**alimente** désormais le contrat au lieu d'être relue en six endroits.
+
+**ET J'AI TRANCHÉ LA QUESTION QUE J'AVAIS LAISSÉE OUVERTE**, faute de réponse et
+parce que le modèle la tranche lui-même : l'effectif **n'est pas** une décision
+d'architecte. Embarquer plus de monde n'achète **rien** de modélisé — ni la
+réparation ni la redondance médicale ne dépendent de l'effectif — et coûte de la
+coque, des vivres et du blindage. *Un « choix » à une seule bonne réponse n'en
+est pas un.* Le jour où l'effectif achètera quelque chose, il deviendra une
+décision et déménagera dans `MissionPlan` ; c'est écrit dans le code, à l'endroit
+où quelqu'un le lira.
+
+**2. LA ZONE D'OMBRE DU POSTE EST FERMÉE** — signalée trois fois, jamais traitée.
+Le bloc « VIE À BORD » était sous la ligne de flottaison du défilement : dose,
+boucles et écart d'horloge n'étaient contrôlables par **aucune capture**, ce qui
+est exactement la condition dans laquelle le piège n°74 (postes figés) avait
+prospéré des semaines. Remède, et c'est le raisonnement du mode console
+(piège n°65) étendu à tout le vol : **une fois parti, le bilan de viabilité est
+de l'histoire** — aucune de ses sept lignes n'est actionnable, alors que la
+télémétrie vitale l'est à chaque instant. On garde **une** ligne — ce qu'on a
+emporté et sous quel verdict — et on rend la place à ce qui vit.
+
+`ue_vie_a_bord_poste_controle.png` montre le résultat, et **tout ce qui a été
+construit ces dernières passes y est enfin vérifiable** : autonomie 698,8 j
+(6 à bord), O2/eau, vivres/CO2, boucles 93 %/85 %, dose mission 0,135 Sv derrière
+17,5 g/cm², dose de carrière 13 %, et **« HORLOGE DE BORD +35,4 ms — l'équipage
+vieillit PLUS vite »**. Le bilan tient en une ligne : « ARCHITECTURE EMPORTÉE :
+203 t en 2 lancements — BUDGET RISQUE ».
+
+**PREUVE** : **3 577 oracles au vert** (+4), build Succeeded.
+
+**QUATRE PIÈGES PAYÉS.**
+- **n°82 — UNE BASCULE DE PROPRIÉTAIRE RÉVÈLE LES FIXTURES INCOMPLÈTES, et c'est
+  un service.** Déplacer l'effectif vers le contrat a fait tomber **neuf
+  oracles** dans deux suites : des missions fabriquées à la main qui posaient
+  leurs termes champ par champ, donc avec `crew_required = 0` — un **équipage
+  fantôme**, sans vivres, sans dose, aux réserves inépuisables. Ces fixtures
+  testaient depuis toujours autre chose que le jeu, et rien ne le disait.
+  Corrigées en leur donnant les termes de leur famille, comme le harnais de
+  capture. Un oracle vérifie désormais que `crewed` et `crew_required` disent la
+  même chose pour les onze contrats.
+- **n°83 — UN ORACLE QUI ÉPINGLE UN LITTÉRAL TESTE LE CHIFFRE, PAS LA RÈGLE.**
+  `CHECK(payload_kg == 20000, "la charge du CONTRAT reste celle du client")` :
+  l'intention était juste et la valeur a changé légitimement. Réécrit contre **la
+  table** plutôt que contre `20000` — la règle survit à la calibration, le
+  littéral non.
+- **n°84 — UN CHAMP AJOUTÉ AU MILIEU D'UN AGRÉGAT CASSE QUINZE SITES.**
+  `Contract` est initialisé POSITIONNELLEMENT dans la liste de contrats du
+  prototype (`{1200.0, 115.0, 18.0, 0.85}`). Insérer un `int` entre deux `double`
+  y produisait quinze erreurs de rétrécissement. Champ déplacé **en queue**, avec
+  l'avertissement à l'endroit où le prochain ajout se fera.
+- **n°82 — UN ORACLE VERT PEUT MESURER AUTRE CHOSE QUE CE QU'IL DIT.**
+  « le stock CONVERGE — 200 ans de plus n'ajoutent rien » passait depuis toujours.
+  Il ne mesurait aucune convergence : l'agence faisait **faillite** au bout de
+  quelques années d'inactivité et `Jeu::avancer_temps` s'arrêtait net. Le stock ne
+  convergeait pas, **le temps s'arrêtait** — et les deux se ressemblent
+  parfaitement tant que le stock est petit. Règle : un oracle qui avance le temps
+  doit **vérifier que le temps a avancé**, sinon il teste l'immobilité. Corollaire
+  utile : le défaut trouvé était un *fait de jeu* meilleur que l'oracle perdu (les
+  140 ans de [GDD 3.5] exigent une agence qui produit pendant 140 ans).
+- **n°83 — NE JAMAIS FAIRE `Get-Content -Raw | Set-Content` SUR UN SOURCE UTF-8.**
+  Windows PowerShell 5.1 lit avec la codepage ANSI et écrit en UTF-8 : tout
+  caractère accentué ressort **doublement encodé** (`à` → `Ã `, `—` → `â€"`), sur
+  le fichier ENTIER, plus un BOM. `test_session.cpp` y est passé. Réparable
+  (relire en UTF-8, ré-encoder en cp1252 avec les 5 positions non définies mappées
+  à la main, réécrire sans BOM) mais gratuitement risqué : utiliser **Edit**, ou
+  Python si le remplacement doit être global.
+- **n°81 — UN FORFAIT BIEN CALIBRÉ RESTE UN FORFAIT.** Les 20 t de Mars habité
+  reproduisaient la déduction à 2,7 % près : impossible à repérer en comparant des
+  nombres, puisqu'ils étaient *justes*. Ce qui les trahissait n'était pas leur
+  valeur mais **leur place** — dans le contrat, donc du côté du client, alors que
+  la masse d'un véhicule est le métier de l'architecte. Règle : vérifier **qui
+  décide** d'une grandeur avant de vérifier **combien** elle vaut.
+- **n°79 — UN `std::move` REND LA SOURCE INUTILISABLE, Y COMPRIS POUR UN
+  `if`.** Le harnais de capture accorde désormais les prérequis **du contrat**
+  plutôt qu'une liste écrite à la main (qui se périme — c'est arrivé : l'assemblage
+  est devenu nécessaire et la liste ne le savait pas). Ma boucle lisait
+  `M.contract.family` **après** `push_back(std::move(M))` : chaîne vidée,
+  comparaison jamais vraie, aucun prérequis accordé. La capture ne montrait qu'un
+  bloc manquant ; **le journal de bord a donné la cause en une ligne**
+  (« maturite requise : support-vie long sejour »). Encore une fois : un chiffre
+  mesuré vaut dix captures. Le harnais lisait déjà `Entree` et `Tof` avant le
+  move — la précaution existait, je ne l'ai pas suivie.
+- **n°80 — LE SEUL ORACLE QUI DÉPEND DE L'OS EST INSTABLE SOUS CHARGE.**
+  `test_toolchain` (« un pointeur invalide produit un ÉCHEC DE MISSION ») a
+  échoué **une fois** dans un sweep de douze suites enchaînées, puis **quatre
+  exécutions consécutives l'ont donné vert**. C'est le seul test qui fait
+  délibérément planter un processus dans un job object : son verdict dépend de
+  l'ordonnancement. Noté plutôt que tu — un test intermittent qu'on ignore est un
+  test mort. À revoir si la fréquence augmente.
+
+**UN PIÈGE PAYÉ, de méthode.**
+- **n°78 — MESURER LE DÉFAUT AVANT DE LE FRANCHIR.** Ma première sonde a rendu
+  « CAT-11 : AUCUN LANCEUR NE SOULÈVE » — **c'était ma sonde qui mentait**, elle
+  imprimait une chaîne fixe au lieu de `Assessment::why` ; la vraie cause était le
+  Δv. Et ma première mesure a déclaré CAT-10 impossible **en oubliant que le
+  nombre d'étages est une décision du joueur** : il fallait balayer 2/3/4 avant de
+  conclure. Deux fois, l'instrument a failli faire condamner le modèle. Règle :
+  quand une mesure accuse le contenu, **vérifier l'instrument d'abord**.
+
+**UN AUTRE PIÈGE PAYÉ, de méthode.**
+- **n°77 — UNE ALARME PERMANENTE N'EST PAS UNE ALARME.** Les trois défauts
+  ci-dessus étaient visibles depuis des semaines, dans chaque capture en vol, et
+  la documentation les avait **expliqués au lieu de les corriger** (« réserve
+  d'affichage, antérieure et sans rapport »). Écrire qu'un rouge est normal, c'est
+  le rendre invisible. Règle : un indicateur qui est rouge dans TOUTES les images
+  de référence est un bug de l'indicateur jusqu'à preuve du contraire — et la
+  preuve se fait en réparant, pas en annotant.
+
+**UN AUTRE PIÈGE PAYÉ, de méthode.**
+- **n°76 — UN MODÈLE QUI NE SE CONFRONTE QU'À LUI-MÊME NE PROUVE RIEN.** Les
+  premiers oracles d'horloge que j'allais écrire vérifiaient la cohérence interne
+  (le rapport est bien > 1 en croisière, il croît avec `a`…) : tous auraient passé
+  sur un modèle **purement cinématique**, c'est-à-dire faux d'un facteur 3. Ce qui
+  a rendu la vérification mordante, c'est d'être allé chercher des **valeurs que
+  personne dans ce dépôt n'a choisies** — la correction GPS, le retard de l'ISS,
+  la vitesse orbitale d'almanach. Règle générale : quand un domaine a des mesures
+  publiées, l'oracle doit les viser, pas se contenter de la cohérence interne.
+  Corollaire : `-spvecu` seul rend le MENU (`ArmerCapture` sort si `-spscene`
+  vaut 0) — une capture qu'on ne regarde pas est une preuve qu'on n'a pas.
+
 ### Cadrage du CONTENU (décision du 2026-07-24)
 
 On remplit **tout ce que le corps du GDD NOMME**, et **rien** de ce que son
@@ -2306,8 +3720,15 @@ ils ne sont plus atteignables en jeu, mais le code pèse encore.
 9. **Systèmes GDD** : rangs, 6 branches + verrou le plus fort, mails ARES,
    carnet, économie à paliers, Novellus 10 modules, fiabilité tracée.
 10. **Dettes du passage en rendu total** (petites, mais à ne pas oublier) :
-    - la voûte étoilée est vue **en miroir** et n'est pas calée sur le repère
-      équatorial J2000 (approximation déclarée dans `SPSky.h`) ;
+    - ~~la voûte étoilée est vue **en miroir**~~ — **CORRIGÉ le 2026-07-28** : ce
+      n'était pas un miroir mais une INVERSION CENTRALE (échelle négative sur
+      trois axes), invisible parce qu'un grand cercle y est invariant. Échelle
+      passée en positif. Le repère de la carte est **GALACTIQUE**, mesuré
+      (U = 0,5133, V = 0,4962). **Le calage J2000 est ABANDONNÉ, et c'est motivé** :
+      trois mesures établissent que cette texture est un panorama stylisé (Nuages
+      de Magellan indétectables) — l'aligner serait une fausse précision. Le
+      remède est un catalogue Hipparcos en points, pas une rotation de photo.
+      Voir §2, « LE CIEL N'ÉTAIT PAS EN MIROIR » ;
     - les **captures headless doivent laisser compiler les shaders** : à froid,
       300 frames ne suffisent pas et l'image sort avec des matériaux de repli
       (« Preparing Shaders » à l'écran). Utiliser `-spframes=900` après un
@@ -2429,22 +3850,129 @@ Reste, par ordre de valeur :
    graphe (Normal) ET la toolchain + bac à sable (Pro) étaient faits depuis le
    2026-07-28 ; la ligne n'avait pas suivi. Voir « L'ÉDITEUR DE GRAPHE ÉTAIT DÉJÀ
    FAIT » au §2.
-4. **Tri §5.4 étape 4** : purger `_archive` sauf `build_vk/` (≈ 115 Mo).
-   ⚠ **TENTÉ le 2026-07-28 sur demande de l'utilisateur, BLOQUÉ** par le contrôle
-   de sécurité du harnais (suppression récursive refusée deux fois, en `rm -rf`
-   comme en `Remove-Item -Recurse`). **Tout le travail de sûreté est fait et reste
-   valable** :
-   - le binaire de référence NE DÉPEND PAS de `extern/` — vérifié sur sa table
-     d'imports (aucun `glfw3.dll` : glfw est lié statiquement) **puis par une
-     capture réelle** de `solar_system_map.exe` (2,76 Mo de BMP, exit 0) ;
-   - `_archive` est **entièrement commité** (652 fichiers suivis, dont 527 dans
-     `build`/`dist`/`extern`, **aucune modification non commitée**) : la
-     suppression est récupérable dans l'historique ;
-   - liste exacte à supprimer, `build_vk/` excepté :
-     `app ui astro_core mission extern scripts dist build _backup_render
-     CMakeLists.txt space_program_3d.cpp` (garder aussi `README.md` et `saves/`).
-   Après suppression, relancer la capture de référence pour confirmer que
-   `build_vk/` est toujours autonome.
+~~4. Tri §5.4 étape 4~~ — **FAIT le 2026-07-28 par l'utilisateur** (commit
+   `27458f8`). `_archive` : **149 Mo → 26 Mo**, ~123 Mo récupérés.
+   ⚠ **LA PURGE A EMPORTÉ `build_vk/`, QUI DEVAIT RESTER** — restauré depuis le
+   commit parent (`git checkout ed839de -- ".../build_vk"`, 44 fichiers). Sans
+   lui, la RÈGLE DE MÉTHODE du §1 n'a plus d'oracle : « avant toute passe UI/3D,
+   lancer le binaire de référence et REGARDER » suppose qu'il existe.
+   **VÉRIFIÉ APRÈS RESTAURATION** : `solar_system_map.exe` recapture, et l'image
+   est **identique AU BIT PRÈS** à celle prise avant la purge (2 764 854 octets).
+   Les 45 captures de `docs/reference_solar_system_map/` n'ont jamais été
+   menacées — elles vivent hors de `_archive`.
+   *Le binaire de référence ne dépendait bien pas de `extern/` (glfw lié
+   statiquement, vérifié sur la table d'imports avant la suppression) : c'est la
+   seule raison pour laquelle la purge n'a rien coûté.*
+
+~~2. LA MISSION VÉCUE~~ — **fait le 2026-07-28** (section « LA MISSION VÉCUE » du
+   §2). La décision 18 (« vol habité vécu inclus ») avait un modèle complet et
+   aucune porte d'entrée. Elle en a une : les vivres pèsent dans Tsiolkovsky sur
+   une durée qui est la période synodique CALCULÉE, la porte de [GDD 9.2] est
+   gardée par des conditions toutes dérivées, l'agence tourne sous l'adjoint et ne
+   peut plus être perdue [GDD 9.3], et l'épuisement des réserves tue par le barème
+   de 10.3 et non par décret.
+
+Reste, par ordre de valeur :
+
+~~2. `env::Debris` n'est tické par aucun chemin vivant~~ — **mesuré et corrigé le
+   2026-07-28** (section « LE VERROU DES RADIATIONS »). C'était exact : les nuages
+   s'accumulaient sans décroître. Une ligne sur le chemin vif, et 300 km se
+   nettoie (698 → 0 en 2 ans) pendant que 1200 km reste pollué.
+
+~~1. LES ÉVÉNEMENTS ALÉATOIRES~~ [GDD 9.5] — **fait le 2026-07-28** (section « LES
+   ANOMALIES SE PRODUISENT ENFIN »). La boucle est complète : tirer, subir,
+   réparer. Les SPE sont réels et le blindage y sert enfin à quelque chose.
+
+Reste, par ordre de valeur :
+
+~~1. `GameState::tick` à supprimer~~ — **fait le 2026-07-29** (section « LES DEUX
+   HORLOGES »). La vérification demandée a été faite **par recherche d'appelants**
+   et a tranché : `deliver_unlocked_contracts` **avait** un appelant vif
+   (`AresLayer::livrer_courrier`), et `treasury.tick` n'en a aucun **à juste
+   titre** — la trésorerie en M$ est l'économie v1.1, neutralisée à
+   l'initialisation, dont l'autorité v1.2 (`AgencyFinance::tick_month`,
+   `FinancialStage`) tourne. `age_by_proper_time` était le seul écart réel, et il
+   est désormais tranché dans le bon sens : le tick vif fait **plus**, pas moins.
+   Piège n°72 soldé — il n'y a plus qu'un seul endroit où brancher un système.
+
+~~2. `EventContext::medical_risk_factor` câblé à 1,0~~ — **fait le 2026-07-29**
+   (même section). Le module médical de Novellus [GDD 11.6] coûtait 110 M€ et ne
+   changeait aucun tirage. Gelé à l'embarquement, comme la fiabilité : c'est un
+   entraînement reçu avant de partir, pas un état lu en vol.
+
+Reste, par ordre de valeur :
+
+~~1. Auditer les postes maintenant qu'ils vivent~~ — **fait le 2026-07-29**
+   (section « L'AUDIT DES POSTES »). L'invariant « le HUD ne calcule rien » tient ;
+   en revanche la capture du poste CONTRÔLE cachait **trois défauts en chaîne** —
+   termes de contrat nuls hors catalogue, plan non évalué présenté comme raté, et
+   `finalize` écrasant la cause exacte par une liste de symptômes. Piège n°77.
+
+   ~~**RESTE de cet audit**~~ — **fait le 2026-07-29** (section « ARES DIT OÙ
+   ALLER », suite). C'est la seconde piste qui a été retenue, et pour la raison
+   qui la rendait juste : **une fois parti, le bilan de viabilité est de
+   l'histoire** — aucune de ses lignes n'est actionnable, alors que la télémétrie
+   vitale l'est à chaque instant. Réduit à une ligne en vol ; « VIE À BORD »
+   remonte, et `ue_vie_a_bord_poste_controle.png` contrôle enfin dose, boucles et
+   écart d'horloge. La zone d'ombre signalée trois fois est fermée.
+
+   ~~**ET UNE QUESTION DE CONTENU OUVERTE PAR LA MESURE**~~ — **instruite le
+   2026-07-29** (section « LE CATALOGUE ÉTAIT INACHEVABLE À 55 % »). Le chiffre
+   cachait un défaut structurel : 6 contrats sur 11 inachevables, un nœud d'arbre
+   qui ne débloquait rien, et une branche entière qui ne gardait rien. **9 sur 11
+   réalisables**, puis **10 sur 11** après l'assemblage orbital.
+
+   ~~Reste l'assemblage en orbite~~ — **fait le 2026-07-29** (section
+   « L'ASSEMBLAGE EN ORBITE »), sur décision de l'utilisateur. **ET J'AVAIS TORT
+   EN ÉCRIVANT QUE LE GDD NE LE NOMMAIT PAS** : il est au tableau de la branche 1
+   du ch. 5.2 — « transfert de propergol orbital, rendez-vous automatisé robuste,
+   cadence élevée » — et l'arbre portait déjà les trois nœuds correspondants.
+   J'avais cherché « assemblage » dans le corps du texte et pas dans les tableaux
+   de branches, et j'ai conclu à une absence sur une recherche incomplète.
+   **Leçon** : avant de déclarer qu'un mécanisme manque au GDD, chercher son
+   VOCABULAIRE (ici « transfert de propergol », « rendez-vous »), pas son nom.
+~~2. LA CALIBRATION DE LA FIN DE JEU [Annexe E]~~ — **faite le 2026-07-29**
+   (section « LA CALIBRATION DE FIN DE JEU » du §2). **Les deux prémisses de cette
+   entrée étaient fausses.** « Seul le GDD peut trancher » : il avait déjà tranché
+   — l'Annexe E nomme la dépendance (« vitesse maximale souhaitée en fin
+   d'arbre ») et le corps du document la dit trois fois [6.7.2, 3.4, 3.5], ce qui
+   **réfute l'issue (a)**. « Pas un défaut de code » : c'en était un, le **8ᵉ
+   « nommé mais non connecté »** — la puissance de production était la marge de
+   Novellus, donc aucune recherche de branche 6 ne pouvait la déplacer. Résultat
+   mesuré : β = **0,481** à l'équilibre au palier abouti, cible 0,3 atteinte en
+   **139 ans**, l'aller-retour et β = 0,9 restant hors d'atteinte **par la
+   physique** [6.7.4] et non par un réservoir arbitraire.
+~~2b. LA DESTINATION DE LA MISSION RELATIVISTE~~ — **tranchée par l'utilisateur
+   le 2026-07-29** (section « LA MISSION RELATIVISTE A UNE DESTINATION ») :
+   **l'étoile la plus proche**. Proxima à 4,2465 al (Gaia DR3), transit rectiligne
+   à β constant, `proper_time` en intégrateur, β figé sur `Mission` et sérialisé
+   (V5). Le chiffre de [GDD 3.4] est retrouvé — et il a révélé, en faisant
+   ÉCHOUER l'oracle, que les « ~5 ans » sont ceux de l'**aller-retour**.
+~~2c. [GDD 3.4] EST-IL VÉCU OU LU ?~~ — **tranché par l'utilisateur le
+   2026-07-29** (section « LE RELATIVISME EST POUR L'HABITÉ ») : « le relativisme
+   a un intérêt seulement pour les vols habités ». L'ancre de calibration passe
+   d'une sonde de 5 t à l'architecture habitée (183 t, aller-retour), le
+   confinement de 1e7 à 1e10 g, et le vol habité **existe** : β = 0,370,
+   aller-retour Proxima en 22,9 ans terrestres, écart d'âge **1,63 an**, retour à
+   53 ans. Les deux points de données de [GDD 3.4] sont reproduits.
+2d. **LA DOSE EST LE DERNIER MUR** : 10 Sv sur 23 ans contre ~1 Sv de limite
+   [Annexe B]. Mais 10 Sv **chroniques** ne sont pas 10 Sv aigus, et la limite
+   d'Annexe B est **institutionnelle**, pas létale. Le modèle sépare déjà chronique
+   et aigu ; il ne distingue pas encore une limite de **corps d'astronautes** d'un
+   vol terminal volontaire [GDD 9.2]. Modélisation, pas game design.
+3. **La famille « modèle sans consommateur » est ÉPUISÉE : HUIT cas en cinq
+   passes** (débris, radiations, événements, facteur médical, horloges,
+   antimatière, la PUISSANCE de l'usine, puis `rel::proper_time`), tous trouvés
+   par la même méthode : **chercher les appelants, pas relire le modèle**. Le
+   septième a affiné la règle — un modèle peut avoir un appelant **et rester
+   débranché**, s'il est nourri par la mauvaise source. Le huitième en ajoute une
+   autre : un modèle sans consommateur peut n'attendre qu'**une décision de
+   design** (ici la destination), pas du code. Plus aucun cas identifié : la
+   prochaine passe de cette famille devra re-balayer, pas continuer une liste.
+4. **Les paramètres restant à calibrer [Annexe E]** ont gagné une entrée mesurée :
+   les taux de `event_library` donnent ~1 avarie par 400 jours toutes causes
+   confondues, ce qui est BAS pour un véhicule habité réel. Non touché faute de
+   source ; à reprendre avec le reste de la calibration.
 
 À SURVEILLER maintenant que le temps coule : le tick de recherche est appelé une
 fois par frame avec le total quantifié, pas une fois par sous-pas (approximation

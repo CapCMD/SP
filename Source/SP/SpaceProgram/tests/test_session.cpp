@@ -39,6 +39,9 @@ static int g_ok = 0, g_ko = 0;
   } while (0)
 
 int main(int argc, char** argv) {
+  // SORTIE NON TAMPONNÉE : un oracle qui plante emporte sinon tout ce qu'il
+  // venait d'imprimer, et on cherche le défaut à l'aveugle. Deux minutes payées.
+  std::setvbuf(stdout, nullptr, _IONBF, 0);
   const std::string tmp = std::string(std::getenv("TEMP") ? std::getenv("TEMP") : ".");
 
   // ---- 1. slug d'agence : un nom -> un fichier, toujours utilisable --------
@@ -2604,6 +2607,96 @@ int main(int argc, char** argv) {
                               c_beaucoup.sol.n_mesures, c_beaucoup.sol.sigma_v, c14);
                   tv.mission_plan.program.tracking_days = garde_prog;
                 }
+
+                // ---- 26. LE CARNET [GDD 15.4] et LA BASCULE [GDD 2.3] -----
+                // `career::Notebook` etait serialise et transmis au successeur
+                // depuis le premier jour... et VIDE : personne n'y ecrivait,
+                // personne ne le lisait. Encore un modele que rien ne consomme.
+                // Et la bascule Normal -> Pro, que GameState.hpp declarait en
+                // commentaire, n'existait nulle part.
+                {
+                  fen::game::GameState& Gc = *tv.jeu.ares.etat;
+
+                  // (a) LES MAN PAGES SONT UNE LECTURE DE L'API, pas une copie
+                  // [GDD 2.2, 15.4]. Chaque primitive doit y figurer AVEC la
+                  // fonction qu'elle est — sinon l'equivalence stricte n'est
+                  // qu'une promesse.
+                  const auto Man = fen::career::man_pages_api(10.0);
+                  bool toutes = true;
+                  for (const auto& d : fen::mission::noeuds_disponibles())
+                    if (Man.body.find(d.nom) == std::string::npos ||
+                        Man.body.find(d.appel) == std::string::npos) toutes = false;
+                  CHECK(toutes,
+                        "carnet : la man page NOMME chaque primitive ET sa fonction d API");
+                  CHECK(!fen::mission::noeuds_disponibles().empty() && !Man.body.empty(),
+                        "carnet : ... et elle n est pas vide");
+
+                  // (b) LE DEBRIEF EST UN FAIT, pas un commentaire. On y
+                  // retrouve QUI a conduit les corrections — ce que la passe
+                  // precedente a rendu decisif.
+                  fen::mission::Mission m_c = m0;
+                  m_c.flight_success = true;
+                  m_c.vol_conduit_par = 2;      // le logiciel de bord
+                  m_c.nav_miss_km = 19.0;
+                  m_c.nav_dv_required = 48.7;
+                  const auto Deb = fen::career::debrief_mission(m_c, 600.0, 42.0);
+                  CHECK(Deb.mission_ref == m_c.contract.id,
+                        "carnet : l entree est rattachee a SA mission (mission_ref)");
+                  CHECK(Deb.body.find("logiciel de bord") != std::string::npos,
+                        "carnet : elle dit QUI a conduit les corrections");
+                  CHECK(Deb.body.find("19") != std::string::npos &&
+                            Deb.body.find("48.7") != std::string::npos,
+                        "carnet : ... avec les chiffres du vol, pas une appreciation");
+
+                  // (c) LA BASCULE EST UNIDIRECTIONNELLE [GDD 2.3], et elle
+                  // COUTE le graphe : « cette perte est intentionnelle ».
+                  const auto garde_mode = tv.jeu.agence.mode;
+                  const std::size_t avant = Gc.notebook.entries.size();
+                  tv.jeu.agence.mode = fen::app::ModeAide::Normal;
+                  tv.graphe = fen::mission::graphe_correction_reference();
+                  CHECK(!tv.graphe.empty(), "carnet : on part d un graphe assemble");
+                  CHECK(tv.basculer_en_pro(), "bascule : Normal -> Pro est possible");
+                  CHECK(tv.jeu.agence.mode == fen::app::ModeAide::Pro,
+                        "bascule : le mode a bien change");
+                  CHECK(tv.graphe.empty(),
+                        "bascule : le graphe est PERDU — la perte est intentionnelle [GDD 2.3]");
+                  CHECK(Gc.notebook.entries.size() == avant + 2,
+                        "bascule : deux pages ecrites — l archive et les man pages");
+                  CHECK(!tv.basculer_en_pro(),
+                        "bascule : elle est UNIDIRECTIONNELLE — on ne revient jamais");
+
+                  // (d) L ARCHIVE EST CONSULTABLE ET INEXECUTABLE. Pas par
+                  // interdiction : c'est du TEXTE, et aucun chemin ne
+                  // reconstruit un graphe depuis une chaine.
+                  const auto& Arch = Gc.notebook.entries[avant];
+                  CHECK(Arch.title.find("archive") != std::string::npos,
+                        "bascule : l entree se nomme comme une archive");
+                  for (auto t : fen::mission::graphe_correction_reference())
+                    CHECK(Arch.body.find(fen::mission::noeud_def(t).nom) != std::string::npos,
+                          "bascule : chaque noeud archive est LISIBLE dans le carnet");
+
+                  // (e) LE CARNET SURVIT A LA SAUVEGARDE — c'est LE bien
+                  // transmis en passation [GDD 3.5], il ne peut pas s'evaporer.
+                  {
+                    fen::save::Writer w2;
+                    Gc.save(w2);
+                    fen::save::Reader r2(w2.bytes().data(), w2.bytes().size());
+                    fen::game::GameState G3 = Gc;
+                    G3.notebook.entries.clear();
+                    CHECK(G3.load(r2), "carnet : la sauvegarde se relit");
+                    CHECK(G3.notebook.entries.size() == Gc.notebook.entries.size(),
+                          "carnet : toutes les pages survivent");
+                    if (!G3.notebook.entries.empty())
+                      CHECK(G3.notebook.entries.back().body ==
+                                Gc.notebook.entries.back().body,
+                            "carnet : ... texte compris, au caractere pres");
+                  }
+                  std::printf("     carnet : %d pages ecrites (man pages %d primitives, "
+                              "archive de graphe, debriefs)\n",
+                              (int)Gc.notebook.entries.size(),
+                              (int)fen::mission::noeuds_disponibles().size());
+                  tv.jeu.agence.mode = garde_mode;
+                }
               }
 
               tv.mission_plan.program.tracking_days = garde_track;
@@ -2613,6 +2706,1438 @@ int main(int argc, char** argv) {
         }
       }
     }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 27. LA MISSION VÉCUE [GDD 9, décision 18] — le joueur EMBARQUE
+  // ═══════════════════════════════════════════════════════════════════════════
+  // `mission/Crew.hpp` était complet et sous oracle depuis toujours, et
+  // AUCUN chemin n'y menait : `try_embark` n'était appelé nulle part,
+  // `VitalState` n'était jamais instancié, `AgencyFinance::suspended` n'était
+  // posé que par les tests eux-mêmes, et `career::journal_absence` n'avait pas
+  // d'appelant. Un chapitre entier du GDD sans porte d'entrée — la famille de
+  // `Mission::phase`, `show_moons`, `ModeAide` et du carnet.
+  {
+    Session s;
+    s.nouvelle_partie("Oracle Vecu", ModeAide::Normal);
+    s.tick(0.0);                      // `AresLayer::assurer` cree l etat ARES
+    CHECK(s.jeu.ares.initialisee(), "vecu : la couche ARES est prete");
+    fen::game::GameState& G = *s.jeu.ares.etat;
+
+    // ---- (a) LA PORTE REFUSE, ET ELLE DIT POURQUOI ---------------------------
+    CHECK(!s.peut_embarquer().possible && !s.embarquer(),
+          "vecu : sans mission pilotee, on n embarque pas");
+    CHECK(!s.dernier_refus_embarquement.empty(),
+          "vecu : ... et le refus est MOTIVE, affichable au poste");
+
+    // Une mission habitée, en vol : la seule configuration embarquable.
+    fen::mission::Mission mv;
+    mv.contract.id = "VECU-1";
+    mv.contract.title = "Rotation d equipage";
+    mv.contract.family = "habite";        // séjour de 180 j = incrément ISS
+    mv.contract.crewed = true;
+    // LES TERMES DU CONTRAT PORTENT L OBJECTIF, dont l EFFECTIF [GDD 3.1] : une
+    // mission fabriquee a la main doit traverser les memes portes qu une mission
+    // jouee, sinon la fixture teste autre chose que le jeu.
+    mv.contract.terms = fen::mission::contract_terms_for_family(mv.contract.family);
+    // ON EMBARQUE AVANT LE FEU VERT [GDD 9.2, 4.1] : la decision se prend a la
+    // planification, pas en route. Defaut trouve EN CAPTURE — la premiere
+    // version laissait rejoindre un vaisseau deja parti vers Mars.
+    mv.state = fen::mission::MissionState::Qualification;
+    G.missions.push_back(mv);
+    s.piloter_premiere_mission();
+    CHECK(s.mission_courante() != nullptr, "vecu : la mission habitee est pilotee");
+
+    // Un vol DEJA PARTI ne se rejoint pas.
+    {
+      fen::mission::Mission* p = s.mission_courante();
+      const auto garde = p->state;
+      p->state = fen::mission::MissionState::Launched;
+      CHECK(!s.peut_embarquer().possible,
+            "vecu : on ne rejoint pas un vaisseau deja en route [GDD 9.2]");
+      p->state = fen::mission::MissionState::Received;
+      CHECK(!s.peut_embarquer().possible,
+            "vecu : ni une mission dont la conception n a pas commence [GDD 4.1]");
+      p->state = garde;
+    }
+
+    // La confiance FILTRE l'habité, et c'est le MÊME seuil que l'acceptation
+    // d'un contrat habité [GDD 13.4] — un seul barème, pas deux.
+    const double conf_garde = G.career.confidence_ares;
+    G.career.confidence_ares = 45.0;
+    CHECK(!s.peut_embarquer().possible,
+          "vecu : confiance < 60 -> missions habitees suspendues [GDD 13.4]");
+    G.career.confidence_ares = conf_garde;
+
+    // ---- (b) UNE MISSION LONGUE EXIGE LA FIN DE CARRIÈRE [GDD 9.2] ----------
+    // « Le personnage ne quitte ARES que lorsqu'il n'a plus de carriere a
+    // construire. » Un incrément ISS (180 j) n'est pas une mission longue ; un
+    // aller-retour martien (780 j) l'est.
+    CHECK(!fen::mission::mission_longue("habite", 0.0),
+          "vecu : un increment ISS n est pas une mission LONGUE");
+    CHECK(fen::mission::mission_longue("mars_habite", 779.9),
+          "vecu : un aller-retour martien en est une");
+    // Un rang de départ (Stagiaire) embarque donc sur la rotation LEO...
+    CHECK(!fen::career::terminal_rank(G.career.rank),
+          "vecu : la partie ne commence pas au rang terminal");
+    CHECK(s.peut_embarquer().possible,
+          "vecu : ... et une mission COURTE lui reste ouverte");
+    // ...mais pas sur Mars : rang ET maturite manquent tous les deux.
+    fen::mission::Mission* pm = s.mission_courante();
+    const std::string fam_garde = pm->contract.family;
+    pm->contract.family = "mars_habite";
+    CHECK(!s.peut_embarquer().possible,
+          "vecu : mission longue refusee hors fin de carriere [GDD 9.2]");
+    G.career.rank = fen::career::Rank::Directeur;
+    CHECK(!s.peut_embarquer().possible &&
+              s.peut_embarquer().raison.find("long sejour") != std::string::npos,
+          "vecu : le rang ne suffit pas — il faut la MATURITE [GDD 5.10, 9.2]");
+    pm->contract.family = fam_garde;
+    G.career.rank = fen::career::Rank::Stagiaire;
+
+    // ---- (c) L'EMBARQUEMENT ARME LES SOUTES ET GÈLE L'AGENCE [GDD 9.3] -----
+    const double conf_depart = G.career.confidence_ares;
+    CHECK(!G.finance.suspended, "vecu : avant l embarquement, l agence est exposee");
+    CHECK(s.embarquer(), "vecu : l embarquement reussit");
+    CHECK(G.lived.active && G.lived.mission_id == "VECU-1",
+          "vecu : la mission vecue est NOMMEE, pas un indice de tableau");
+    CHECK(G.lived.n_crew == 7, "vecu : 7 personnes a bord (increment ISS)");
+    CHECK(G.lived.vitals.o2_kg > 0.0 && G.lived.vitals.water_kg > 0.0 &&
+              G.lived.vitals.food_kg > 0.0 && G.lived.vitals.co2_scrub_capacity_kg > 0.0,
+          "vecu : les quatre soutes sont armees, CO2 compris");
+    CHECK(G.finance.suspended,
+          "vecu : la chaine de fin de partie financiere est SUSPENDUE [GDD 9.3]");
+    const double jours_bord = G.lived.days_left();
+    std::printf("     vecu : %d a bord, %.0f jours d autonomie provisionnee\n",
+                G.lived.n_crew, jours_bord);
+    CHECK(jours_bord > 180.0,
+          "vecu : l autonomie couvre le sejour, marge comprise");
+
+    // UNE SEULE À LA FOIS [GDD 9.2].
+    CHECK(!s.embarquer() &&
+              s.dernier_refus_embarquement.find("une seule") != std::string::npos,
+          "vecu : on n embarque pas deux fois [GDD 9.2]");
+
+    // LE FEU VERT : la mission decolle avec son Architecte a bord. (On pose
+    // l etat de vol a la main plutot que de derouler les gates — la boucle de
+    // mission a ses propres oracles ; ce qui se verifie ici est la VIE A BORD.)
+    s.mission_courante()->state = fen::mission::MissionState::Launched;
+    s.mission_courante()->state_entered_days = G.clock.now_days();
+
+    // ---- (d) LA CONFIANCE EST GELÉE PENDANT L'ABSENCE [GDD 9.3] ------------
+    // « Aucune perte de credibilite ne peut survenir en l'absence du joueur. »
+    // L'adjoint conduit de vraies missions : on simule une anomalie qui, hors
+    // absence, couterait de la confiance.
+    // ---- (d) UNE MISSION VÉCUE A BESOIN QUE LE TEMPS PASSE [GDD 14.3] ------
+    // Au feu vert, le vol est en ASCENSION : le plafond de cadence RAMÈNE le
+    // monde au temps réel, et il a raison de le faire. Un séjour de six mois ne
+    // se vit donc pas d'un bloc — il se vit par phases, et c'est exactement ce
+    // que dit [GDD 14.3] (« certaines tâches se gèrent en temps réel ; le reste
+    // peut être accéléré »).
+    CHECK(!s.jeu.regler_cadence(fen::game::TimeRate::Month),
+          "vecu : au decollage, la phase critique REFUSE le mois/s [GDD 14.3]");
+    CHECK(s.jeu.cadence == fen::game::TimeRate::Realtime,
+          "vecu : ... et la borne est le temps reel, jamais la pause");
+    // Une fois en exploitation, le monde peut de nouveau filer.
+    s.mission_courante()->state_entered_days = G.clock.now_days() - 10.0;
+    s.tick(0.0);                                   // la phase se re-derive
+    CHECK(s.jeu.regler_cadence(fen::game::TimeRate::Month),
+          "vecu : hors phase critique, l acceleration redevient permise");
+
+    // ---- (d bis) LA CONFIANCE EST GELÉE PENDANT L'ABSENCE [GDD 9.3] --------
+    // « Aucune perte de credibilite ne peut survenir en l'absence du joueur. »
+    // L'adjoint conduit de vraies missions : on simule l'echec qui, hors
+    // absence, couterait de la confiance.
+    G.career.confidence_ares -= 25.0;
+    s.tick(0.5);
+    CHECK(s.jeu.agence.mois > 0.0, "vecu : le temps a bien coule");
+    CHECK(std::fabs(G.career.confidence_ares - conf_depart) < 1e-9,
+          "vecu : la confiance est REPOSEE a sa valeur de depart [GDD 9.3]");
+
+    // ---- (e) LES VIVRES SE CONSOMMENT AVEC LE TEMPS, PAS AVEC LES FRAMES ----
+    // Meme doctrine que le calendrier : le sous-pas fixe, donc 4 frames et 100
+    // frames donnent le MEME etat. Un equipage qu on affame en achetant un
+    // meilleur GPU serait un bug de rendu deguise en gameplay.
+    // On compare des DELTAS et non des absolus : les deux parties n'ont pas le
+    // meme passe (l'une a servi aux oracles precedents), et ce qu'on veut
+    // prouver est bien « meme temps reel ecoule => meme consommation », pas
+    // « memes conditions initiales ».
+    const double reste_avant = G.lived.days_left();
+    for (int i = 0; i < 40; ++i) s.tick(0.05);      // 2 s reelles en 40 frames
+    const double conso_40 = reste_avant - G.lived.days_left();
+    std::printf("     vecu : %.2f j d autonomie -> %.2f j apres 2 s a mois/s\n",
+                reste_avant, G.lived.days_left());
+
+    Session s2;
+    s2.nouvelle_partie("Oracle Vecu 2", ModeAide::Normal);
+    s2.tick(0.0);
+    fen::game::GameState& G2 = *s2.jeu.ares.etat;
+    G2.missions.push_back(mv);
+    s2.piloter_premiere_mission();
+    CHECK(s2.embarquer(), "vecu : seconde partie embarquee a l identique");
+    s2.mission_courante()->state = fen::mission::MissionState::Launched;
+    s2.mission_courante()->state_entered_days = G2.clock.now_days() - 10.0;
+    s2.tick(0.0);
+    s2.jeu.regler_cadence(fen::game::TimeRate::Month);
+    const double reste2_avant = G2.lived.days_left();
+    // 0,2 s PAR FRAME, et c'est deliberé : au-dela de 0,25 s le modele BORNE la
+    // frame (« un gel de shaders ne coute pas des mois »), si bien que 4 frames
+    // de 0,5 s ne valent pas 2 s de jeu mais 1 s. Le garde-fou est correct — il
+    // faut simplement rester sous son seuil pour comparer des durees egales.
+    for (int i = 0; i < 10; ++i) s2.tick(0.2);      // 2 s reelles en 10 frames
+    const double conso_10 = reste2_avant - G2.lived.days_left();
+
+    CHECK(conso_40 > 0.0, "vecu : le temps qui coule CONSOMME les vivres [GDD 9.1]");
+    CHECK(std::fabs(conso_40 - conso_10) < 1e-9,
+          "vecu : 10 frames ou 40 frames consomment AUTANT (sous-pas fixe)");
+
+    // ---- (f) L'ABSENCE SURVIT À UNE SAUVEGARDE ------------------------------
+    // Perdre `lived` au rechargement remettrait le joueur au sol au milieu de sa
+    // croisiere ET degelerait une chaine que [GDD 9.3] promet suspendue.
+    {
+      fen::save::Writer w;
+      G.save(w);
+      fen::save::Reader r(w.bytes().data(), w.bytes().size());
+      // MEME precondition que l oracle de sauvegarde de vol ci-dessus : le
+      // catalogue est reconstruit par la graine AVANT le chargement. Charger
+      // dans un GameState au catalogue vide n est pas un cas a supporter — c est
+      // un etat que le jeu ne produit jamais (`AresLayer::assurer` seme toujours
+      // avant de lire un fichier).
+      fen::game::GameState G3 = G;
+      G3.lived = {};
+      G3.finance.suspended = false;
+      CHECK(G3.load(r), "vecu : la sauvegarde d une partie embarquee se relit");
+      CHECK(G3.lived.active && G3.lived.mission_id == G.lived.mission_id,
+            "vecu : on est TOUJOURS a bord apres rechargement");
+      CHECK(std::fabs(G3.lived.days_left() - G.lived.days_left()) < 1e-9,
+            "vecu : ... avec exactement les memes vivres");
+      CHECK(G3.finance.suspended,
+            "vecu : ... et l agence est toujours protegee [GDD 9.3]");
+    }
+
+    // ---- (g) LE RETOUR DÉGÈLE ET ÉCRIT LE CARNET [GDD 9.3, 15.4] -----------
+    const std::size_t pages_avant = G.notebook.entries.size();
+    CHECK(s.debarquer(), "vecu : le debarquement reussit");
+    CHECK(!G.lived.active, "vecu : on n est plus a bord");
+    CHECK(!G.finance.suspended,
+          "vecu : l agence redevient exposee — l Architecte a repris son poste");
+    CHECK(G.notebook.entries.size() == pages_avant + 1,
+          "vecu : le retour ECRIT la reconstitution d absence [GDD 9.3, 15.4]");
+    CHECK(G.notebook.entries.back().title == "Reconstitution d'absence",
+          "vecu : ... et c est bien cette page-la");
+    CHECK(!s.debarquer(), "vecu : on ne debarque pas deux fois");
+
+    // ---- (h) LES RÉSERVES ÉPUISÉES TUENT [GDD 9.4, 10.3 niveau 5] ----------
+    // « Voire en ECHEC si les reserves ne suffisent pas. » Le joueur est a bord :
+    // la gravite MONTE d un palier par exposition humaine [GDD 10.3], elle n est
+    // pas decretee. Un Critique + exposition == Catastrophe == Game Over.
+    s.mission_courante()->state = fen::mission::MissionState::Qualification;
+    CHECK(s.embarquer(), "vecu : on repart");
+    s.mission_courante()->state = fen::mission::MissionState::Launched;
+    G.lived.vitals.o2_kg = 0.0;              // la soute est vide
+    CHECK(G.lived.consumables_exhausted(),
+          "vecu : reserves epuisees detectees [GDD 9.4]");
+    CHECK(!G.character.operational_death, "vecu : avant, le personnage est vivant");
+    s.tick(0.1);
+    CHECK(G.character.operational_death,
+          "vecu : reserves epuisees a bord = mort operationnelle [GDD 10.3 niv. 5]");
+    CHECK(!G.character.alive, "vecu : ... et c est un Game Over irrevocable [GDD 3.4]");
+    CHECK(!G.lived.active && !G.finance.suspended,
+          "vecu : il n y a plus d absent a proteger");
+    // Et la regle appliquee est bien celle du GDD, pas un niveau ecrit a la main.
+    fen::mission::SeverityModifiers hx; hx.human_lethal_exposure = true;
+    CHECK(fen::mission::apply_modifiers(fen::mission::Severity::Critical, hx) ==
+              fen::mission::Severity::Catastrophe,
+          "vecu : c est le MODIFICATEUR d exposition humaine qui fait le niveau 5");
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 28. LE VERROU DES RADIATIONS, EN VOL [GDD 6.6, 7.7, 19.7]
+  // ═══════════════════════════════════════════════════════════════════════════
+  // `env/Radiation.hpp` etait complet et sans aucun consommateur : [GDD 7.7]
+  // declare l'environnement « acteur de mission », il n'etait que decor. Ces
+  // oracles verifient le BRANCHEMENT — le modele, lui, a les siens dans
+  // test_mission_loop. Meme precaution qu'au piege n°72 : ce qui compte est que
+  // le chemin VIF passe par la.
+  {
+    Session s;
+    s.nouvelle_partie("Oracle Dose", ModeAide::Normal);
+    s.tick(0.0);
+    fen::game::GameState& G = *s.jeu.ares.etat;
+
+    fen::mission::Mission mr;
+    mr.contract.id = "DOSE-1";
+    mr.contract.title = "Croisiere habitee";
+    mr.contract.family = "habite";
+    mr.contract.crewed = true;
+    mr.contract.terms = fen::mission::contract_terms_for_family(mr.contract.family);
+    mr.state = fen::mission::MissionState::Qualification;
+    G.missions.push_back(mr);
+    s.piloter_premiere_mission();
+
+    // (a) LE BLINDAGE EMBARQUE EST CELUI DU PLAN — celui dont la masse a
+    // reellement pese au decollage, pas un reglage de derniere minute.
+    s.mission_plan.blindage = fen::env::Shielding{10.0, 1.0};
+    CHECK(s.embarquer(), "dose : embarquement avec blindage");
+    // LE BLINDAGE VU PAR L EQUIPAGE = LA COQUE + CE QU ON A PAYE. Partir de zero
+    // decrivait un astronaute sans vehicule, et rendait toute eruption letale
+    // quelle que soit l architecture.
+    CHECK(std::fabs(s.jeu.ares.etat->lived.blindage.areal_density_gcm2
+                    - (fen::mission::COQUE_STRUCTURE_GCM2 + 10.0)) < 1e-12,
+          "dose : le blindage embarque = coque + conception [GDD 6.6]");
+
+    // (b) LA DOSE S'ACCUMULE QUAND LE TEMPS COULE, et pas avant.
+    s.mission_courante()->state = fen::mission::MissionState::Launched;
+    s.mission_courante()->state_entered_days = G.clock.now_days() - 10.0;
+    s.tick(0.0);
+    const double d0 = G.dose_architecte.career_sv;
+    CHECK(d0 == 0.0, "dose : rien pris tant que le temps n a pas coule");
+    s.jeu.regler_cadence(fen::game::TimeRate::Month);
+    for (int i = 0; i < 10; ++i) s.tick(0.2);
+    const double d1 = G.dose_architecte.career_sv;
+    std::printf("     dose : %.4f Sv apres %.0f jours de vol habite (blindage 10 g/cm2)\n",
+                d1, s.jeu.agence.mois * 30.44);
+    CHECK(d1 > 0.0, "dose : le temps qui coule IRRADIE l equipage [GDD 6.6, 7.7]");
+    CHECK(std::fabs(G.dose_architecte.mission_sv - d1) < 1e-12,
+          "dose : mission et carriere avancent ensemble sur un premier vol");
+
+    // (c) ELLE SUIT LA PHASE : la meme duree en LEO coute MOINS qu en croisiere,
+    // parce que la magnetosphere masque la moitie du ciel [GDD 7.7].
+    //
+    // ON MESURE LA DOSE CHRONIQUE SEULE, et c est indispensable depuis que les
+    // ERUPTIONS FRAPPENT VRAIMENT (section 30) : un SPE tire pendant la fenetre
+    // LEO gonflerait la comparaison et la ferait echouer au hasard. Le compteur
+    // aigu est separe par construction dans `DoseAccumulator` — il suffisait de
+    // s en servir. Oracle trouve en le voyant tomber, pas en le supposant.
+    auto chronique = [&G]() {
+      return G.dose_architecte.mission_sv
+             - G.dose_architecte.mission_acute_gy * fen::env::SPE_QUALITY_FACTOR;
+    };
+    const double av = chronique();
+    s.mission_courante()->phase = fen::mission::FlightPhase::LeoOps;
+    s.jeu.avancer_temps(30.0);
+    s.jeu.ares.assurer(s.jeu.agence, s.jeu.epoch_courant());
+    const double d_leo = chronique() - av;
+    const double av2 = chronique();
+    s.mission_courante()->phase = fen::mission::FlightPhase::TransferCruise;
+    s.jeu.avancer_temps(30.0);
+    s.jeu.ares.assurer(s.jeu.agence, s.jeu.epoch_courant());
+    const double d_cr = chronique() - av2;
+    CHECK(d_leo > 0.0 && d_cr > d_leo,
+          "dose : 30 j en croisiere coutent plus que 30 j en LEO [GDD 7.7]");
+
+    // (d) LA DOSE DE CARRIERE SURVIT AU DEBARQUEMENT — sinon « un personnage
+    // consomme ne revole pas » [GDD 6.6] n aurait aucun sens.
+    const double carriere = G.dose_architecte.career_sv;
+    CHECK(s.debarquer(), "dose : retour au sol");
+    CHECK(G.dose_architecte.career_sv == carriere,
+          "dose : la dose de CARRIERE ne redescend pas au debarquement [GDD 6.6]");
+
+    // (e) ET ELLE VERROUILLE LE VOL. C est l arbitrage reel des programmes
+    // habites : le compteur est irreversible, seule la passation change de
+    // personne [GDD 3.5].
+    s.mission_courante()->state = fen::mission::MissionState::Qualification;
+    CHECK(s.peut_embarquer().possible, "dose : sous la limite, on revole");
+    G.dose_architecte.career_sv = fen::env::CAREER_DOSE_LIMIT_SV + 0.01;
+    CHECK(!s.peut_embarquer().possible &&
+              s.peut_embarquer().raison.find("dose de carriere") != std::string::npos,
+          "dose : au-dela de la limite, INAPTE AU VOL [GDD 6.6]");
+
+    // (f) LA SAUVEGARDE PORTE LE VERROU. Le perdre rendrait apte quelqu un qui
+    // ne l est plus — le meme piege que les vivres, une case plus loin.
+    G.dose_architecte.career_sv = 0.42;
+    CHECK(s.embarquer(), "dose : on repart pour verifier la persistance");
+    // APRES l embarquement : il remet a zero les compteurs de MISSION (c est sa
+    // raison d etre) et laisse la carriere intacte. Poser l aigu avant, c etait
+    // mesurer ce que la porte venait d effacer.
+    G.dose_architecte.mission_acute_gy = 0.13;
+    CHECK(std::fabs(G.dose_architecte.career_sv - 0.42) < 1e-12,
+          "dose : embarquer remet la MISSION a zero, jamais la CARRIERE");
+    {
+      fen::save::Writer w;
+      G.save(w);
+      fen::save::Reader r(w.bytes().data(), w.bytes().size());
+      fen::game::GameState G2 = G;
+      G2.dose_architecte = {};
+      G2.lived = {};
+      CHECK(G2.load(r), "dose : la sauvegarde se relit");
+      CHECK(std::fabs(G2.dose_architecte.career_sv - 0.42) < 1e-12 &&
+                std::fabs(G2.dose_architecte.mission_acute_gy - 0.13) < 1e-12,
+            "dose : la dose de carriere et l aigu survivent au rechargement");
+      CHECK(std::fabs(G2.lived.blindage.areal_density_gcm2
+                      - (fen::mission::COQUE_STRUCTURE_GCM2 + 10.0)) < 1e-12,
+            "dose : ... et le blindage embarque aussi");
+    }
+
+    // (g) UNE DOSE AIGUE LETALE TUE, et sans accuser le joueur : elle vient d une
+    // eruption, pas d un oubli de provisionnement [GDD 7.7 — l environnement est
+    // un ACTEUR].
+    CHECK(!G.character.operational_death, "dose : vivant avant l eruption");
+    G.dose_architecte.add_acute_gy(fen::env::ACUTE_LETHAL_GY + 0.1);
+    s.tick(0.1);
+    CHECK(G.character.operational_death && !G.character.alive,
+          "dose : une dose aigue letale est une mort operationnelle [GDD 3.4, 6.6]");
+    CHECK(s.jeu.raison_faillite.find("dose aigue letale") != std::string::npos,
+          "dose : ... et le motif affiche DIT laquelle des deux morts c est");
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 29. LES DEBRIS RETOMBENT [GDD 7.8, 10.5]
+  // ═══════════════════════════════════════════════════════════════════════════
+  // `add_breakup` etait sur le chemin vif, `tick` seulement dans le tick MORT :
+  // les nuages s accumulaient sans jamais decroitre, et la promesse de 7.8 —
+  // « les couloirs LEO se nettoient, les couloirs hauts restent pollues » —
+  // n avait que sa moitie punitive.
+  {
+    Session s;
+    s.nouvelle_partie("Oracle Debris", ModeAide::Normal);
+    s.tick(0.0);
+    fen::game::GameState& G = *s.jeu.ares.etat;
+
+    // Deux nuages identiques, a deux altitudes que TOUT separe.
+    G.debris.add_breakup("BAS", 300.0, 2000.0, fen::env::BreakupKind::Explosion,
+                         G.clock.now_days());
+    G.debris.add_breakup("HAUT", 1200.0, 2000.0, fen::env::BreakupKind::Explosion,
+                         G.clock.now_days());
+    const fen::env::Corridor bas{250.0, 350.0}, haut{1150.0, 1250.0};
+    const double n_bas0 = G.debris.population(bas);
+    const double n_haut0 = G.debris.population(haut);
+    CHECK(n_bas0 > 0.0 && n_haut0 > 0.0, "debris : les deux nuages existent");
+
+    // DEUX ANS de temps de jeu, par le chemin VIF (pas GameState::tick).
+    s.jeu.avancer_temps(730.0);
+    s.jeu.ares.assurer(s.jeu.agence, s.jeu.epoch_courant());
+    const double n_bas1 = G.debris.population(bas);
+    const double n_haut1 = G.debris.population(haut);
+    std::printf("     debris apres 2 ans : 300 km %.0f -> %.0f objets | "
+                "1200 km %.0f -> %.0f objets\n", n_bas0, n_bas1, n_haut0, n_haut1);
+    CHECK(n_bas1 < n_bas0,
+          "debris : le couloir BAS se nettoie — la trainee fait son travail [GDD 7.8]");
+    CHECK(n_haut1 > 0.9 * n_haut0,
+          "debris : le couloir HAUT reste pollue, et c est l empreinte durable [GDD 10.5]");
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 30. LA BIBLIOTHEQUE D'ANOMALIES SE PRODUIT ENFIN [GDD 9.5, 9.1]
+  // ═══════════════════════════════════════════════════════════════════════════
+  // `mission/Events.hpp` tirait des evenements calibres depuis le premier jour et
+  // PERSONNE ne les consommait : aucune anomalie ne se produisait jamais. Le
+  // dernier gros modele sans appelant.
+  {
+    Session s;
+    s.nouvelle_partie("Oracle Avaries", ModeAide::Normal);
+    s.tick(0.0);
+    fen::game::GameState& G = *s.jeu.ares.etat;
+
+    fen::mission::Mission ma;
+    ma.contract.id = "AVARIE-1";
+    ma.contract.title = "Croisiere longue";
+    ma.contract.family = "mars_habite";
+    ma.contract.crewed = true;
+    ma.contract.terms = fen::mission::contract_terms_for_family(ma.contract.family);
+    ma.state = fen::mission::MissionState::Qualification;
+    G.missions.push_back(ma);
+    s.piloter_premiere_mission();
+    G.career.rank = fen::career::Rank::Directeur;
+    if (auto* n = G.tree.find_mut("sejour_long")) n->trl = fen::tech::TRL_OPERATIONAL;
+    CHECK(s.embarquer(), "avaries : embarquement sur une longue croisiere");
+    s.mission_courante()->state = fen::mission::MissionState::Launched;
+    s.mission_courante()->state_entered_days = G.clock.now_days();
+    s.mission_courante()->phase = fen::mission::FlightPhase::TransferCruise;
+
+    // (a) LE MECANISME D ABORD, ROBUSTE ET SANS PARI. Les taux de
+    // `event_library` valent ~1e-3/jour par type : sur 400 jours l esperance est
+    // de l ordre de UN evenement, si bien qu un oracle « il s est passe quelque
+    // chose en 400 jours » serait vrai six fois sur dix — un oracle bancal par
+    // construction. On verifie donc le SAMPLER directement, sur une fenetre
+    // longue ou l attente est ecrasante, puis son DETERMINISME.
+    {
+      fen::mission::EventContext ctx;
+      ctx.crewed = true;
+      ctx.phase = fen::mission::FlightPhase::TransferCruise;
+      const Rng rg(1234567u);
+      const auto e1 = fen::mission::sample_events(rg, 1, 0.0, 5000.0, ctx);
+      const auto e2 = fen::mission::sample_events(rg, 1, 0.0, 5000.0, ctx);
+      CHECK(!e1.empty(),
+            "avaries : sur une fenetre longue, la bibliotheque PRODUIT [GDD 9.5]");
+      CHECK(e1.size() == e2.size(),
+            "avaries : le meme tirage rendu deux fois donne le meme resultat");
+      // Et un vol ROBOTIQUE n a ni panne de support-vie ni urgence medicale.
+      fen::mission::EventContext rob = ctx; rob.crewed = false;
+      bool habite_seul = true;
+      for (const auto& e : fen::mission::sample_events(rg, 1, 0.0, 5000.0, rob))
+        if (e.kind == fen::mission::EventKind::LifeSupportFault ||
+            e.kind == fen::mission::EventKind::MedicalEmergency) habite_seul = false;
+      CHECK(habite_seul,
+            "avaries : sans equipage, ni support-vie ni urgence medicale");
+    }
+
+    // (a bis) PUIS LE BRANCHEMENT : on avance par tranches de 400 jours (la borne
+    // de rattrapage) jusqu a ce que le vol connaisse sa premiere avarie.
+    int tranches = 0;
+    while (G.avaries.empty() && tranches < 6) {
+      s.jeu.avancer_temps(400.0);
+      s.jeu.ares.assurer(s.jeu.agence, s.jeu.epoch_courant());
+      ++tranches;
+    }
+    std::printf("     avaries : %d avarie(s) apres %d j de croisiere habitee "
+                "(dose aigue cumulee %.3f Gy)\n",
+                (int)G.avaries.size(), tranches * 400, G.dose_architecte.mission_acute_gy);
+    CHECK(!G.avaries.empty(),
+          "avaries : le vol FINIT par connaitre une anomalie, et elle est stockee");
+    CHECK(G.lived.jour_evenements_tire > 0.0,
+          "avaries : l index de tirage a avance");
+
+    // (b) LE VOL EST REJOUABLE QUEL QUE SOIT LE DECOUPAGE DU TEMPS. Meme exigence
+    // que les sous-pas [GDD 14.2], appliquee a l alea : un tirage par frame
+    // aurait donne un vol different a chaque machine. Deux parties identiques,
+    // une avance de 400 jours d un bloc contre huit de cinquante.
+    {
+      auto vol = [&ma](Session& sx, int n_tranches, double jours) {
+        sx.nouvelle_partie("Oracle Rejeu", ModeAide::Normal);
+        sx.tick(0.0);
+        fen::game::GameState& Gx = *sx.jeu.ares.etat;
+        Gx.missions.push_back(ma);
+        sx.piloter_premiere_mission();
+        Gx.career.rank = fen::career::Rank::Directeur;
+        if (auto* n = Gx.tree.find_mut("sejour_long")) n->trl = fen::tech::TRL_OPERATIONAL;
+        sx.embarquer();
+        sx.mission_courante()->state = fen::mission::MissionState::Launched;
+        sx.mission_courante()->state_entered_days = Gx.clock.now_days();
+        sx.mission_courante()->phase = fen::mission::FlightPhase::TransferCruise;
+        for (int i = 0; i < n_tranches; ++i) {
+          sx.jeu.avancer_temps(jours);
+          sx.jeu.ares.assurer(sx.jeu.agence, sx.jeu.epoch_courant());
+        }
+      };
+      Session sa, sb;
+      vol(sa, 1, 400.0);
+      vol(sb, 8, 50.0);
+      fen::game::GameState& Ga = *sa.jeu.ares.etat;
+      fen::game::GameState& Gb = *sb.jeu.ares.etat;
+      CHECK(Ga.avaries.size() == Gb.avaries.size(),
+            "avaries : 1 avance de 400 j ou 8 de 50 j -> MEMES pannes (fenetres d un jour)");
+      bool memes = Ga.avaries.size() == Gb.avaries.size();
+      for (std::size_t k = 0; memes && k < Ga.avaries.size(); ++k)
+        memes = Ga.avaries[k].kind == Gb.avaries[k].kind &&
+                std::fabs(Ga.avaries[k].debut_days - Gb.avaries[k].debut_days) < 1e-9;
+      CHECK(memes, "avaries : ... et aux MEMES dates, du meme type");
+      // LA DOSE AIGUE AUSSI : les eruptions sont frequentes, c est donc ELLE qui
+      // rend cet oracle mordant meme quand aucune panne n est tombee.
+      CHECK(Ga.dose_architecte.mission_acute_gy > 0.0,
+            "avaries : des eruptions ont bien frappe pendant ces 400 jours");
+      CHECK(std::fabs(Ga.dose_architecte.mission_acute_gy
+                      - Gb.dose_architecte.mission_acute_gy) < 1e-12,
+            "avaries : ... et la dose aigue recue est IDENTIQUE dans les deux decoupages");
+    }
+
+    // (c) UNE AVARIE COUTE, ET ELLE COUTE SUR LES VIVRES. Une panne de
+    // support-vie DEGRADE la boucle : ce n est pas une icone, c est une
+    // hemorragie de consommables.
+    {
+      const fen::mission::RecyclingLoops nom = fen::mission::RecyclingLoops::iss();
+      std::vector<fen::mission::Avarie> une;
+      fen::mission::Avarie ls;
+      ls.kind = fen::mission::EventKind::LifeSupportFault;
+      ls.debut_days = 0.0; ls.gravite01 = 1.0;
+      une.push_back(ls);
+      const auto eff = fen::mission::effets_avaries(une, 10.0);
+      const auto deg = fen::mission::boucles_degradees(nom, eff);
+      CHECK(deg.water_recovery < nom.water_recovery && deg.o2_recovery < nom.o2_recovery,
+            "avaries : une panne support-vie DEGRADE les boucles [GDD 9.1]");
+      // Et la consequence se lit dans l autonomie, pas ailleurs.
+      fen::mission::VitalState v1{100.0, 100.0, 100.0, 100.0};
+      fen::mission::VitalState v2 = v1;
+      v1.consume(6, 10.0, nom);
+      v2.consume(6, 10.0, deg);
+      CHECK(v2.o2_kg < v1.o2_kg && v2.water_kg < v1.water_kg,
+            "avaries : ... donc l equipage consomme PLUS pendant la panne");
+      // Une avarie reparee ne coute plus rien.
+      une[0].reparee = true;
+      CHECK(fen::mission::effets_avaries(une, 10.0).n_actives == 0,
+            "avaries : une avarie reparee cesse de couter");
+    }
+
+    // (d) REPARER EST UNE CAPACITE, PAS UN DE [GDD 9.1, 5.10]. Sans la branche 4,
+    // on ne repare rien — et le refus NOMME la techno manquante (piege n°42).
+    if (!G.avaries.empty()) {
+      std::size_t idx = 0;
+      bool trouve = false;
+      for (std::size_t k = 0; k < G.avaries.size(); ++k)
+        if (G.avaries[k].kind != fen::mission::EventKind::MedicalEmergency &&
+            G.avaries[k].kind != fen::mission::EventKind::CommLoss)
+        { idx = k; trouve = true; break; }
+      if (trouve) {
+        CHECK(!s.reparer_avarie(idx),
+              "avaries : sans maintenance_locale, on ne repare rien [GDD 5.10]");
+        CHECK(s.dernier_refus_reparation.find("maintenance_locale") != std::string::npos,
+              "avaries : ... et le refus NOMME la techno a rechercher");
+        if (auto* n = G.tree.find_mut("maintenance_locale"))
+          n->trl = fen::tech::TRL_OPERATIONAL;
+        CHECK(s.reparer_avarie(idx),
+              "avaries : avec la capacite embarquee, la reparation s engage");
+        CHECK(G.avaries[idx].en_reparation(G.clock.now_days()),
+              "avaries : ... et elle PREND DU TEMPS (l avarie coute encore)");
+        CHECK(!s.reparer_avarie(idx),
+              "avaries : on n engage pas deux fois la meme reparation");
+        // Le temps passe : la reparation aboutit d elle-meme.
+        s.jeu.avancer_temps(30.0);
+        s.jeu.ares.assurer(s.jeu.agence, s.jeu.epoch_courant());
+        CHECK(G.avaries[idx].reparee,
+              "avaries : la reparation aboutit quand son temps est ecoule");
+      }
+      // LE DIAGNOSTIC AUTONOME RACCOURCIT LE TRAVAIL : la branche 4 achete du
+      // temps, pas de la chance.
+      fen::mission::Avarie t; t.gravite01 = 0.5;
+      fen::mission::CapaciteBord nu; nu.maintenance_locale = true;
+      fen::mission::CapaciteBord equipe = nu;
+      equipe.diagnostics_autonomes = true; equipe.redondance_base = true;
+      CHECK(fen::mission::duree_reparation_jours(t, equipe) <
+                fen::mission::duree_reparation_jours(t, nu),
+            "avaries : diagnostics et redondance RACCOURCISSENT la reparation");
+    }
+
+    // (e) LE BLINDAGE SAUVE CONTRE LES ERUPTIONS, LA OU IL NE SERT PAS CONTRE LE
+    // GCR. C est la symetrie que le fond permanent cachait, et la raison d etre
+    // des abris anti-tempete reels [GDD 6.6].
+    {
+      const double nu = fen::mission::dose_aigue_spe_gy(1.0, fen::env::Shielding{0.0, 1.0});
+      const double abri = fen::mission::dose_aigue_spe_gy(1.0, fen::env::Shielding{20.0, 1.0});
+      std::printf("     eruption majeure : %.2f Gy non blindee -> %.2f Gy derriere 20 g/cm2"
+                  "  (letal a %.1f Gy)\n", nu, abri, fen::env::ACUTE_LETHAL_GY);
+      CHECK(nu > fen::env::ACUTE_LETHAL_GY,
+            "avaries : une eruption majeure non blindee est LETALE [GDD 6.6]");
+      CHECK(abri < nu / 3.0,
+            "avaries : 20 g/cm2 divisent la dose aigue par plus de trois (exponentiel)");
+      // ET LA MESURE CORRIGE CE QUE J AVAIS ECRIT ICI : 20 g/cm2 ne font PAS
+      // passer sous le seuil de syndrome aigu (1,32 Gy contre 1,0). Ils font
+      // mieux et moins a la fois — ils transforment une dose LETALE en une dose
+      // survivable. C est exactement ce que promet un abri anti-tempete reel :
+      // il ne rend pas l eruption inoffensive, il fait rentrer l equipage.
+      CHECK(abri < fen::env::ACUTE_LETHAL_GY,
+            "avaries : 20 g/cm2 transforment une eruption LETALE en dose survivable");
+      CHECK(abri > fen::env::ACUTE_SICKNESS_GY,
+            "avaries : ... sans pour autant la rendre inoffensive [GDD 6.6]");
+    }
+
+    // (f) LES AVARIES SURVIVENT A LA SAUVEGARDE. Les perdre reparerait tout
+    // gratuitement ET retirerait les memes fenetres en double.
+    {
+      fen::save::Writer w;
+      G.save(w);
+      fen::save::Reader r(w.bytes().data(), w.bytes().size());
+      fen::game::GameState G3 = G;
+      G3.avaries.clear();
+      G3.lived.jour_evenements_tire = -1.0;
+      CHECK(G3.load(r), "avaries : la sauvegarde se relit");
+      CHECK(G3.avaries.size() == G.avaries.size(),
+            "avaries : toutes les avaries survivent au rechargement");
+      CHECK(G3.lived.jour_evenements_tire == G.lived.jour_evenements_tire,
+            "avaries : ... et l index de tirage, sinon les memes pannes retombent");
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 31. LES DEUX HORLOGES, ET LA PREPARATION MEDICALE [GDD 6.7, 14.4, 11.6]
+  // ═══════════════════════════════════════════════════════════════════════════
+  // MEME DEFAUT QUE LES DEBRIS, DEUX CRANS PLUS LOIN. `rel::DualClock` etait
+  // declare sur GameState, sauvegarde, recharge — et AVANCE NULLE PART : le
+  // vieillissement differentiel que [GDD 3.4] fait peser sur la passation valait
+  // zero pour toute mission. Et `EventContext::medical_risk_factor` etait ecrit en
+  // dur a 1,0 dans le tick alors que `station::effects` le calculait : le module
+  // medical de Novellus coutait 110 M€ et ne changeait aucun tirage.
+  // Ces oracles verifient le BRANCHEMENT ; la PHYSIQUE, elle, est confrontee aux
+  // valeurs publiees (GPS, ISS) dans test_ares_modules.
+  {
+    Session s;
+    s.nouvelle_partie("Oracle Horloges", ModeAide::Normal);
+    s.tick(0.0);
+    fen::game::GameState& G = *s.jeu.ares.etat;
+
+    fen::mission::Mission mh;
+    mh.contract.id = "HOR-1";
+    mh.contract.title = "Croisiere martienne habitee";
+    mh.contract.family = "mars_habite";
+    mh.contract.crewed = true;
+    mh.contract.terms = fen::mission::contract_terms_for_family(mh.contract.family);
+    mh.state = fen::mission::MissionState::Qualification;
+    G.missions.push_back(mh);
+    s.piloter_premiere_mission();
+    G.career.rank = fen::career::Rank::Directeur;
+    if (auto* n = G.tree.find_mut("sejour_long")) n->trl = fen::tech::TRL_OPERATIONAL;
+
+    // (a) LA PREPARATION MEDICALE EST CELLE QU ON A CONSTRUITE. Sans module, le
+    // facteur est neutre ; avec, il vaut ce que `station::effects` dit — et c est
+    // GELE au depart, comme la fiabilite et le blindage.
+    CHECK(s.embarquer(), "horloges : embarquement sans module medical");
+    CHECK(std::fabs(G.lived.facteur_risque_medical - 1.0) < 1e-12,
+          "medical : sans module, le risque n est pas reduit");
+    CHECK(s.debarquer(), "horloges : retour au sol");
+    G.station.modules.push_back(
+        fen::station::StationModule{fen::station::ModuleType::Medical, true});
+    const double attendu =
+        fen::station::effects(G.station).medical_risk_factor;
+    CHECK(attendu < 1.0, "11.6 : le modele CALCULE bien une reduction");
+    CHECK(s.embarquer(), "horloges : re-embarquement avec module medical");
+    CHECK(std::fabs(G.lived.facteur_risque_medical - attendu) < 1e-12,
+          "medical : le facteur de Novellus est EMBARQUE, plus ecrit en dur [GDD 11.6]");
+    // ET IL MORD SUR LE TIRAGE : c est la seule chose qui compte. On compare des
+    // TAUX, pas des tirages — un dé qui tombe pareil ne prouverait rien.
+    {
+      fen::mission::EventContext c0, c1;
+      c0.crewed = c1.crewed = true;
+      c1.medical_risk_factor = attendu;
+      const fen::mission::EventSpec* med = nullptr;
+      for (const auto& sp : fen::mission::event_library())
+        if (sp.kind == fen::mission::EventKind::MedicalEmergency) med = &sp;
+      CHECK(med != nullptr, "medical : l urgence medicale est dans la bibliotheque");
+      if (med)
+        CHECK(fen::mission::effective_rate(*med, c1) <
+                  fen::mission::effective_rate(*med, c0),
+              "medical : le module REDUIT le taux d urgence medicale [GDD 9.4]");
+    }
+
+    // (b) LA GEOMETRIE DES HORLOGES EST LUE SUR LES EPHEMERIDES, pas posee. Un
+    // transfert vers Mars a un demi-grand axe STRICTEMENT entre celui de la Terre
+    // et celui de Mars — c est la definition meme de l ellipse de Hohmann.
+    const fen::mission::GeometrieHorloge& g = G.lived.horloge;
+    CHECK(g.valide(), "horloges : la geometrie est gelee au depart");
+    CHECK(g.a_croisiere_m > g.a_terre_m && g.a_croisiere_m < g.a_sejour_m,
+          "horloges : a(transfert) est entre a(Terre) et a(Mars) [Hohmann]");
+    std::printf("     horloges : a_Terre=%.4f UA  a_transfert=%.4f UA  a_Mars=%.4f UA\n",
+                g.a_terre_m / cst::AU, g.a_croisiere_m / cst::AU, g.a_sejour_m / cst::AU);
+
+    // (c) AU SOL, LES DEUX HORLOGES BATTENT ENSEMBLE. Ce n est pas un raccourci :
+    // l Architecte partage alors litteralement l horloge du monde.
+    s.mission_courante()->state = fen::mission::MissionState::Launched;
+    s.mission_courante()->state_entered_days = G.clock.now_days();
+    s.mission_courante()->phase = fen::mission::FlightPhase::Ground;
+    s.jeu.avancer_temps(100.0);
+    s.jeu.ares.assurer(s.jeu.agence, s.jeu.epoch_courant());
+    CHECK(std::fabs(G.dual_clock.aging_gap()) < 1e-9,
+          "6.7 : au sol, aucun ecart entre le bord et la Terre");
+    CHECK(G.dual_clock.t_earth > 0.0,
+          "6.7 : ... mais l horloge Terre a bien tourne (le tick passe par la)");
+
+    // (d) EN CROISIERE, ELLES DIVERGENT — ET DANS LE SENS QUE LA PHYSIQUE IMPOSE,
+    // PAS DANS CELUI DU CLICHE. Plus haut dans le potentiel solaire ET plus lent
+    // que la Terre : les deux termes vont dans le meme sens, l horloge de bord
+    // GAGNE, et le voyageur revient PLUS VIEUX. Le signe est un RESULTAT.
+    const double t0 = G.dual_clock.t_earth, tau0 = G.dual_clock.tau_board;
+    const double age0 = G.character.age_bio_s;
+    s.mission_courante()->phase = fen::mission::FlightPhase::TransferCruise;
+    s.jeu.avancer_temps(400.0);
+    s.jeu.ares.assurer(s.jeu.agence, s.jeu.epoch_courant());
+    const double dt = G.dual_clock.t_earth - t0;
+    const double dtau = G.dual_clock.tau_board - tau0;
+    std::printf("     horloges : %.1f j de croisiere -> ecart %+.4f ms (bord - Terre)\n",
+                dt / 86400.0, (dtau - dt) * 1e3);
+    CHECK(dt > 0.0, "6.7 : le temps a coule cote Terre");
+    CHECK(dtau > dt,
+          "6.7 : en croisiere heliocentrique, l horloge de BORD gagne [potentiel > vitesse]");
+    // L AGE BIOLOGIQUE SUIT LE TEMPS PROPRE, pas le calendrier. C est la seule
+    // consequence qui compte pour [GDD 3.4] : un age, pas un compteur decoratif.
+    CHECK(std::fabs((G.character.age_bio_s - age0) - dtau) < 1e-6,
+          "6.7.4 : l age biologique avance du TEMPS PROPRE, pas du calendrier");
+    CHECK(G.character.age_bio_s - age0 > dt,
+          "6.7 : ... donc l Architecte vieillit PLUS VITE que son agence");
+    // MAIS L ECART RESTE IMPERCEPTIBLE, ce que [GDD 6.7.2] affirme et que le
+    // modele chiffre desormais : sous la seconde sur un aller-retour entier.
+    CHECK(std::fabs(G.dual_clock.aging_gap()) < 1.0,
+          "6.7.2 : sous la seconde — le GDD l affirmait, le modele le MESURE");
+    CHECK(!G.dual_clock.diverged(),
+          "6.7.2 : une croisiere martienne ne franchit pas le seuil d affichage");
+
+    // (e) EN ORBITE BASSE, LE SIGNE S INVERSE : la vitesse l emporte sur
+    // l altitude, et l equipage vieillit MOINS. Deux regimes, une seule formule.
+    const double avant = G.dual_clock.aging_gap();
+    s.mission_courante()->phase = fen::mission::FlightPhase::LeoOps;
+    s.jeu.avancer_temps(200.0);
+    s.jeu.ares.assurer(s.jeu.agence, s.jeu.epoch_courant());
+    CHECK(G.dual_clock.aging_gap() > avant,
+          "6.7 : en orbite BASSE, l horloge de bord PERD (l ISS retarde)");
+
+    // (f) LA GEOMETRIE GELEE SURVIT A LA SAUVEGARDE. La perdre ferait qu un vol
+    // recharge ne battrait plus au meme rythme ET ne tirerait plus les memes
+    // urgences : la rejouabilite d un vol est une PROMESSE du modele.
+    {
+      fen::save::Writer w;
+      G.save(w);
+      fen::save::Reader r(w.bytes().data(), w.bytes().size());
+      fen::game::GameState G4 = G;
+      G4.lived.horloge = {};
+      G4.lived.facteur_risque_medical = 1.0;
+      G4.dual_clock = {};
+      CHECK(G4.load(r), "horloges : la sauvegarde se relit");
+      CHECK(std::fabs(G4.lived.horloge.a_croisiere_m - g.a_croisiere_m) < 1e-6 &&
+                std::fabs(G4.lived.horloge.a_terre_m - g.a_terre_m) < 1e-6,
+            "horloges : la geometrie gelee survit au rechargement");
+      CHECK(std::fabs(G4.lived.facteur_risque_medical - attendu) < 1e-12,
+            "medical : ... et la preparation medicale recue aussi");
+      CHECK(std::fabs(G4.dual_clock.tau_board - G.dual_clock.tau_board) < 1e-9,
+            "horloges : ... et les deux horloges elles-memes");
+    }
+
+    // (g) UNE ARCHIVE V2 SE RECHARGE SANS RIEN CASSER : elle retombe sur des
+    // defauts qui reproduisent EXACTEMENT son comportement d origine (facteur
+    // neutre, geometrie invalide donc rapport 1). Pas de derive silencieuse.
+    {
+      fen::mission::GeometrieHorloge vide;
+      CHECK(!vide.valide(), "horloges : une geometrie non renseignee se declare invalide");
+      CHECK(fen::mission::rapport_horloge_bord(
+                fen::mission::FlightPhase::TransferCruise, vide) == 1.0,
+            "horloges : sans geometrie, le rapport vaut 1 (comportement d avant)");
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 32. L ANTIMATIERE TOURNE DANS LE TICK VIF [GDD 5.12.12, 19.3, 11.5]
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Dernier maillon de la chaine relativiste sans consommateur : quatre
+  // parametres de production et pas un gramme nulle part. Ces oracles verifient
+  // le BRANCHEMENT (la physique a les siens dans test_ares_modules) et surtout
+  // que la QUALIFICATION commande la production, la puissance le debit.
+  {
+    Session s;
+    s.nouvelle_partie("Oracle Antimatiere", ModeAide::Normal);
+    s.tick(0.0);
+    fen::game::GameState& G = *s.jeu.ares.etat;
+
+    // (a) SANS LA FILIERE QUALIFIEE, RIEN NE SE PRODUIT. Le noeud est en fin
+    // d arbre [GDD 19.3] : une agence debutante n a pas d antimatiere qui
+    // s accumule toute seule dans un coin.
+    CHECK(G.antimatiere.grams == 0.0, "antimatiere : stock nul au depart");
+    const fen::tech::TechNode* nam = G.tree.find("antimatiere");
+    CHECK(nam != nullptr, "antimatiere : le noeud existe dans l arbre");
+    CHECK(nam && !nam->operational(), "antimatiere : ... et n est PAS qualifie au depart");
+    s.jeu.avancer_temps(365.0 * 5.0);
+    s.jeu.ares.assurer(s.jeu.agence, s.jeu.epoch_courant());
+    CHECK(G.antimatiere.grams == 0.0,
+          "antimatiere : 5 ans sans la filiere ne produisent RIEN [GDD 19.3]");
+
+    // (b) QUALIFIEE, ELLE PRODUIT — ET LE DEBIT VIENT DE LA BRANCHE 6, PAS DE LA
+    // STATION. C etait le defaut : la puissance prise etait la MARGE DE NOVELLUS,
+    // si bien qu aucune recherche de branche 6 ne pouvait deplacer le debit. Le
+    // « vrai levier d equilibrage » [GDD 5.12.12] n etait pas branche sur son
+    // levier. On verifie desormais que le PALIER commande, et que la marge de la
+    // station n y est pour rien.
+    CHECK(fen::app::antimatter_tier(G) == fen::rel::AntimatterTier::None,
+          "5.12.12 : sans aucun palier de branche 6, il n y a pas d usine");
+    if (auto* n = G.tree.find_mut("antimatiere")) n->trl = fen::tech::TRL_OPERATIONAL;
+    s.jeu.ares.assurer(s.jeu.agence, s.jeu.epoch_courant());
+    CHECK(fen::app::antimatter_tier(G) == fen::rel::AntimatterTier::Mature,
+          "5.12.12 : le noeud antimatiere qualifie porte le palier ABOUTI");
+    const double marge0 = G.station.power_margin_kw();
+    s.jeu.avancer_temps(365.0);
+    s.jeu.ares.assurer(s.jeu.agence, s.jeu.epoch_courant());
+    const double debit = G.antimatiere.prod.rate_g_yr();
+    std::printf("     antimatiere : %.3e g apres 1 an (usine %.0e W, marge station %.0f kW)\n",
+                G.antimatiere.grams, G.antimatiere.prod.plant_power_w, marge0);
+    CHECK(G.antimatiere.grams > 0.0,
+          "antimatiere : qualifiee, le stock MONTE [GDD 5.12.12]");
+    CHECK(G.antimatiere.prod.plant_power_w > marge0 * 1000.0 * 1.0e6,
+          "5.12.12 : l usine n est PAS un module de station (six ordres au-dessus)");
+    CHECK(debit > 0.0, "5.12.12 : ... et son debit est celui du palier, pas de la marge");
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // (c) LE PROGRAMME DE FIN DE JEU EST COUPLÉ À LA SANTÉ DE L'AGENCE
+    // ═══════════════════════════════════════════════════════════════════════
+    // TROUVÉ EN RECALIBRANT : l'oracle précédent avançait de 200 puis 200 ans et
+    // concluait « le stock CONVERGE — 200 ans de plus n'ajoutent rien ». Il
+    // passait, et POUR UNE RAISON FAUSSE : au bout de quelques années sans aucun
+    // programme, l'agence fait FAILLITE et `Jeu::avancer_temps` s'arrête net
+    // (« faillite : le calendrier s'arrête là »). Le stock ne convergeait pas, LE
+    // TEMPS S'ARRÊTAIT. Tant que la calibration rendait le stock dérisoire, les
+    // deux se ressemblaient assez pour que personne ne les distingue.
+    //
+    // ET LE FAIT DE JEU QUE CELA RÉVÈLE EST MEILLEUR QUE L'ORACLE PERDU : les
+    // 140 ans d'accumulation de [GDD 3.5] ne s'obtiennent PAS en laissant filer le
+    // temps. La pression d'inactivité [GDD 13.2] les interdit. Il faut faire
+    // tourner une agence pendant plusieurs vies pour payer un vol relativiste —
+    // c'est exactement ce que « atteindre la fin de la branche 6 demande souvent
+    // plusieurs vies » veut dire, et cela a désormais un mécanisme.
+    {
+      Session inactif;
+      inactif.nouvelle_partie("Oracle Inaction", ModeAide::Normal);
+      inactif.tick(0.0);
+      auto& Gi = *inactif.jeu.ares.etat;
+      if (auto* n = Gi.tree.find_mut("antimatiere")) n->trl = fen::tech::TRL_OPERATIONAL;
+      inactif.jeu.avancer_temps(365.0 * 140.0);
+      CHECK(inactif.jeu.game_over,
+            "13.2 : 140 ans sans rien produire = faillite, le calendrier s arrete");
+      CHECK(fen::rel::beta_from_antimatter(5000.0, Gi.antimatiere.grams)
+                < fen::rel::AntimatterProduction::CALIB_TARGET_BETA,
+            "3.5 : ... donc l inaction n achete PAS le regime relativiste");
+    }
+
+    // Agence tenue à flot — la seule façon d'atteindre l'horizon de [GDD 3.5].
+    // Le stock converge alors vraiment, et c'est la FUITE qui le borne.
+    for (int an = 0; an < 400; ++an) {
+      s.jeu.agence.tresorerie += 60000.0;   // une agence qui produit
+      s.jeu.avancer_temps(365.0);
+      s.jeu.ares.assurer(s.jeu.agence, s.jeu.epoch_courant());
+      if (s.jeu.game_over) break;
+    }
+    CHECK(!s.jeu.game_over, "13.2 : une agence financee traverse les quatre siecles");
+    // LE STOCK CONVERGE VERS L'ÉQUILIBRE, PAR EN DESSOUS, SANS JAMAIS LE PASSER.
+    // La constante de temps est 1/λ = 274 ans : c'est ELLE qui dit combien de
+    // siècles il faut, et non un chiffre rond — d'où le fait que quatre siècles
+    // n'y suffisent pas. On en laisse passer cinq.
+    const double gain_400 = G.antimatiere.grams;
+    for (int an = 0; an < 1100; ++an) {
+      s.jeu.agence.tresorerie += 60000.0;
+      s.jeu.avancer_temps(365.0);
+      s.jeu.ares.assurer(s.jeu.agence, s.jeu.epoch_courant());
+    }
+    const double eq = G.antimatiere.equilibrium_g();
+    std::printf("     antimatiere : 1500 ans -> %.3e g pour un equilibre de %.3e g\n",
+                G.antimatiere.grams, eq);
+    CHECK(G.antimatiere.grams > gain_400,
+          "antimatiere : quatre siecles ne suffisent pas — le stock monte encore");
+    CHECK(G.antimatiere.grams > 0.99 * eq,
+          "5.12.12 : ... a cinq constantes de temps il est a 1 % de l equilibre");
+    CHECK(G.antimatiere.grams <= eq * (1.0 + 1e-9),
+          "5.12.12 : ... et il l approche PAR EN DESSOUS, sans jamais le passer");
+    CHECK(G.antimatiere.grams <= G.antimatiere.prod.confinement_capacity_g + 1e-12,
+          "antimatiere : le confinement n est jamais depasse");
+    CHECK(G.antimatiere.borne_par_la_fuite(),
+          "5.12.12 : ... et ce qui le borne est la FUITE, pas le reservoir");
+
+    // (d) ET LE VERDICT REMONTE JUSQU AU VOL : le beta d une mission relativiste
+    // est celui que l antimatiere EMBARQUEE achete. LA CALIBRATION [Annexe E] A
+    // ETE TRANCHEE PAR LE CORPS DU GDD, et le verdict s est donc inverse : ce
+    // stock-la FRANCHIT le seuil, ce que [GDD 6.7.2] exige (« seule l antimatiere
+    // franchit beta >= 0,3 »). Deux vies d accumulation, et le regime existe.
+    const double b = fen::rel::beta_from_antimatter(5000.0, G.antimatiere.grams);
+    std::printf("     antimatiere : stock a l equilibre %.3e g -> beta = %.3f "
+                "sur une sonde de 5 t\n", G.antimatiere.grams, b);
+    CHECK(b > fen::rel::BETA_THRESHOLD,
+          "6.7.2 : au palier abouti, le stock atteignable FRANCHIT le seuil");
+    CHECK(b >= fen::rel::AntimatterProduction::CALIB_TARGET_BETA,
+          "6.7.2 : ... et depasse la cible de calibration beta = 0,3");
+    // Ce qui reste hors d atteinte l est pour une raison PHYSIQUE et non par
+    // decret : le verrou de l aller-retour [GDD 6.7.4], ratio a la puissance 4.
+    // Mesure sur l ARCHITECTURE HABITEE de reference, qui est la seule ou le
+    // relativisme a un interet (decision de l utilisateur) : un aller-retour a
+    // beta = 0,9 demande 4,3e15 g contre 9,6e9 disponibles — cinq ordres.
+    CHECK(G.antimatiere.hors_atteinte(fen::rel::antimatter_needed_g(
+              fen::rel::AntimatterProduction::CALIB_DRY_MASS_KG, 0.9,
+              fen::rel::AntimatterProduction::CALIB_BURNS)),
+          "6.7.4 : l aller-retour HABITE a 0,9 reste hors d atteinte — le ratio^4");
+    // Le chemin existe, et il est EXACT : un beta au-dela du seuil bascule
+    // l horloge sur la cinematique pure.
+    fen::mission::GeometrieHorloge gr;
+    gr.a_terre_m = gr.a_croisiere_m = gr.a_sejour_m = cst::AU;
+    gr.beta_croisiere = 0.7;
+    const double rap = fen::mission::rapport_horloge_bord(
+        fen::mission::FlightPhase::TransferCruise, gr);
+    CHECK(std::fabs(rap - 1.0 / fen::rel::lorentz_gamma(0.7)) < 1e-15,
+          "6.7 : au-dela du seuil, l horloge passe a la cinematique PURE (exacte)");
+    CHECK(rap < 0.72, "6.7 : ... et a beta=0,7 le bord ne bat plus qu a 71 % du sol");
+
+    // (e) LE STOCK SURVIT A LA SAUVEGARDE. Des annees d accumulation qui
+    // repartiraient de zero au rechargement remettraient le programme de fin de
+    // jeu a plat en silence.
+    {
+      fen::save::Writer w;
+      G.save(w);
+      fen::save::Reader r(w.bytes().data(), w.bytes().size());
+      fen::game::GameState G5 = G;
+      G5.antimatiere.grams = 0.0;
+      CHECK(G5.load(r), "antimatiere : la sauvegarde se relit");
+      CHECK(std::fabs(G5.antimatiere.grams - G.antimatiere.grams) < 1e-18,
+            "antimatiere : le stock survit au rechargement");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // (f) LE VOL RELATIVISTE A ENFIN UNE ARRIVEE [GDD 3.4, 9.3]
+    // ═══════════════════════════════════════════════════════════════════════
+    // `window_target_for_family` ne nommait AUCUNE cible a la famille
+    // « relativiste » : `transfer_tof_days` rendait 0, la croisiere restait
+    // ouverte (`dated == false`) et le vol ne revenait jamais. Toute la chaine
+    // antimatiere -> beta -> horloges existait pour un vol SANS DESTINATION.
+    // Elle en a une (Proxima, fait mesure), et la duree en decoule.
+    {
+      fen::mission::Mission m;
+      m.contract.id = "CAT-11";
+      m.contract.family = "relativiste";
+      m.contract.crewed = false;                 // sonde : deux poussees
+      m.contract.terms = fen::mission::contract_terms_for_family("relativiste");
+      m.state = fen::mission::MissionState::Launched;
+
+      // Sans antimatiere, rien a dater — et le modele le DIT plutot que
+      // d inventer une duree [GDD 6.8].
+      CHECK(fen::mission::transfer_tof_days(
+                m, fen::Epoch{s.jeu.epoch_courant()}, s.jeu.eph) == 0.0,
+            "6.8 : sans antimatiere embarquee, la croisiere reste non datee");
+
+      // AVEC L ARCHITECTURE HABITEE DE REFERENCE — la seule ou le relativisme a
+      // un interet (decision de l utilisateur, 2026-07-29) : six personnes, en
+      // aller-retour, donc quatre poussees [GDD 6.7.4].
+      m.contract.crewed = true;
+      m.beta_croisiere = fen::rel::beta_from_antimatter(
+          fen::rel::AntimatterProduction::CALIB_DRY_MASS_KG, G.antimatiere.grams,
+          fen::rel::AntimatterProduction::CALIB_BURNS);
+      const double tof = fen::mission::transfer_tof_days(
+          m, fen::Epoch{s.jeu.epoch_courant()}, s.jeu.eph);
+      m.tof_days = tof;
+      const double ans = tof / 365.25;
+      std::printf("     relativiste : beta = %.3f -> Proxima en %.1f ans (%.0f j)\n",
+                  m.beta_croisiere, ans, tof);
+      CHECK(tof > 0.0, "3.4 : la mission relativiste a desormais une duree");
+      // Elle ne peut pas battre la lumiere, et un aller-retour habite se compte
+      // en DECENNIES terrestres [GDD 9.3] — c est ce qui justifie que l agence
+      // tourne sous l adjoint pendant l absence.
+      CHECK(ans > fen::rel::PROXIMA_DISTANCE_LY,
+            "19.1 : ... et elle ne franchit pas la vitesse de la lumiere");
+      const double rt_ans = 2.0 * ans;
+      CHECK(rt_ans > 10.0 && rt_ans < 60.0,
+            "9.3 : ... et l aller-retour habite dure plusieurs DECENNIES terrestres");
+      // ET IL TIENT DANS UNE VIE [GDD 3.4] : c est la condition pour que l ecart
+      // d age pese sur la carriere au lieu de la terminer.
+      CHECK(rt_ans / fen::rel::lorentz_gamma(m.beta_croisiere) < 53.0,
+            "3.4 : ... sans depasser ce qu il reste de vie a l architecte");
+      // ET LA CHRONOLOGIE LA DATE : le gate d arrivee peut enfin chiffrer
+      // l attente, ce qu il ne pouvait pas faire sur une croisiere ouverte.
+      const fen::mission::FlightTimeline tl = fen::mission::build_flight_timeline(m);
+      CHECK(tl.dated, "4.1 : la chronologie du vol relativiste est DATEE");
+      CHECK(tl.duree_jours > 0.0, "4.1 : ... et sa duree est celle du transit");
+      // Plus l architecture est lourde, plus le vol est long : la duree DECOULE
+      // de l architecture [decision 10], elle n est pas une propriete du contrat.
+      // Le comparant est DERIVE de la reference, pas ecrit en dur : le jour ou
+      // l ancre bougera, l oracle suivra au lieu de s inverser en silence — ce
+      // qui vient d arriver quand la reference est passee d une sonde de 5 t a
+      // une architecture habitee de 183 t.
+      fen::mission::Mission lourd = m;
+      lourd.beta_croisiere = fen::rel::beta_from_antimatter(
+          4.0 * fen::rel::AntimatterProduction::CALIB_DRY_MASS_KG,
+          G.antimatiere.grams, fen::rel::AntimatterProduction::CALIB_BURNS);
+      CHECK(lourd.beta_croisiere < m.beta_croisiere,
+            "decision 10 : quadrupler la masse seche RALENTIT le vaisseau");
+      CHECK(fen::mission::transfer_tof_days(
+                lourd, fen::Epoch{s.jeu.epoch_courant()}, s.jeu.eph) > tof,
+            "decision 10 : ... donc il met PLUS longtemps — beta decoule de l architecture");
+
+      // (g) LE BETA FIGE SURVIT A LA SAUVEGARDE (V5). Le recalculer au
+      // chargement rendrait un vol deja parti sensible au stock d aujourd hui.
+      G.missions.push_back(m);
+      fen::save::Writer w;
+      G.save(w);
+      fen::save::Reader r(w.bytes().data(), w.bytes().size());
+      CHECK(r.version() >= 5, "sauvegarde : le schema est passe en V5");
+      fen::game::GameState G6 = G;
+      G6.missions.clear();
+      CHECK(G6.load(r), "sauvegarde V5 : elle se relit");
+      bool trouve = false;
+      for (const auto& mm : G6.missions)
+        if (mm.contract.id == "CAT-11" && mm.beta_croisiere > 0.0) {
+          trouve = std::fabs(mm.beta_croisiere - m.beta_croisiere) < 1e-15;
+          break;
+        }
+      CHECK(trouve, "6.7 : le beta fige au feu vert survit au rechargement");
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 33. AUCUNE MISSION NE NAIT AVEC DES TERMES NULS [GDD 4.1]
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Trouve EN AUDITANT UNE CAPTURE : le bloc « BILAN DE VIABILITE » du poste
+  // CONTROLE affichait « 0 / 0 M EUR », « 0 / 0 mois », « P(SUCCES) 0,0 % » et un
+  // VERROU rouge dans chaque image en vol. La table des termes vivait dans une
+  // boucle interne a `seed_catalogue`, si bien que toute mission construite hors
+  // catalogue naissait vide. Une alarme fausse dans chaque image est pire qu une
+  // alarme absente : elle apprend a ne plus les lire.
+  {
+    // (a) LA TABLE COUVRE TOUTES LES FAMILLES DU CATALOGUE, et aucune ne rend
+    // des termes nuls — y compris le repli, qui doit rester utilisable.
+    Session s;
+    s.nouvelle_partie("Oracle Termes", ModeAide::Normal);
+    s.tick(0.0);
+    fen::game::GameState& G = *s.jeu.ares.etat;
+    bool tous_ok = true;
+    for (const auto& e : G.catalog.entries()) {
+      const fen::mission::Contract& t = e.contract.terms;
+      if (!(t.payload_kg > 0.0 && t.budget_musd > 0.0 &&
+            t.deadline_months > 0 && t.min_success_prob > 0.0))
+        tous_ok = false;
+      // ET LE CATALOGUE LIT BIEN LA MEME TABLE que tout le monde : c est la
+      // propriete qui empeche les deux de rediverger demain.
+      const fen::mission::Contract ref =
+          fen::mission::contract_terms_for_family(e.contract.family);
+      if (std::fabs(t.payload_kg - ref.payload_kg) > 1e-9 ||
+          std::fabs(t.budget_musd - ref.budget_musd) > 1e-9) tous_ok = false;
+    }
+    CHECK(tous_ok,
+          "4.1 : chaque entree du catalogue porte des termes non nuls, tires de LA table");
+
+    // (b) UNE FAMILLE INCONNUE TOMBE SUR UN REPLI UTILISABLE, pas sur zero :
+    // c est ce qui garantit qu une mission fabriquee a la main (harnais de
+    // capture, contenu futur) reste evaluable par `assess`.
+    const fen::mission::Contract inc =
+        fen::mission::contract_terms_for_family("famille_inexistante");
+    CHECK(inc.payload_kg > 0.0 && inc.budget_musd > 0.0 && inc.deadline_months > 0,
+          "4.1 : une famille inconnue rend un repli EVALUABLE, jamais des zeros");
+
+    // (c) ET LE BILAN DE VIABILITE DIT ALORS QUELQUE CHOSE. Avec des termes
+    // nuls, `assess` verrouillait sur les trois axes a la fois quel que soit le
+    // plan — le rouge ne portait aucune information.
+    fen::mission::Mission mv;
+    mv.contract.id = "TERMES-1";
+    mv.contract.family = "sat";
+    mv.contract.terms = fen::mission::contract_terms_for_family("sat");
+    mv.state = fen::mission::MissionState::Design;
+    G.missions.push_back(mv);
+    s.piloter_premiere_mission();
+    s.mission_plan.evaluate(*s.mission_courante());
+    CHECK(s.mission_plan.assessment.cost_total > 0.0,
+          "4.1 : avec de vrais termes, le bilan chiffre un cout");
+    CHECK(s.mission_plan.assessment.p_success > 0.0,
+          "4.1 : ... et une probabilite de succes non nulle");
+    CHECK(s.mission_plan.assessment.m0_kg > 0.0,
+          "4.1 : ... et une masse au decollage non nulle");
+    // Le meme plan sur des termes NULS verrouille TOUT : la demonstration que
+    // l ancienne capture ne montrait rien d exploitable. Le rouge y etait
+    // permanent, donc sans information.
+    fen::mission::Mission mz = mv;
+    mz.contract.terms = fen::mission::Contract{};
+    fen::mission::MissionPlan pz = s.mission_plan;
+    pz.evaluate(mz);
+    // LA MESURE CORRIGE CE QUE J AVAIS ECRIT ICI : ce ne sont pas les trois axes
+    // qui tombent, ce sont EXACTEMENT ceux dont le terme nul est une BORNE
+    // SUPERIEURE — budget (cout <= 0 : impossible) et calendrier (duree <= 0 :
+    // impossible). La masse passe (un lanceur souleve toujours une charge nulle)
+    // et le risque aussi (p_success >= 0 est toujours vrai). L axe MASSE ne
+    // tombait dans la capture que parce que les consommables d un aller-retour
+    // martien y ajoutaient 114 t — un fait de la mission, pas des termes.
+    CHECK(!pz.assessment.fits_budget && !pz.assessment.fits_schedule,
+          "4.1 : un terme nul qui est une BORNE SUPERIEURE est impossible a tenir");
+    CHECK(pz.assessment.fits_mass && pz.assessment.fits_risk,
+          "4.1 : ... alors que masse et risque passent — le rouge etait donc muet");
+    CHECK(!pz.assessment.ok, "4.1 : verdict rouge, quel que soit le plan");
+
+    // (d) UN ARRET PRECOCE NOMME SA CAUSE, il n enumere pas des symptomes.
+    // TROUVE EN AUDITANT LA CAPTURE : un aller-retour martien habite pese 194 t
+    // au decollage, aucun lanceur ne le souleve, `assess` s arrete la — et
+    // `finalize` ecrasait « AUCUN LANCEUR NE SOULEVE CETTE MASSE » par
+    // « MASSE BUDGET CALENDRIER RISQUE », dont trois quarts n avaient jamais ete
+    // calcules. Un refus doit nommer ce qui manque (piege n°42).
+    fen::mission::Contract enorme = fen::mission::contract_terms_for_family("sat");
+    enorme.payload_kg = 5.0e6;                       // 5000 t : hors de tout lanceur
+    fen::mission::Mission mm2 = mv;
+    mm2.contract.terms = enorme;
+    fen::mission::MissionPlan pm = s.mission_plan;
+    pm.evaluate(mm2);
+    CHECK(!pm.assessment.fits_mass, "4.1 : 5000 t ne decollent pas");
+    // DEPUIS L ASSEMBLAGE ORBITAL, la cause exacte a change et elle est MEILLEURE :
+    // ce n est plus « aucun lanceur » mais « le rendez-vous automatise n est pas
+    // qualifie ». On epingle donc la PROPRIETE voulue et non la formulation —
+    // le refus doit donner une DIRECTION, c est-a-dire nommer une techno.
+    CHECK(pm.assessment.why.find("RECHERCHER") != std::string::npos ||
+              pm.assessment.why.find("LANCEUR") != std::string::npos,
+          "4.1 : ... et le refus NOMME la cause, il ne liste pas les symptomes");
+    CHECK(pm.assessment.why.find("rdv_automatise") != std::string::npos,
+          "5.2 : ... ici, que l assemblage orbital n est pas encore qualifie");
+    CHECK(pm.assessment.why.find("CALENDRIER") == std::string::npos &&
+              pm.assessment.why.find("RISQUE") == std::string::npos,
+          "4.1 : ... sans accuser des axes que l etude n a jamais atteints");
+    CHECK(pm.assessment.cost_total == 0.0 && pm.assessment.p_success == 0.0,
+          "4.1 : ces axes valent zero parce qu ils sont INCONNUS, pas mauvais");
+    CHECK(!pm.assessment.ok, "4.1 : le verdict reste NON, evidemment");
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 34. LE CATALOGUE EST-IL PHYSIQUEMENT REALISABLE ? [GDD 4.1, 5.4, 12.1]
+  // ═══════════════════════════════════════════════════════════════════════════
+  // AUDIT EXHAUSTIF, parce que « la plupart des contrats passent » n est pas une
+  // reponse. Mesure de depart : avec TOUT l arbre qualifie et le rang Directeur,
+  // CINQ contrats sur onze etaient bloques par le plafond des lanceurs (8 300 kg),
+  // dont trois dont la charge NUE le depassait. Deux causes, toutes deux du
+  // contenu NOMME mais non connecte :
+  //   . `lanceur_super_lourd` etait un noeud d arbre, prerequis de CAT-09, qui ne
+  //     debloquait AUCUN lanceur — un prerequis qui ment ;
+  //   . les quatre noeuds « lanceur » de la branche 1 ne gardaient RIEN : toute la
+  //     gamme etait disponible des la premiere mission.
+  {
+    Session s;
+    s.nouvelle_partie("Oracle Catalogue", ModeAide::Normal);
+    s.tick(0.0);
+    fen::game::GameState& G = *s.jeu.ares.etat;
+
+    // (a) CHAQUE LANCEUR EST ADOSSE A UN NOEUD DE L ARBRE, et chaque noeud
+    // « lanceur » de l arbre debloque un lanceur. Sans cette bijection, soit un
+    // prerequis ne debloque rien, soit un lanceur est gratuit.
+    bool bijection = true;
+    for (const auto& L : fen::mission::launchers()) {
+      if (L.tech_id.empty()) { bijection = false; continue; }
+      if (G.tree.find(L.tech_id) == nullptr) bijection = false;
+    }
+    CHECK(bijection, "5.4 : chaque lanceur est qualifie par un noeud QUI EXISTE");
+    int n_noeuds = 0;
+    for (const auto& n : G.tree.all())
+      if (n.id.rfind("lanceur_", 0) == 0) ++n_noeuds;
+    CHECK(n_noeuds == (int)fen::mission::launchers().size(),
+          "5.4 : autant de lanceurs que de noeuds 'lanceur_' — aucun ne ment");
+
+    // (b) LA BRANCHE 1 GARDE VRAIMENT. Sans le noeud, le lanceur n est pas
+    // achetable — et le refus NOMME la techno a rechercher (piege n°42).
+    fen::mission::Mission ml;
+    ml.contract.id = "CATAL-1";
+    ml.contract.family = "habite";                 // 13,3 t : demande le lourd
+    ml.contract.crewed = true;
+    ml.contract.terms = fen::mission::contract_terms_for_family("habite");
+    ml.state = fen::mission::MissionState::Design;
+    G.missions.push_back(ml);
+    s.piloter_premiere_mission();
+    if (auto* n = G.tree.find_mut("lanceur_lourd")) n->trl = 4;   // NON qualifie
+    if (auto* n = G.tree.find_mut("lanceur_super_lourd")) n->trl = 4;
+    s.evaluer_plan();
+    CHECK(!s.mission_plan.assessment.fits_mass,
+          "5.4 : sans le noeud, le lanceur qui souleverait n est pas achetable");
+    CHECK(s.mission_plan.assessment.why.find("lanceur_lourd") != std::string::npos,
+          "5.4 : ... et le refus NOMME la techno a rechercher (piege n°42)");
+    // Et « non qualifie » se distingue de « aucun lanceur ne souleve » : une
+    // seule des deux situations se resout en cherchant.
+    CHECK(s.mission_plan.assessment.why.find("NON QUALIFIE") != std::string::npos,
+          "5.4 : 'non qualifie' n est pas 'impossible' — deux verdicts distincts");
+    if (auto* n = G.tree.find_mut("lanceur_lourd")) n->trl = fen::tech::TRL_OPERATIONAL;
+    s.evaluer_plan();
+    CHECK(s.mission_plan.assessment.fits_mass,
+          "5.4 : la recherche aboutie DEBLOQUE reellement le vol");
+
+    // (c) L INVARIANT DECLARE DE LA TABLE DES TERMES : « cale pour qu un plan
+    // raisonnable au rang requis soit VIABLE ». Un contrat dont le budget ne
+    // paie meme pas la FUSEE est du contenu casse — c etait le cas de CAT-09
+    // (1 200 M$ de budget, 1 400 M$ de lanceur). On epingle le plancher
+    // economique, qui ne depend d aucun choix de conception.
+    for (auto& n : const_cast<std::vector<fen::tech::TechNode>&>(G.tree.all()))
+      n.trl = fen::tech::TRL_OPERATIONAL;
+    G.career.rank = fen::career::Rank::Directeur;
+    int n_viables = 0, n_hors_portee = 0;
+    bool plancher_ok = true;
+    for (const auto& e : G.catalog.entries()) {
+      fen::mission::Mission m;
+      m.contract = e.contract;
+      m.contract.terms = fen::mission::contract_terms_for_family(e.contract.family);
+      m.state = fen::mission::MissionState::Qualification;
+      G.missions.clear();
+      G.missions.push_back(m);
+      s.piloter_premiere_mission();
+      s.mission_plan = fen::mission::MissionPlan{};
+      s.evaluer_plan();
+      const auto& A = s.mission_plan.assessment;
+      if (!A.fits_mass) { ++n_hors_portee; continue; }
+      ++n_viables;
+      const double prix_fusee = fen::mission::launchers()[A.launcher_index].cost_musd;
+      if (m.contract.terms.budget_musd < prix_fusee) {
+        plancher_ok = false;
+        std::printf("     catalogue : %s budget %.0f < lanceur %.0f M$ !\n",
+                    e.contract.id.c_str(), m.contract.terms.budget_musd, prix_fusee);
+      }
+    }
+    std::printf("     catalogue : %d contrats realisables en masse, %d hors de portee\n",
+                n_viables, n_hors_portee);
+    CHECK(plancher_ok,
+          "4.1 : aucun contrat n a un budget inferieur au prix de sa fusee");
+    // (d) ET LA MESURE FIXE LE NOMBRE, pour qu une regression se voie. DEUX
+    // contrats restent hors de portee d un lancement UNIQUE, et les deux le sont
+    // pour des raisons PHYSIQUES documentees, pas par oubli :
+    //   . CAT-10 (cargo NEP, 152 t meme en 4 etages) : il faudrait un assemblage
+    //     en orbite, que le GDD ne nomme pas — a ne pas inventer ;
+    //   . CAT-11 (relativiste, 30 km/s) : 346 000 TONNES en chimique. C est
+    //     Tsiolkovsky, et c est precisement pourquoi [GDD 19.3] reserve ce regime
+    //     a l antimatiere.
+    // AVANT L ASSEMBLAGE ORBITAL ils etaient DEUX ; CAT-10 (cargo NEP, 181 t)
+    // est devenu realisable en deux tirs du super-lourd. Ne reste que CAT-11 :
+    // 346 495 TONNES en chimique pour 30 km/s, soit plus de vingt lancements —
+    // c est Tsiolkovsky, et c est pourquoi [GDD 19.3] reserve ce regime a
+    // l antimatiere. Aucun assemblage ne rattrape une exponentielle.
+    CHECK(n_hors_portee == 1,
+          "4.1 : un SEUL contrat hors de portee, et pour raison physique [GDD 19.3]");
+    CHECK(n_viables == (int)G.catalog.entries().size() - 1,
+          "4.1 : ... tous les autres sont realisables en masse");
+
+    // (e) ET L ARBITRAGE MASSE / PROTECTION / MISSION MORD POUR DE BON [GDD 6.6].
+    // Le GDD le NOMME depuis toujours ; il ne coutait rien tant qu aucun plafond
+    // de lanceur n existait. Mesure : sur un aller-retour martien habite, la
+    // SEULE decision de blindage fait passer d une architecture lancable a une
+    // architecture qui ne l est plus — le blindage pese en charge utile, et
+    // Tsiolkovsky multiplie ce poids par le rapport de masse.
+    fen::mission::Mission mm9;
+    mm9.contract.id = "ARBITRAGE";
+    mm9.contract.family = "mars_habite";
+    mm9.contract.crewed = true;
+    mm9.contract.terms = fen::mission::contract_terms_for_family("mars_habite");
+    mm9.state = fen::mission::MissionState::Qualification;
+    G.missions.clear();
+    G.missions.push_back(mm9);
+    s.piloter_premiere_mission();
+    s.mission_plan = fen::mission::MissionPlan{};
+    s.evaluer_plan();
+    const auto A_nu = s.mission_plan.assessment;
+    s.mission_plan.blindage = fen::env::Shielding{10.0, 1.0};
+    s.evaluer_plan();
+    const auto A_bl = s.mission_plan.assessment;
+    std::printf("     arbitrage 6.6 : %.0f t / %d tir(s) / P=%.3f / %.0f M$"
+                "   ->  %.0f t / %d tir(s) / P=%.3f / %.0f M$  (avec 10 g/cm2)\n",
+                A_nu.m0_kg / 1000.0, A_nu.assemblage.n_lancements, A_nu.p_launcher,
+                A_nu.cost_total,
+                A_bl.m0_kg / 1000.0, A_bl.assemblage.n_lancements, A_bl.p_launcher,
+                A_bl.cost_total);
+    CHECK(A_bl.m0_kg > A_nu.m0_kg,
+          "6.6 : le blindage pese en charge utile, et Tsiolkovsky le multiplie");
+    // ═══ L ASSEMBLAGE A CHANGE LA NATURE DE L ARBITRAGE, PAS SA SEVERITE ═══
+    // AVANT, proteger l equipage rendait le vol NON LANCABLE : une falaise. Le
+    // vol reste desormais possible, mais il se paie — en TIRS, donc en RISQUE et
+    // en ARGENT. Un arbitrage gradue vaut mieux qu un mur : le joueur peut
+    // choisir combien de protection il achete, au lieu de buter dessus.
+    CHECK(A_bl.fits_mass,
+          "5.2 : l assemblage rend l architecture blindee LANCABLE");
+    // CE QUI EST UNE LOI, ET CE QUI N EN EST PAS UNE. Blinder ajoute TOUJOURS de
+    // la masse et TOUJOURS du cout ; le nombre de tirs, lui, ne monte que si la
+    // campagne FRANCHIT un palier de lanceur. Ma premiere version exigeait un tir
+    // de plus a tous les coups — c etait decrire l endroit ou la base se trouvait,
+    // pas une propriete du modele. Monotonie ici, franchissement plus bas.
+    CHECK(A_bl.cost_total > A_nu.cost_total,
+          "6.6 : la protection se paie TOUJOURS. Elle ne se decrete pas");
+    CHECK(A_bl.assemblage.n_lancements >= A_nu.assemblage.n_lancements,
+          "6.6 : ... et elle ne fait JAMAIS baisser le nombre de tirs");
+    CHECK(A_bl.p_launcher <= A_nu.p_launcher,
+          "6.6 : ... ni monter la fiabilite du segment de mise en orbite");
+    // LE FRANCHISSEMENT, DEMONTRE : un blindage assez lourd fait basculer la
+    // campagne d un palier, et c est LA que l arbitrage devient exponentiel.
+    s.mission_plan.blindage = fen::env::Shielding{30.0, 1.0};
+    s.evaluer_plan();
+    const auto A_lourd = s.mission_plan.assessment;
+    std::printf("     franchissement : 30 g/cm2 -> %.0f t / %d tirs / P=%.3f\n",
+                A_lourd.m0_kg / 1000.0, A_lourd.assemblage.n_lancements,
+                A_lourd.p_launcher);
+    CHECK(A_lourd.assemblage.n_lancements > A_nu.assemblage.n_lancements,
+          "6.6 : un blindage lourd FRANCHIT un palier de campagne");
+    CHECK(A_lourd.p_launcher < A_nu.p_launcher,
+          "6.6 : ... et c est la que le risque monte, en R^N");
+    // C est exactement l architecture martienne REELLE (DRA 5.0 : ~850 t, 7 a 9
+    // lancements). Le modele retrouve la contrainte au lieu de la contourner.
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 35. ARES DIT OU ALLER ; L ARCHITECTE DIT COMMENT [GDD 3.1]
+  // ═══════════════════════════════════════════════════════════════════════════
+  // « L Architecte Mission decide COMMENT concevoir et conduire, dans des
+  // enveloppes budgetaires imposees par ARES. Il ne fixe pas le budget. »
+  // Le contrat portait pourtant `payload_kg = 20 000` pour Mars habite : une
+  // masse d HABITAT, c est-a-dire une architecture deja choisie, posee par le
+  // client. Elle est desormais DERIVEE de deux decisions d architecte (combien
+  // d equipage, combien de volume chacun) et d un fait mesure.
+  {
+    using namespace fen::mission;
+    // (a) LE FAIT : 137 kg/m3, les modules pressurises de l ISS. Trois modules,
+    // trois agences, la meme densite a 1 % pres — ce n est pas un reglage.
+    CHECK(std::fabs(MASSE_HABITAT_KG_PAR_M3 * 106.0 - 14515.0) < 200.0,
+          "12.1 : la densite retrouve Destiny (14 515 kg / 106 m3)");
+    CHECK(std::fabs(MASSE_HABITAT_KG_PAR_M3 * 75.0 - 10275.0) < 200.0,
+          "12.1 : ... et Columbus (10 275 kg / 75 m3)");
+    CHECK(std::fabs(MASSE_HABITAT_KG_PAR_M3 * 116.0 - 15900.0) < 200.0,
+          "12.1 : ... et Kibo (15 900 kg / 116 m3)");
+
+    // (b) L HABITAT EST UNE CONSEQUENCE, ET ELLE EST LINEAIRE EN CE QUI LA CAUSE.
+    CHECK(std::fabs(masse_habitat_kg(6) - 6 * 25.0 * MASSE_HABITAT_KG_PAR_M3) < 1e-9,
+          "3.1 : la masse d habitat se DEDUIT de l equipage et du volume");
+    CHECK(masse_habitat_kg(12) > 1.99 * masse_habitat_kg(6),
+          "3.1 : deux fois plus d equipage, deux fois plus de coque");
+    CHECK(masse_habitat_kg(6, 12.5) < masse_habitat_kg(6, 25.0),
+          "3.1 : serrer l habitat l allege — c est une DECISION, pas un forfait");
+    CHECK(masse_habitat_kg(0) == 0.0, "3.1 : pas d equipage, pas d habitat");
+    // ... et le blindage suit la MEME geometrie : un habitat serre a moins de
+    // surface a proteger. Les deux decisions ne sont pas independantes.
+    CHECK(masse_blindage_kg(6, 10.0, 12.5) < masse_blindage_kg(6, 10.0, 25.0),
+          "6.6 : un habitat serre a moins de surface a blinder");
+
+    // (c) LE CONTRAT NE PRESCRIT PLUS L ARCHITECTURE. Ce qu il garde est la
+    // charge que le CLIENT fournit — la ou la masse EST l objectif.
+    const Contract mars = contract_terms_for_family("mars_habite");
+    CHECK(mars.payload_kg < masse_habitat_kg(crew_size_for_family("mars_habite")),
+          "3.1 : la charge du CONTRAT est plus petite que l habitat qu elle exigeait");
+    CHECK(mars.budget_musd > 0.0 && mars.deadline_months > 0 && mars.min_success_prob > 0.0,
+          "3.1 : ce qu ARES impose reste l ENVELOPPE — argent, delai, fiabilite");
+
+    // (c bis) L EFFECTIF EST PORTE PAR L OBJECTIF, plus par une table relue
+    // partout. Deux contrats de la meme filiere peuvent donc demander des
+    // equipages differents — c est ARES qui le dit, pas la famille.
+    CHECK(mars.crew_required > 0,
+          "3.1 : un contrat habite PORTE l effectif que l objectif demande");
+    CHECK(contract_terms_for_family("sat").crew_required == 0,
+          "3.1 : ... et un contrat robotique n en demande aucun");
+    // ET TOUTE ENTREE DU CATALOGUE HABITEE EN PORTE UN. Un contrat marque
+    // `crewed` avec zero personne a bord serait un equipage fantome : vivres
+    // nuls, dose nulle, reserves inepuisables — exactement le defaut que cette
+    // bascule a fait apparaitre dans quatre fixtures d oracles.
+    {
+      Session sc;
+      sc.nouvelle_partie("Oracle Objectif", ModeAide::Normal);
+      sc.tick(0.0);
+      bool coherent = true;
+      for (const auto& e : sc.jeu.ares.etat->catalog.entries())
+        if (e.contract.crewed != (e.contract.terms.crew_required > 0)) coherent = false;
+      CHECK(coherent,
+            "3.1 : `crewed` et `crew_required` disent la MEME chose, pour les 11 contrats");
+    }
+
+    // (d) ET LE VOLUME PAR PERSONNE MORD SUR LA MASSE AU DECOLLAGE. C est le
+    // test qui prouve que la decision d architecte traverse tout le modele
+    // jusqu a Tsiolkovsky, au lieu de rester un champ decoratif.
+    Session s;
+    s.nouvelle_partie("Oracle Architecte", ModeAide::Normal);
+    s.tick(0.0);
+    fen::game::GameState& G = *s.jeu.ares.etat;
+    for (auto& n : const_cast<std::vector<fen::tech::TechNode>&>(G.tree.all()))
+      n.trl = fen::tech::TRL_OPERATIONAL;
+    G.career.rank = fen::career::Rank::Directeur;
+    Mission mh;
+    mh.contract.id = "ARCHI-1";
+    mh.contract.family = "mars_habite";
+    mh.contract.crewed = true;
+    mh.contract.terms = contract_terms_for_family("mars_habite");
+    mh.state = MissionState::Qualification;
+    G.missions.push_back(mh);
+    s.piloter_premiere_mission();
+    s.mission_plan = MissionPlan{};
+    s.evaluer_plan();
+    const double m0_large = s.mission_plan.assessment.m0_kg;
+    const double hab_large = s.mission_plan.masse_habitat_kg_;
+    s.mission_plan.volume_par_personne_m3 = 15.0;      // habitat serre
+    s.evaluer_plan();
+    const double m0_serre = s.mission_plan.assessment.m0_kg;
+    std::printf("     architecte : 25 m3/pers -> %.1f t d habitat, %.0f t au decollage"
+                "  |  15 m3/pers -> %.1f t, %.0f t\n",
+                hab_large / 1000.0, m0_large / 1000.0,
+                s.mission_plan.masse_habitat_kg_ / 1000.0, m0_serre / 1000.0);
+    CHECK(hab_large > 0.0, "3.1 : une croisiere habitee emporte sa propre coque");
+    CHECK(m0_serre < m0_large,
+          "3.1 : le VOLUME choisi par l architecte change la masse au decollage");
+    CHECK(s.mission_plan.masse_habitat_kg_ < hab_large,
+          "3.1 : ... par l habitat, et par le blindage qui en depend");
+
+    // (e) MAIS UN VOL NEAR-EARTH N EMPORTE PAS D HABITAT : il s amarre a une
+    // station existante — c est tres exactement a ca qu une station sert. Le
+    // critere est un FAIT deja calcule (y a-t-il un aller-retour date), pas une
+    // liste de familles a tenir a jour.
+    Mission ml;
+    ml.contract.id = "ARCHI-2";
+    ml.contract.family = "habite";
+    ml.contract.crewed = true;
+    ml.contract.terms = contract_terms_for_family("habite");
+    ml.state = MissionState::Qualification;
+    G.missions.clear();
+    G.missions.push_back(ml);
+    s.piloter_premiere_mission();
+    s.mission_plan = MissionPlan{};
+    s.evaluer_plan();
+    CHECK(s.mission_plan.crew_round_trip_days == 0.0,
+          "9.4 : un vol habite near-Earth n a pas d aller-retour synodique");
+    CHECK(s.mission_plan.masse_habitat_kg_ == 0.0,
+          "3.1 : ... il s amarre a une station, il n emporte pas sa maison");
+    CHECK(s.mission_plan.vital.total_kg() > 0.0,
+          "9.4 : ... mais il emporte bien ses consommables");
   }
 
   std::printf("\nSESSION : %d oracles OK, %d en echec.\n", g_ok, g_ko);
