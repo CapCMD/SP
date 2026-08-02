@@ -24,6 +24,7 @@
 #include "fen/astro/Transfers.hpp"
 #include "fen/core/Constants.hpp"
 #include "fen/core/Rng.hpp"
+#include "fen/flight/Descent.hpp"        // [GDD 7.6] l'alunissage se calcule
 #include "fen/mission/Crew.hpp"
 #include "fen/mission/FlightTimeline.hpp"
 #include "fen/mission/MissionFsm.hpp"
@@ -37,6 +38,16 @@ namespace fen::mission {
 // RÉELS et DÉCLARÉS [GDD 6.8]. Ce n'est pas le Δv de mise en orbite (le lanceur
 // s'en charge) mais celui que le VÉHICULE doit fournir ensuite.
 inline double trajectory_dv_for_family(const std::string& family) {
+  // ═══ LE CISLUNAIRE, QUE LE GDD NOMMAIT SANS QU'IL EXISTE ═══
+  // [GDD 3.3] le rang Principal est DÉFINI par « vol habité cislunaire », [19.7]
+  // lui donne ses cinq verrous, [5.9] et [5.10] le nomment encore — et le
+  // catalogue n'avait AUCUNE mission lunaire sur ses onze entrées.
+  // Ce qui est ici est la part qui NE DÉPEND PAS du véhicule, et chaque terme a
+  // sa source : injection translunaire **3,1 km/s** est la ligne de l'annexe Δv
+  // du GDD ; insertion en orbite lunaire (~900 m/s) et injection retour
+  // (~1 000 m/s) sont les valeurs d'Apollo. L'ALUNISSAGE, lui, se DÉRIVE du
+  // moteur choisi — voir `evaluate` : il n'est pas dans ce forfait.
+  if (family == "lunaire_habite") return 5000.0;  // TLI 3100 + LOI 900 + TEI 1000
   if (family == "sat")          return 1800.0;   // LEO -> GEO (GTO + circularisation)
   if (family == "science")      return 3600.0;   // echappee + corrections
   if (family == "surface")      return 4300.0;   // interplanetaire + insertion/EDL
@@ -79,6 +90,13 @@ inline Contract contract_terms_for_family(const std::string& f) {
   else if (f == "service")   { t.payload_kg = 2000;  t.budget_musd = 190;  t.deadline_months = 30;  t.min_success_prob = 0.85; }
   else if (f == "habite")    { t.payload_kg = 8000;  t.budget_musd = 360;  t.deadline_months = 36;  t.min_success_prob = 0.95; }
   else if (f == "mars")      { t.payload_kg = 2200;  t.budget_musd = 380;  t.deadline_months = 54;  t.min_success_prob = 0.80; }
+  // CISLUNAIRE HABITÉ. La charge que le CLIENT fournit est de l'instrumentation
+  // de surface et des conteneurs d'échantillons — l'ALSEP d'Apollo pesait ~100 kg,
+  // et le séjour est court : on reste sous la charge martienne de CAT-04.
+  // Le budget est ancré sur Artemis III (~4 100 M$ pour UN lancement), déjà cité
+  // par la ligne martienne ci-dessous ; on prend 5 000 M$ parce que le profil
+  // comprend un ATTERRISSEUR et sa remontée, ce qu'Artemis III achète en plus.
+  else if (f == "lunaire_habite"){t.payload_kg = 900; t.budget_musd = 5000; t.deadline_months = 66; t.min_success_prob = 0.90; }
   // MARS HABITÉ. Deux corrections successives, toutes deux mesurées.
   // (1) BUDGET : 1 200 M$ ne payaient même pas le lanceur (1 400 M$ à lui seul),
   //     ce qui violait l'invariant DÉCLARÉ de cette table. Porté à 3 000 M$ —
@@ -96,6 +114,15 @@ inline Contract contract_terms_for_family(const std::string& f) {
   // soit ~1,5× le coût mesuré — et cela reste conservateur pour une mission
   // phare vers Jupiter (Europa Clipper, sans propulsion nucléaire : ~5 200 M$).
   else if (f == "nep")       { t.payload_kg = 12000; t.budget_musd = 4500; t.deadline_months = 60;  t.min_success_prob = 0.85; }
+  // ORBITEUR DU SYSTÈME SOLAIRE EXTERNE (CAT-13). La charge est celle du CLIENT,
+  // c'est-à-dire l'instrumentation : Juno emportait **173 kg** de charge utile
+  // scientifique, Galileo ~118 kg pour l'orbiteur plus une sonde atmosphérique de
+  // 339 kg — on prend 400 kg, la classe Galileo. Le budget est ancré sur le coût
+  // publié de Juno (**1 460 M$** sur tout le cycle de vie) ; il reste bien en
+  // dessous d'Europa Clipper (~5 200 M$), déjà cité par la ligne NEP. Le délai est
+  // celui du DÉVELOPPEMENT (`schedule_months` ne compte pas la croisière — c'est
+  // le calendrier de l'agence, pas celui du vol).
+  else if (f == "externe")   { t.payload_kg = 400;   t.budget_musd = 1460; t.deadline_months = 60;  t.min_success_prob = 0.80; }
   // RELATIVISTE : même principe, la coque de l'équipage est dérivée. Ce qui
   // reste est l'instrumentation scientifique que le client veut voir partir.
   else if (f == "relativiste"){t.payload_kg = 2000;  t.budget_musd = 2500; t.deadline_months = 120; t.min_success_prob = 0.80; }
@@ -108,6 +135,13 @@ inline int burns_for_family(const std::string& family) {
   if (family == "sat") return 2;                  // injection + circularisation
   if (family == "logistique" || family == "service" || family == "habite") return 3;
   if (family == "surface" || family == "mars" || family == "mars_habite") return 4;
+  // Orbiteur du système solaire externe : injection, manœuvre en espace profond
+  // (tout tour en porte une, et un transfert direct garde ses corrections), puis
+  // insertion. Trois allumages — le profil de Juno comme celui de Galileo.
+  if (family == "externe") return 3;
+  // Cislunaire habité : TLI, insertion lunaire, freinage de descente, remontée,
+  // injection retour. Cinq allumages, c'est le profil d'Apollo.
+  if (family == "lunaire_habite") return 5;
   return 2;
 }
 
@@ -209,6 +243,18 @@ struct MissionPlan {
   // le plan pur ne connaît pas l'arbre. Vide/non posé = aucun filtre, c'est le
   // mode MODÈLE des oracles de physique — jamais le mode JEU.
   LauncherFilter lanceurs_qualifies{};
+  // ═══ ET LES MOTEURS QU'ELLE SAIT QUALIFIER ═══ [GDD 5.4] — posé par le driver
+  // depuis l'arbre, exactement comme les lanceurs. Les DIX-HUIT pièces du
+  // catalogue sont commandables ; celles de la branche 6 (électrique, NTP, NEP,
+  // fusion) demandent leur nœud, sans quoi elle serait disponible d'emblée.
+  EngineFilter moteurs_qualifies{};
+  // ═══ LE VÉHICULE CONÇU AU POSTE CONCEPTION ═══ [GDD 4.1, 12.2]
+  // Posé par le driver, comme les lanceurs et les moteurs qualifiés : le plan
+  // pur ne connaît pas l'atelier. VIDE = mode MODÈLE (N étages identiques du
+  // moteur de programme), celui des oracles de physique pure. Non vide, c'est
+  // l'architecture du joueur qui vole — nombre d'étages, moteur et réservoir de
+  // chacun, source d'énergie, et le PARTAGE du Δv entre eux.
+  std::vector<vehicle::StageChoice> pile{};
   // ═══ CE QUE L'AGENCE SAIT FAIRE EN ORBITE ═══ [GDD 5.2 branche 1]
   // Rendez-vous automatisé, robotique d'assemblage, transfert d'ergols : trois
   // nœuds que l'arbre portait sans qu'ils débloquent rien. Posés par le driver,
@@ -220,6 +266,14 @@ struct MissionPlan {
   // la VITESSE, donc de la DURÉE, donc des vivres — la boucle de
   // `bilan_relativiste`. 0 ailleurs, sans effet.
   double     antimatiere_g{0.0};
+  // ═══ LA QUALITÉ DU CONFINEMENT, TELLE QUE LE PALIER LA DÉCLARE ═══
+  // [GDD 12.4, 5.12.12] Posée par le driver depuis `AntimatterProduction`, qui
+  // la porte DÉJÀ (`loss_rate_per_day`, calibré avec le reste de la fin de jeu).
+  // Un second taux écrit ici serait un nombre que personne n'a calibré.
+  double     antimatiere_fuite_par_jour{0.0};
+  // Durée d'exposition et couloir traversé [GDD 12.4, 7.8] — posés par le driver
+  // comme la fenêtre et l'arbre : une évaluation de plan reste pure.
+  EnvironnementMission env_mission{};
   Assessment assessment;
   bool       evaluated{false};
 
@@ -299,8 +353,88 @@ struct MissionPlan {
       }
     }
 
-    assessment = assess_multistage(terms, program, burns, dv, finite_loss, n_stages,
-                                   &lanceurs_qualifies, assemblage);
+    // ═══════════════════════════════════════════════════════════════════════
+    // L'ALUNISSAGE SE CALCULE, IL NE SE FORFAITE PAS [GDD 7.6, 19.7, 3.3]
+    // ═══════════════════════════════════════════════════════════════════════
+    // `flight/Descent.hpp` était le seul module du cœur qu'aucune suite
+    // n'exerçait, et ce qui lui manquait n'était pas un appelant mais une
+    // MISSION : le GDD nomme le cislunaire quatre fois et le catalogue n'en avait
+    // aucune. Le voici, et le Δv de freinage n'est PAS un forfait — il sort de
+    // l'intégration d'une descente à poussée constante en guidage gravity-turn,
+    // sous gravité centrale exacte.
+    //
+    // ET IL DÉPEND DU MOTEUR QUE LE JOUEUR A CHOISI : le rapport poussée/poids de
+    // surface décide de tout. Un moteur faible brûle son Δv à lutter contre la
+    // pesanteur (2 028 m/s à TWR 1,2), un moteur fort s'approche de la limite
+    // impulsionnelle (1 691 m/s à TWR 6, pour 1 680 de vitesse orbitale rasante).
+    // C'est « le vrai arbitrage d'ingénierie de tout alunisseur », et il devient
+    // celui du joueur — comme la centrale d'une filière alimentée.
+    double dv_alunissage = 0.0;
+    if (m.contract.family == "lunaire_habite" && !pile.empty()) {
+      const double g_lune = cst::MU_MOON / (cst::R_MOON * cst::R_MOON);
+      // Le DERNIER étage est l'atterrisseur : c'est lui qui pose et qui remonte.
+      const vehicle::EnginePart& lander = pile.back().engine_part();
+      // ═══ LE T/W SE MESURE SUR LA MASSE ALLUMÉE, ET ELLE EST UN POINT FIXE ═══
+      // Première rédaction : T/W calculé sur la seule charge utile (1 181 kg pour
+      // un RL10 de 102 kN) → **T/W 53**, un chiffre qui n'a aucun sens physique et
+      // qui poussait `descent_dv_required` hors de son domaine. La masse qui
+      // compte est celle de l'atterrisseur ALLUMÉ : sa structure et ses ergols de
+      // descente comprises. Elle dépend du Δv qu'on cherche, donc on la résout
+      // comme partout ailleurs dans ce fichier — par une passe préalable, amorcée
+      // sur la **limite impulsionnelle**, qui est un plancher exact.
+      const double v_circ = std::sqrt(cst::MU_MOON / cst::R_MOON);
+      const Assessment a0 = assess_multistage(terms, program, burns,
+                                              dv + 2.0 * v_circ, finite_loss, n_stages,
+                                              &lanceurs_qualifies, assemblage,
+                                              &moteurs_qualifies, &pile, &env_mission);
+      const double masse_allumee = a0.m0_dernier_etage_kg > 0.0
+                                     ? a0.m0_dernier_etage_kg : terms.payload_kg;
+      const double twr = (masse_allumee > 0.0)
+          ? lander.thrust_vac_n / (masse_allumee * g_lune) : 0.0;
+      if (twr <= 1.05) {
+        // REFUS AVANT TOUT LE RESTE, et il dit la direction (piège n°42) : sans
+        // T/W > 1 au sol lunaire, il n'y a pas d'atterrissage à dimensionner.
+        assessment = Assessment{};
+        assessment.ok = false;
+        assessment.why = "LE MOTEUR NE SOULEVE PAS L ATTERRISSEUR SUR LA LUNE (T/W < 1) : "
+                         "PRENDRE UN MOTEUR PLUS POUSSANT AU DERNIER ETAGE [GDD 6.3]";
+        evaluated = true;
+        return;
+      }
+      const double dv_desc = flight::descent_dv_required(
+          cst::MU_MOON, cst::R_MOON, twr, lander.isp_vac_s);
+      // DESCENTE **ET** REMONTÉE. Le modèle ne sait intégrer que le freinage ;
+      // on prend la remontée égale, et c'est une approximation DÉCLARÉE
+      // [GDD 12.5] : sur Apollo la remontée coûtait ~1 850 m/s pour ~2 050 de
+      // descente, donc l'écart réel est de l'ordre de 10 %. Le contrôle est le
+      // TOTAL — TLI + LOI + descente + remontée + TEI doit retrouver le budget
+      // post-LEO d'Apollo (~8,9 km/s), et c'est l'oracle qui le tient.
+      dv_alunissage = 2.0 * dv_desc;
+    }
+
+    assessment = assess_multistage(terms, program, burns, dv + dv_alunissage, finite_loss, n_stages,
+                                   &lanceurs_qualifies, assemblage, &moteurs_qualifies,
+                                   &pile, &env_mission);
+    // ═══ LE CONFINEMENT DE L'ANTIMATIÈRE EST UN RISQUE PERMANENT ═══
+    // [GDD 12.4] « Perte de confinement = ÉVÉNEMENT CATASTROPHIQUE. » On ne
+    // modélise donc pas une performance qui se dégrade mais la PROBABILITÉ
+    // qu'aucune perte n'ait lieu de tout le vol — un processus de Poisson, sur
+    // une durée qui, pour un aller-retour relativiste, se compte en DÉCENNIES.
+    //
+    // LE TAUX N'EST PAS INVENTÉ ICI : c'est celui que le palier d'antimatière
+    // DÉCLARE (`AntimatterProduction::loss_rate_per_day`), déjà calibré avec la
+    // fin de jeu. On identifie donc le risque d'une perte CATASTROPHIQUE au taux
+    // de perte déclaré du même confinement — une seule qualité de confinement,
+    // un seul nombre. C'est une approximation, et elle est DÉCLARÉE [GDD 12.5] ;
+    // l'autre voie serait une seconde constante que personne n'aurait calibrée.
+    if (antimatiere_g > 0.0 && antimatiere_fuite_par_jour > 0.0
+        && crew_round_trip_days > 0.0) {
+      const double survie = reliability::antimatter_confinement_survival(
+          crew_round_trip_days, 1.0, antimatiere_fuite_par_jour);
+      if (survie < assessment.p_filieres)
+        assessment.cause_filieres = "confinement de l antimatiere";
+      assessment.p_filieres *= survie;
+    }
     finalize(assessment, terms, p_physics);
     evaluated = true;
   }
@@ -361,20 +495,125 @@ struct WindowTarget { bool impose{false}; ephem::Body dep{}; ephem::Body arr{}; 
 inline WindowTarget window_target_for_family(const std::string& family) {
   if (family == "mars" || family == "mars_habite" || family == "surface")
     return {true, ephem::Body::EarthBary, ephem::Body::Mars};
+  // ORBITEUR DU SYSTÈME SOLAIRE EXTERNE : le contrat NOMME sa cible, donc la
+  // fenêtre est réelle — c'est justement la famille pour laquelle l'assistance
+  // gravitationnelle existe [GDD 5.11, compétences Senior]. La synodique
+  // Terre-Jupiter fait 398,9 jours : elle revient vite, mais elle décide de
+  // TOUT le reste (v∞ de départ, durée de transit, v∞ d'arrivée).
+  if (family == "externe")
+    return {true, ephem::Body::EarthBary, ephem::Body::Jupiter};
   return {false, {}, {}};
+}
+
+// ═══ L'ORBITE DE CAPTURE VISÉE, PAR CORPS D'ARRIVÉE ═══ [GDD 7.2, 6.8]
+// Une insertion n'est pas un chiffre : c'est le choix d'une orbite. Mars →
+// périastre bas (400 km) et apoastre très haut (30 000 km), le choix réel d'un
+// orbiteur martien. Géante → 10 rayons de périastre et 100 de demi-grand axe,
+// exactement l'orbite que `mission/Assistance.hpp` fait viser à un tour : une
+// capture jovienne basse coûterait des kilomètres par seconde que personne ne
+// dépense (Galileo : périjove ~4 R_J, apojove ~ 260 R_J).
+struct CaptureOrbit { double rp_m{}, a_m{}, mu{}; };
+
+inline CaptureOrbit capture_orbit_for(ephem::Body arr) {
+  if (arr == ephem::Body::Mars)
+    return {cst::R_MARS + 400.0e3, cst::R_MARS + 30000.0e3, cst::MU_MARS};
+  const double R = ephem::body_radius(arr);
+  return {10.0 * R, 100.0 * R, ephem::body_mu(arr)};
+}
+
+// ═══ UN SEUL RÉGLAGE DE FENÊTRE POUR TOUT LE JEU ═══ [défaut du 2026-08-01]
+// IL Y EN AVAIT DEUX, ET C'ÉTAIT LA VRAIE CAUSE. Le GATE de lancement utilisait
+// les paramètres par défaut (`slop_days` = 60) tandis que le calcul de la durée de
+// transit resserrait à un pas de balayage (10 j). Le gate ouvrait donc parce qu'un
+// bon transfert existait dans les 60 jours, pendant que la trajectoire, elle,
+// partait le jour même sur le meilleur transfert des 10 jours — c'est-à-dire un
+// mauvais. Mesuré le 2026-08-01 : `open = 1` avec `next_open_days = 50,6`
+// (contradiction visible), arc plongeant à **0,862 UA**, injection **5 827 m/s**
+// au lieu des ~3 600 attendus.
+// Deux couches qui datent le même vol avec deux réglages différents finissent
+// toujours par se contredire ; il n'y en a plus qu'un.
+inline astro::WindowParams mission_window_params() {
+  astro::WindowParams p;
+  p.slop_days = p.horizon_days / static_cast<double>(p.n_dep);   // un pas de balayage
+  return p;
+}
+
+// ═══ ET CES RÉGLAGES SONT CEUX DE MARS ═══ [défaut du 2026-07-31]
+// Les valeurs par défaut de `WindowParams` le DISENT dans leurs commentaires :
+// horizon 800 j « >= 1 période synodique Terre-Mars », durées explorées 150 à
+// 400 j. Elles décrivent donc UNE paire de corps. Appliquées à Jupiter, dont le
+// transfert de Hohmann dure **997 jours**, elles cherchent un transfert là où il
+// n'y en a pas : le balayage bute sur son propre plafond et rend le seul arc
+// qu'il connaisse — 400 jours, **17 621 m/s** d'injection, un manque au but de
+// 2,3 millions de km. Aucune alerte : la structure est cohérente avec elle-même,
+// exactement comme les deux réglages de fenêtre du piège n°94.
+//
+// LA RÉPONSE N'EST PAS UNE SECONDE TABLE, C'EST UNE DÉRIVATION. La durée d'un
+// transfert de Hohmann entre deux rayons est une identité képlérienne
+// (t = π√(a³/µ) avec a = (r1+r2)/2), et la période synodique aussi. Les bornes
+// sortent donc de la GÉOMÉTRIE des deux corps, jamais d'un réglage.
+//
+// ⚠ MARS NE BOUGE PAS D'UN BIT, ET C'EST VOULU : quand les bornes par défaut
+// contiennent déjà le Hohmann de la paire (258,9 j pour Terre-Mars, dans
+// [150, 400]), on les rend TELLES QUELLES. Toute la calibration martienne — 3 636
+// m/s d'injection, 4 686 m/s de trajectoire, 779,9 j de récurrence — est mesurée
+// avec ces valeurs-là ; les déplacer pour élargir un domaine qu'elles couvrent
+// déjà serait recalibrer sans raison.
+// Les deux briques ci-dessous sont définies plus bas dans ce même en-tête (elles
+// servent déjà aux horloges et à l'aller-retour d'équipage) : on les DÉCLARE ici
+// plutôt que d'en écrire une seconde version, qui pourrait en diverger.
+inline double demi_grand_axe_helio_m(const ephem::IEphemeris& eph, ephem::Body b,
+                                     Epoch now);
+inline double heliocentric_period_days(const ephem::IEphemeris& eph, ephem::Body b,
+                                       Epoch now);
+
+inline astro::WindowParams mission_window_params_for(ephem::Body dep, ephem::Body arr,
+                                                    const ephem::IEphemeris& eph,
+                                                    Epoch now) {
+  astro::WindowParams p = mission_window_params();
+  // ⚠ LE RAYON DU MOMENT N'EST PAS LE DEMI-GRAND AXE, et sur Mars (e = 0,093)
+  // l'écart décide : une première rédaction prenait |r| et rendait une période
+  // synodique qui variait de 700 à 920 jours selon la date, si bien que Mars
+  // basculait ARBITRAIREMENT hors de ses bornes par défaut. Avec `a` lu par
+  // vis-viva, on retrouve les 779,9 j documentés — et le 258,9 j de Hohmann.
+  const double a1 = demi_grand_axe_helio_m(eph, dep, now);
+  const double a2 = demi_grand_axe_helio_m(eph, arr, now);
+  if (!(a1 > 0.0) || !(a2 > 0.0)) return p;
+  const double a_t = 0.5 * (a1 + a2);
+  const double t_hohmann_j =
+      cst::PI * std::sqrt(a_t * a_t * a_t / cst::MU_SUN) / cst::DAY;
+  const double T1 = heliocentric_period_days(eph, dep, now);
+  const double T2 = heliocentric_period_days(eph, arr, now);
+  const double dn = (T1 > 0.0 && T2 > 0.0) ? std::fabs(1.0 / T1 - 1.0 / T2) : 0.0;
+  const double t_syn_j = dn > 0.0 ? 1.0 / dn : T1;
+  // Le domaine par défaut décrit-il cette paire ? (Mars : oui, à l'identique.)
+  if (t_hohmann_j >= p.tof_min_days && t_hohmann_j <= p.tof_max_days
+      && p.horizon_days >= t_syn_j)
+    return p;
+  // Sinon on l'ancre sur la géométrie. Un transfert utile va d'une trajectoire
+  // rapide et chère (0,5 × Hohmann) à une lente et économe (1,6 ×) ; l'horizon
+  // couvre une récurrence complète, sans quoi « la prochaine fenêtre » n'aurait
+  // pas de réponse.
+  p.tof_min_days = 0.5 * t_hohmann_j;
+  p.tof_max_days = 1.6 * t_hohmann_j;
+  p.horizon_days = std::max(1.05 * t_syn_j, 200.0);
+  p.slop_days = p.horizon_days / static_cast<double>(p.n_dep);
+  return p;
 }
 
 // `now` : l'époque courante (s TDB, via Epoch). L'issue est un GateResult : si
 // la fenêtre est fermée, `reason` chiffre l'attente — « rater = 25.6 mois ».
 inline GateResult launch_window_gate(const Mission& m, Epoch now,
                                      const ephem::IEphemeris& eph,
-                                     const astro::WindowParams& params = {}) {
+                                     const astro::WindowParams* params = nullptr) {
   const WindowTarget wt = window_target_for_family(m.contract.family);
   if (!wt.impose) return {true, ""};   // fenêtre permanente (voir supra)
 
-  const astro::WindowResult w = astro::launch_window(eph, wt.dep, wt.arr, now, params);
+  const astro::WindowParams p =
+      params ? *params : mission_window_params_for(wt.dep, wt.arr, eph, now);
+  const astro::WindowResult w = astro::launch_window(eph, wt.dep, wt.arr, now, p);
   if (!w.ok) return {false, "fenetre : aucune solution de transfert calculable"};
-  if (w.open) return {true, ""};
+  if (w.open) return {true, ""};   // cf. `mission_window_params` : MÊME réglage partout
 
   GateResult r;
   r.allowed = false;
@@ -397,7 +636,12 @@ inline double trajectory_dv_for_mission(const Mission& m, Epoch now,
   const WindowTarget wt = window_target_for_family(m.contract.family);
   if (!wt.impose) return trajectory_dv_for_family(m.contract.family);
 
-  const astro::WindowResult w = astro::launch_window(eph, wt.dep, wt.arr, now);
+  // MÊME RÉGLAGE QUE LE GATE ET QUE LA DURÉE DE TRANSIT — c'était le troisième
+  // appel de `launch_window` du jeu, et le seul qui gardait encore les valeurs
+  // par défaut. Pour Mars ça ne changeait rien (il lit l'optimum synodique, que
+  // `slop_days` ne déplace pas) ; pour Jupiter ça décidait de tout.
+  const astro::WindowResult w = astro::launch_window(
+      eph, wt.dep, wt.arr, now, mission_window_params_for(wt.dep, wt.arr, eph, now));
   if (!w.ok) return trajectory_dv_for_family(m.contract.family);   // repli prudent
 
   // Le VÉHICULE part d'une orbite de parking (le lanceur l'y a mis) : il paie
@@ -406,10 +650,12 @@ inline double trajectory_dv_for_mission(const Mission& m, Epoch now,
   // (FlightTimeline.hpp) : un chiffre, une source.
   const double injection = astro::injection_dv_from_circular(
       w.vinf_dep, parking_radius_m(), cst::MU_EARTH);
-  // Insertion à Mars : capture elliptique (rp bas, ra très haut) — le choix réel,
-  // bien moins cher qu'une circularisation basse.
+  // Insertion : capture elliptique (rp bas, ra très haut) — le choix réel, bien
+  // moins cher qu'une circularisation basse. L'orbite visée dépend du corps
+  // (`capture_orbit_for`) : Mars garde EXACTEMENT ses deux valeurs d'avant.
+  const CaptureOrbit co = capture_orbit_for(wt.arr);
   const double insertion = astro::capture_dv_to_ellipse(
-      w.vinf_arr, cst::R_MARS + 400.0e3, cst::R_MARS + 30000.0e3, cst::MU_MARS);
+      w.vinf_arr, co.rp_m, co.a_m, co.mu);
   const double midcourse = 150.0;   // corrections de mi-parcours [7.5], DÉCLARÉ
   return injection + insertion + midcourse;
 }
@@ -448,10 +694,31 @@ inline double transfer_tof_days(const Mission& m, Epoch now,
   }
   const WindowTarget wt = window_target_for_family(m.contract.family);
   if (!wt.impose) return 0.0;
-  astro::WindowParams p;
-  p.slop_days = p.horizon_days / static_cast<double>(p.n_dep);   // un pas de balayage
-  const astro::WindowResult w = astro::launch_window(eph, wt.dep, wt.arr, now, p);
+  const astro::WindowResult w =
+      astro::launch_window(eph, wt.dep, wt.arr, now,
+                           mission_window_params_for(wt.dep, wt.arr, eph, now));
   return w.ok ? w.local_tof_days : 0.0;
+}
+
+// ═══ COMBIEN DE TEMPS FAUT-IL ATTENDRE AVANT DE PARTIR ═══ [GDD 7.3]
+// Zéro si la fenêtre est ouverte ; sinon le délai jusqu'à son ouverture, calculé
+// avec le MÊME réglage que la durée de transit et que le gate. C'est cette
+// cohérence-là qui manquait : la durée rendue par `transfer_tof_days` est celle du
+// meilleur transfert d'un instant donné, et la faire voler à une AUTRE date fait
+// voler un arc que personne n'a calculé — mesuré, un plongeon à 0,862 UA pour une
+// injection de 5 827 m/s au lieu des ~3 600 d'un vrai transfert martien.
+// USAGE : `attente = transfer_wait_days(m, now)`, puis
+//         `tof = transfer_tof_days(m, now + attente)`. Les deux au même instant.
+inline double transfer_wait_days(const Mission& m, Epoch now,
+                                 const ephem::IEphemeris& eph) {
+  if (m.contract.family == "relativiste") return 0.0;   // pas de fenêtre synodique
+  const WindowTarget wt = window_target_for_family(m.contract.family);
+  if (!wt.impose) return 0.0;
+  const astro::WindowResult w =
+      astro::launch_window(eph, wt.dep, wt.arr, now,
+                           mission_window_params_for(wt.dep, wt.arr, eph, now));
+  if (!w.ok || w.open) return 0.0;
+  return w.next_open_days > 0.0 ? w.next_open_days : 0.0;
 }
 
 // ═══ COMBIEN DE TEMPS L'ÉQUIPAGE RESTE DEHORS ═══ [GDD 9.4]

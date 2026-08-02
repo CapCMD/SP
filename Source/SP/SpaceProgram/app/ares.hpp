@@ -12,6 +12,7 @@
 // l'UI. Les ACHATS (recherche, modules) passent par jeu.payer() côté écran :
 // l'économie stricte de l'agence garde le dernier mot.
 #pragma once
+#include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <memory>
@@ -100,7 +101,7 @@ struct AresLayer {
     G.career.rank = career::Rank::Stagiaire;
     G.career.confidence_ares = 70.0;
     G.character.name = "L'Architecte";
-    G.character.age_bio_s = 32.0 * career::YEAR_S;
+    G.character.age_bio_s = career::ENTRY_AGE_Y * career::YEAR_S;
     G.character.birth_world_s = -G.character.age_bio_s;
 
     // FINANCES v1.2 [GDD 13] : l'autorité économique native, à l'échelle réelle.
@@ -196,7 +197,20 @@ struct AresLayer {
     ctx.medical_risk_factor = G.lived.facteur_risque_medical;
 
     const Rng rng_mission(mission::mission_seed(G.seed, m.contract.id));
-    for (double j = G.lived.jour_evenements_tire + 1.0; j <= jour; j += 1.0) {
+    // ═══ LA GRILLE DE FENÊTRES EST ABSOLUE ═══ [GDD 18, déterminisme]
+    // ⚠ HONNÊTETÉ SUR CETTE LIGNE : en cherchant pourquoi dix frames et quarante
+    // frames ne consommaient plus pareil, j'ai d'abord accusé cette boucle — elle
+    // partait de `jour_evenements_tire + 1.0`, que je croyais fractionnaire. Elle
+    // ne l'était PAS (`jour = std::floor(maintenant)` ci-dessus, et le curseur
+    // reçoit `jour`), donc la grille était déjà absolue et mon « correctif » ne
+    // corrigeait rien. Il est conservé parce qu'un compteur entier dit
+    // explicitement ce que le flottant garantissait par accident — mais le vrai
+    // défaut était ailleurs (voir l'intégration par sous-pas, plus bas).
+    const long long premier = static_cast<long long>(
+        std::floor(G.lived.jour_evenements_tire)) + 1;
+    const long long dernier = static_cast<long long>(std::floor(jour));
+    for (long long jd = premier; jd <= dernier; ++jd) {
+      const double j = static_cast<double>(jd);
       // ═══ L'ACTIVITÉ SOLAIRE EST CELLE DE LA FENÊTRE, PAS DE « MAINTENANT » ═══
       // Défaut trouvé par l'oracle de rejouabilité : évaluée une fois pour toutes
       // à l'instant du tick, elle appliquait à 400 fenêtres la valeur du DERNIER
@@ -221,6 +235,12 @@ struct AresLayer {
         av.debut_days = s.t_days;
         av.gravite01 = s.magnitude01;
         G.avaries.push_back(av);
+        // ═══ ET LA MISSION S'EN SOUVIENT ═══ [GDD 3.3] — le critère « gestion de
+        // crise » se juge à l'arrivée sur ce qui est TOMBÉ et ce qui a été
+        // RÉPARÉ. `G.avaries` est vidé au débarquement : le compteur doit donc
+        // vivre sur la mission, comme tout ce qui appartient au vol.
+        for (auto& mm : G.missions)
+          if (mm.contract.id == m.contract.id) { mm.crise_avaries += 1; break; }
       }
     }
     G.lived.jour_evenements_tire = jour;
@@ -228,8 +248,15 @@ struct AresLayer {
     // Les réparations engagées arrivent à terme d'elles-mêmes.
     for (auto& av : G.avaries)
       if (!av.reparee && av.fin_reparation_days > av.debut_days &&
-          maintenant >= av.fin_reparation_days)
+          maintenant >= av.fin_reparation_days) {
         av.reparee = true;
+        // Une panne menée à réparation est le « sauvetage » de [GDD 10.3] : elle
+        // compte pour le critère de gestion de crise [3.3]. On la compte À
+        // L'ABOUTISSEMENT, pas à l'engagement — engager une réparation qu'on
+        // n'a pas le temps de finir n'a sauvé personne.
+        for (auto& mm : G.missions)
+          if (mm.contract.id == m.contract.id) { mm.crise_reparees += 1; break; }
+      }
   }
 
   // Le rapport dτ_bord / dτ_Terre à cet instant [GDD 6.7]. À terre — c'est-à-dire
@@ -273,6 +300,32 @@ struct AresLayer {
     // L'ÂGE BIOLOGIQUE SUIT LE TEMPS PROPRE, pas le temps du monde [GDD 6.7.4].
     G.character.age_by_proper_time(dt_s * ratio_horloge);
 
+    // ═══ ET UNE VIE FINIT [GDD 3.4] ═══
+    // Le vieillissement était calculé, sauvegardé, affiché nulle part et surtout
+    // SANS CONSÉQUENCE : `natural_death_due()` n'avait aucun lecteur, si bien
+    // qu'un Architecte de 120 ans gardait son poste. C'est ici que la fin de vie
+    // se constate — au même endroit que l'âge qui la provoque, et une seule fois
+    // (le drapeau garde l'idempotence quelle que soit la cadence).
+    //
+    // ⚠ CE N'EST PAS UNE FIN DE PARTIE. [GDD 3.4] distingue trois issues, et
+    // celle-ci OUVRE une passation : le poste change de titulaire, l'agence
+    // continue. Seule la mort OPÉRATIONNELLE (décidée ailleurs, dans
+    // `Session::resoudre_vie_a_bord`) termine la partie, et aucune passation ne
+    // l'annule jamais.
+    if (!G.passation_ouverte && !G.character.operational_death) {
+      const bool age = G.character.alive && G.character.natural_death_due();
+      if (age || !G.character.alive) {
+        G.character.alive = false;
+        G.passation_ouverte = true;
+        G.passation_motif = age
+            ? "fin de vie naturelle a " +
+                  std::to_string(static_cast<int>(G.character.age_bio_years())) + " ans"
+            : "deces de l'Architecte en fonction";
+        a.log("[GDD 3.4] " + G.character.name + " s'est eteint — " +
+              G.passation_motif + ". ARES ouvre une passation.");
+      }
+    }
+
     // ═══ LA VIE À BORD SE CONSOMME [GDD 9.1, 9.4] ═══
     // ICI, et pas dans `GameState::tick` — qui n'a aucun appelant (voir l'avis en
     // tête de cette fonction-là). Le piège a coûté un cycle : le code compilait,
@@ -312,24 +365,48 @@ struct AresLayer {
             // grandeurs qui existent déjà, et c'est `VitalState::consume` qui en
             // tire les conséquences. Une panne de support-vie est une hémorragie
             // de vivres, pas une icône.
-            const mission::EffetsAvaries eff =
-                mission::effets_avaries(G.avaries, maintenant);
-            G.lived.vitals.consume(
-                G.lived.n_crew, delta_jours,
-                mission::boucles_degradees(G.lived.loops, eff));
-            // Fuites (brèche) et surconsommation (malade à bord) : au prorata du
-            // temps écoulé, comme tout le reste.
-            G.lived.vitals.o2_kg    -= eff.fuite_o2_kg_j  * delta_jours;
-            G.lived.vitals.water_kg -= eff.fuite_eau_kg_j * delta_jours;
-            if (eff.surconso_vivres > 1.0)
-              G.lived.vitals.food_kg -=
-                  (eff.surconso_vivres - 1.0) * mission::MetabolicRates{}.food_dry_kg
-                  * G.lived.n_crew * delta_jours;
-            // L'épuration du CO2 se consomme plus vite quand la puissance manque.
-            if (eff.facteur_co2 > 1.0)
-              G.lived.vitals.co2_scrub_capacity_kg -=
-                  (eff.facteur_co2 - 1.0) * mission::MetabolicRates{}.co2_out_kg
-                  * G.lived.n_crew * delta_jours;
+            // ═══ ET ELLE S'INTÈGRE PAR SOUS-PAS, PLUS PAR FRAME ═══
+            // LE COMMENTAIRE CI-DESSUS ÉNONÇAIT L'HYPOTHÈSE QUI EST TOMBÉE : « la
+            // consommation est LINÉAIRE en dt, donc l'appeler une fois avec le
+            // total donne exactement le même état que N fois avec dt/N ». C'était
+            // vrai TANT QUE L'ÉTAT D'AVARIE NE CHANGEAIT PAS dans une frame. Il ne
+            // changeait presque jamais, parce que le taux de support-vie était
+            // **17 fois trop bas** ; corrigé sur la mesure de l'ISS (74 j de MTBF),
+            // les avaries commencent et se réparent au MILIEU d'une frame, et
+            // `effets_avaries` devient une fonction du TEMPS. Évalué une fois par
+            // frame, il attribuait à toute la frame l'état d'un seul instant : dix
+            // frames et quarante frames ne consommaient plus pareil, et l'oracle
+            // de sous-pas fixe l'a dit.
+            //
+            // La grille des sous-pas est ABSOLUE (multiples de 1/64 j depuis
+            // l'origine de l'horloge), pas relative au début de la frame : c'est
+            // ce qui rend le découpage sans effet [GDD 18, déterminisme].
+            constexpr double SOUS_PAS_J = 1.0 / 64.0;
+            double reste_j = delta_jours;
+            double t_j = maintenant - delta_jours;
+            while (reste_j > 1e-12) {
+              const double h = reste_j < SOUS_PAS_J ? reste_j : SOUS_PAS_J;
+              const mission::EffetsAvaries eff =
+                  mission::effets_avaries(G.avaries, t_j + h);
+              G.lived.vitals.consume(
+                  G.lived.n_crew, h,
+                  mission::boucles_degradees(G.lived.loops, eff));
+              // Fuites (brèche) et surconsommation (malade à bord) : au prorata du
+              // temps écoulé, comme tout le reste.
+              G.lived.vitals.o2_kg    -= eff.fuite_o2_kg_j  * h;
+              G.lived.vitals.water_kg -= eff.fuite_eau_kg_j * h;
+              if (eff.surconso_vivres > 1.0)
+                G.lived.vitals.food_kg -=
+                    (eff.surconso_vivres - 1.0) * mission::MetabolicRates{}.food_dry_kg
+                    * G.lived.n_crew * h;
+              // L'épuration du CO2 se consomme plus vite quand la puissance manque.
+              if (eff.facteur_co2 > 1.0)
+                G.lived.vitals.co2_scrub_capacity_kg -=
+                    (eff.facteur_co2 - 1.0) * mission::MetabolicRates{}.co2_out_kg
+                    * G.lived.n_crew * h;
+              t_j += h;
+              reste_j -= h;
+            }
 
             // ═══ ET LA DOSE, QUI NE SE DÉPENSE QUE DANS UN SENS ═══ [GDD 6.6]
             // `env/Radiation.hpp` était un modèle complet, ancré sur l'Annexe B,
@@ -408,11 +485,16 @@ struct AresLayer {
       notifier(msg);
     }
 
-    // score de carrière dérivé des issues de mission [GDD 3.3]
-    const int dr = a.reussites - derniers_reussites;
-    const int de = a.echecs - derniers_echecs;
-    if (dr > 0) G.career.add_score(40.0 * dr);
-    if (de > 0) G.career.score = std::max(0.0, G.career.score - 10.0 * de);
+    // ═══ LE SCORE NE SE COMPTE PLUS ICI ═══ [GDD 3.3]
+    // Il l'était : « +40 par réussite, −10 par échec », sur les COMPTEURS de
+    // l'agence. Deux défauts, et le second est le vrai. (1) Un compteur ne sait
+    // pas ce qu'une mission a coûté ni ce qu'elle a traversé, donc les deux
+    // autres critères de [3.3] — respect budgétaire, gestion de crise — étaient
+    // structurellement hors de portée. (2) « Pondération égale des TROIS
+    // critères » n'était donc pas approximée : elle était absente aux deux tiers.
+    // Le score se calcule maintenant AU DÉBRIEF, mission par mission, là où les
+    // trois faits sont connus (`Session::avancer_mission`). On garde les
+    // compteurs à jour pour tout le reste.
     derniers_reussites = a.reussites;
     derniers_echecs = a.echecs;
 
@@ -707,6 +789,48 @@ struct AresLayer {
              Rank::Directeur, {"nep_megawatt", "nav_profonde", "rtg"}, inf);
     }
     {
+      // ═══ LE CISLUNAIRE, QUE LE GDD NOMMAIT QUATRE FOIS SANS QU'IL EXISTE ═══
+      // [GDD 3.3] le rang Principal est DÉFINI par « vol habité cislunaire » ;
+      // [5.9] parle d'« architectures lunaires », [5.10] de « missions lunaires
+      // avancées », et [19.7] donne à la classe « Vol habité lunaire /
+      // cislunaire » ses CINQ verrous. Le catalogue n'en avait aucune : c'était
+      // un manque de CONTENU, découvert en cherchant un consommateur au modèle
+      // de descente propulsée (`flight/Descent.hpp`).
+      //
+      // LES PRÉREQUIS SONT LES CINQ X DE LA MATRICE 19.7, un par colonne :
+      //   masse       -> `lanceur_super_lourd` (la classe Saturn V)
+      //   thermique   -> `eclss_habite` (« contrôle environnemental ET THERMIQUE »)
+      //   radiations  -> `radioprotection` (Van Allen à la traversée, GCR hors
+      //                  magnétosphère — le premier vol qui quitte l'abri)
+      //   maintenance -> `automatisation_bord` (dix jours sans secours possible)
+      //   puissance   -> `capsule_habitee` + `amarrage_habite` : le rendez-vous
+      //                  orbital lunaire est ce SANS QUOI personne ne revient.
+      tech::InfrastructureNeed inf; inf.station_tier = 2;
+      entree("CAT-12", "Vol habite cislunaire et alunissage", "lunaire_habite", true,
+             Rank::Principal,
+             {"lanceur_super_lourd", "eclss_habite", "radioprotection",
+              "automatisation_bord", "capsule_habitee", "amarrage_habite"}, inf);
+    }
+    {
+      // ═══ L'ORBITEUR DU SYSTÈME SOLAIRE EXTERNE ═══
+      // Même diagnostic que le cislunaire : le manque était du CONTENU. Toute la
+      // branche de l'assistance gravitationnelle (`mission/Assistance.hpp`, quatre
+      // modules d'astro_core) n'avait aucun consommateur DANS LE JEU pour une
+      // raison simple — le catalogue n'avait pas une seule mission dont un tour
+      // puisse servir. La seule cible externe était CAT-10, un cargo NEP : la
+      // poussée continue, c'est-à-dire le régime où une assistance impulsive n'a
+      // rien à faire [GDD 6.3].
+      //
+      // LE GDD LA NOMME TROIS FOIS. Branche 2 « orbiteurs » ; branche 6 palier 2,
+      // le RTG « ouvre le SYSTÈME SOLAIRE EXTERNE robotique » ; et la table des
+      // compétences met les assistances en colonne Senior pour les « transferts
+      // complexes ». Les prérequis sont donc ces quatre-là, un par verrou : la
+      // sonde, la source d'énergie qui survit à 5 UA, la manœuvre qui rend le
+      // voyage payable, et la navigation qui le tient à une heure-lumière.
+      entree("CAT-13", "Orbiteur du systeme solaire externe", "externe", false,
+             Rank::Senior, {"sondes", "rtg", "gravity_assist", "nav_profonde"});
+    }
+    {
       // « Missions de très fin de jeu à propulsion extrême » [10.1, dernier
       // item]. Seule filière capable d'un β mesurable [6.7.2, 19.3].
       tech::InfrastructureNeed inf;
@@ -752,15 +876,27 @@ struct AresLayer {
       r.context.mission_days = 1.0;   // fiabilite PAR ALLUMAGE (duree ~ burn)
       db.add(r);
     };
-    fiche("RL10C-1", "RL10C-1 (LOX/LH2)", "moteur", 0.9965, 0.9980, 0.9990,
-          Confidence::A, SourceType::MissionData,
-          "historique de vol Atlas/Delta, ~500 allumages");
-    fiche("Aestus", "Aestus (stockables)", "moteur", 0.9900, 0.9950, 0.9970,
-          Confidence::B, SourceType::Manufacturer,
-          "donnees constructeur + 120 vols Ariane 5 G");
-    fiche("MTX-1", "MTX-1 (methane, neuf)", "moteur", 0.8500, 0.9000, 0.9500,
-          Confidence::D, SourceType::Estimate,
-          "estimation raisonnee : zero vol, analogie staged-combustion");
+    // ═══ UNE FICHE PAR PIÈCE RÉELLE, ET AUCUNE POUR UNE PIÈCE QUI N'EXISTE PAS ═══
+    // [GDD 12.3] La base portait TROIS fiches écrites à la main, dont une pour
+    // « MTX-1 », un moteur générique que [GDD 12.1] interdit et qui n'est plus au
+    // catalogue. Elle est désormais SEMÉE DEPUIS LE CATALOGUE : dix-huit pièces,
+    // dix-huit fiches, et pas une de plus. La valeur vient de la même
+    // correspondance statut/confiance que la courbe d'essais
+    // (`reliability_curve_for`) — un seul endroit où elle puisse être fausse.
+    for (const auto& p : vehicle::engine_catalog()) {
+      const mission::EngineReliabilityCurve c = mission::reliability_curve_for(p);
+      // La borne basse est l'écart au maximum atteignable : c'est ce que le
+      // principe conservateur [GDD 12.5] consomme quand la confiance est basse.
+      const double lo = c.R0 - 0.5 * (c.Rmax - c.R0);
+      const Confidence conf = static_cast<Confidence>(static_cast<int>(p.confidence));
+      const SourceType type = (p.status == vehicle::QualStatus::Flown)
+                                ? SourceType::MissionData
+                                : (p.status == vehicle::QualStatus::GroundTested)
+                                    ? SourceType::Manufacturer
+                                    : SourceType::Estimate;
+      fiche(p.id, p.name, "moteur", lo < 0.0 ? 0.0 : lo, c.R0, c.Rmax,
+            conf, type, p.source);
+    }
   }
 };
 

@@ -17,8 +17,21 @@
 // SANCTION PHYSIQUE, non inventée : le Δv de freinage tend vers v_orbital quand
 // TWR -> ∞ (limite impulsionnelle), et EXPLOSE quand TWR -> 1 (pertes de gravité :
 // un moteur trop faible brûle son Δv à lutter contre la pesanteur). C'est le vrai
-// arbitrage d'ingénierie de tout alunisseur. Vérifié : Lune, Isp 311 s, TWR 2-3
-// -> ~1730-1750 m/s de freinage (Apollo LM : ~2000 m/s marge comprise).
+// arbitrage d'ingénierie de tout alunisseur.
+//
+// ⚠ CE FICHIER A LONGTEMPS AFFIRMÉ UNE VALIDATION QUE RIEN NE VÉRIFIAIT : il
+// était le SEUL module du cœur qu'aucune suite n'incluait, et sa ligne « vérifié »
+// n'était donc qu'une note d'auteur. L'oracle existe depuis le 2026-07-29
+// (`test_reentry_perturb`), et il CONFIRME le modèle — avec les vraies valeurs,
+// mesurées cette fois, là où la note arrondissait :
+//   Lune, Isp 311 s (DPS du LM Apollo) :
+//     TWR 1,2 -> 2028 m/s   (pertes de gravité : au-DESSUS de v_orbital)
+//     TWR 2   -> 1798 m/s   (PDI optimal 31 km)
+//     TWR 3   -> 1731 m/s   (PDI optimal 14 km)
+//     TWR 6   -> 1691 m/s   (limite impulsionnelle : v_orbital rasante = 1680)
+//   Tous sous les ~2000 m/s réellement emportés par le LM, marges comprises.
+// La note disait « TWR 2-3 -> ~1730-1750 » : c'est vrai de TWR 3, pas de TWR 2.
+// Leçon : un commentaire « vérifié » sans oracle est une opinion (piège n°89).
 #pragma once
 #include <cmath>
 #include "fen/core/Constants.hpp"
@@ -94,7 +107,21 @@ inline double descent_dv_required(double mu, double R, double twr0, double isp,
     else hi = h;                                               // annulé en l'air -> plus bas
   }
   if (h_pdi_out) *h_pdi_out = best_h;
-  return best_dv;
+  // ═══ LE PLANCHER EST UN THÉORÈME, PAS UN RATTRAPAGE ═══
+  // On ne peut pas se poser depuis une orbite pour moins que l'annulation de sa
+  // vitesse orbitale : la limite impulsionnelle vaut exactement v_circ, et toute
+  // poussée finie n'y AJOUTE que des pertes de gravité. Le Δv de freinage est
+  // donc minoré par sqrt(μ/R), sans exception.
+  //
+  // ET C'EST CE PLANCHER QUI RÉPARE UN DÉFAUT RÉEL, trouvé le 2026-07-29 en
+  // branchant enfin ce module sur une mission : à TWR très élevé (53 dans le cas
+  // mesuré), le freinage anti-vitesse résiste AUSSI à la chute — le véhicule
+  // annule sa vitesse quasiment sans perdre d'altitude, aucune solution de la
+  // dichotomie n'« atteint le sol », et la fonction rendait **0**. Zéro comme
+  // « Δv nécessaire pour se poser » est un mensonge silencieux : elle disait que
+  // l'alunissage était gratuit. Dans ce régime, la bonne réponse EST v_circ.
+  const double v_circ = std::sqrt(mu / R);
+  return best_dv > v_circ ? best_dv : v_circ;
 }
 
 } // namespace fen::flight

@@ -96,6 +96,42 @@ inline constexpr double CAREER_DOSE_LIMIT_SV = 1.0;   // référence institution
 inline constexpr double ACUTE_SICKNESS_GY    = 1.0;   // syndrome aigu probable
 inline constexpr double ACUTE_LETHAL_GY      = 4.5;   // DL50 sans soins
 
+// ═══════════════════════════════════════════════════════════════════════════
+// CHRONIQUE ET AIGU NE TUENT PAS DE LA MÊME FAÇON [GDD 6.6, Annexe B]
+// ═══════════════════════════════════════════════════════════════════════════
+// Le modèle savait tuer par dose AIGUË (déterministe : au-delà de la DL50, on
+// meurt) et **ne savait rien faire de la dose CHRONIQUE** : 10 Sv accumulés sur
+// vingt ans ne produisaient aucun effet de santé, ils se contentaient de
+// verrouiller les vols suivants — c'est-à-dire rien du tout sur un vol terminal
+// [GDD 9.2], qui est justement le seul où de telles doses arrivent.
+//
+// La différence est RÉELLE et se chiffre. Un effet chronique est STOCHASTIQUE :
+// il ne fixe pas un seuil de mort, il fixe une PROBABILITÉ de mort par cancer
+// radio-induit — le REID (Risk of Exposure-Induced Death), l'instrument dont
+// les agences se servent réellement.
+//
+//   . coefficient de risque ICRP pour une population de TRAVAILLEURS ADULTES :
+//     ~4,1 % par Sv (la population générale est à ~5,5 %) ;
+//   . DDREF (Dose and Dose Rate Effectiveness Factor) : à FAIBLE DÉBIT, le même
+//     Sv fait environ deux fois moins de dégâts qu'en une fois — l'ADN a le
+//     temps de se réparer. ICRP retient 2. C'est EXACTEMENT la distinction qui
+//     manquait, et c'est elle qui rend un aller-retour interstellaire pensable.
+inline constexpr double REID_PER_SV_ADULT_WORKER = 0.041;   // ICRP, par Sv
+inline constexpr double DDREF_CHRONIC            = 2.0;     // ICRP, faible débit
+
+// Risque de décès radio-induit pour une dose CHRONIQUE cumulée. Borné à 1 :
+// au-delà, la linéarité n'a plus de sens et le modèle ne doit pas rendre 3.
+inline double reid_from_chronic_sv(double sv) {
+  if (sv <= 0.0) return 0.0;
+  return std::min(1.0, sv * REID_PER_SV_ADULT_WORKER / DDREF_CHRONIC);
+}
+
+// ET LA LIMITE INSTITUTIONNELLE CESSE D'ÊTRE UN NOMBRE NU. 1 Sv, c'est
+// `reid_from_chronic_sv(1.0)` ≈ **2,1 %** — à comparer aux **3 % de REID** qui
+// sont la norme de la NASA. La constante d'Annexe B tombe donc dans la bonne
+// bande pour une RAISON, et non parce qu'elle est ronde.
+inline double reid_at_career_limit() { return reid_from_chronic_sv(CAREER_DOSE_LIMIT_SV); }
+
 struct DoseAccumulator {
   double mission_sv{0.0};
   double mission_acute_gy{0.0};   // aigu (SPE) : compte séparément pour l'effet santé
@@ -110,6 +146,14 @@ struct DoseAccumulator {
   bool career_exceeded() const { return career_sv >= CAREER_DOSE_LIMIT_SV; }
   bool acute_sickness() const  { return mission_acute_gy >= ACUTE_SICKNESS_GY; }
   bool acute_lethal() const    { return mission_acute_gy >= ACUTE_LETHAL_GY; }
+
+  // LE RISQUE QUE LA MISSION A FAIT COURIR, et celui de toute la carrière. La
+  // part AIGUË est retirée du cumul chronique avant conversion : elle a déjà été
+  // jugée par son propre barème (DL50), la compter deux fois surestimerait.
+  double reid_mission() const {
+    return reid_from_chronic_sv(mission_sv - mission_acute_gy * SPE_QUALITY_FACTOR);
+  }
+  double reid_career() const { return reid_from_chronic_sv(career_sv); }
 };
 
 // --- Source réacteur [GDD 5.12.8] --------------------------------------------

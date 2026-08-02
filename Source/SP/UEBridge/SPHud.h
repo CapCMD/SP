@@ -52,6 +52,29 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// LA COUPE DU VÉHICULE [GDD 12.2] — « éditeur EN COUPE ». Le poste CONCEPTION
+// tenait un tableau de masses ; il lui manquait le DESSIN, c'est-à-dire la
+// moitié de ce que la ligne du GDD nomme. Ce widget peint le profil publié par
+// le modèle (`RenderBridge::hull_design`), en mètres, à la même source que la
+// géométrie 3D du monde [17.2] : une seule coupe, deux consommateurs.
+// LE HUD NE CALCULE RIEN (invariant de l'audit des postes) : il met à l'échelle
+// des cotes déjà calculées, et rien d'autre.
+class SSPCoupe : public SLeafWidget
+{
+public:
+	SLATE_BEGIN_ARGS(SSPCoupe) {}
+	SLATE_END_ARGS()
+
+	void Construct(const FArguments& InArgs);
+
+	virtual int32 OnPaint(const FPaintArgs& Args, const FGeometry& AllottedGeometry,
+	                      const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements,
+	                      int32 LayerId, const FWidgetStyle& InWidgetStyle,
+	                      bool bParentEnabled) const override;
+	virtual FVector2D ComputeDesiredSize(float) const override { return FVector2D(420.0, 96.0); }
+};
+
+// ---------------------------------------------------------------------------
 // LE MENU (scène Titre) — de VRAIS widgets Slate : le clavier et la souris y
 // fonctionnent nativement, sans passer par le pont.
 // Format : docs/reference_solar_system_map/ref_menu.png.

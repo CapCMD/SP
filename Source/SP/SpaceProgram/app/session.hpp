@@ -33,6 +33,7 @@
 #include "app/postes.hpp"
 #include "app/vehicle_design.hpp"
 #include "fen/career/Carnet.hpp"        // ce que le carnet retient [GDD 15.4]
+#include "fen/mission/Assistance.hpp"   // les tours d'assistance [GDD 5.11]
 #include "fen/code/CodeQualification.hpp"
 #include "fen/code/Toolchain.hpp"
 #include "fen/ephem/Ephemeris.hpp"
@@ -63,7 +64,10 @@ inline double distance_cadrage(int body) {
 //   Reglages — résolution / plein écran. ATTENTION : la référence n'a que trois
 //              boutons au menu (ref_menu.png), cet écran est un AJOUT de
 //              confort, atteint par une ligne discrète du panneau.
-enum class Modal { Aucun = 0, GameOver, Reglages };
+// `Passation` [GDD 3.4, 3.5] : l'Architecte s'est éteint de mort NATURELLE. Ce
+// n'est pas une fin de partie — c'est un changement de titulaire, et le joueur
+// doit le constater avant de reprendre. Distincte de `GameOver`, qui est sec.
+enum class Modal { Aucun = 0, GameOver, Reglages, Passation };
 
 // ═══ VOL DE CAMÉRA [GDD v1.2 ch.8.3, 17.4] ═══
 // [M] n'est pas une bascule sèche mais un VOL continu entre le plan bord et le
@@ -155,9 +159,34 @@ struct Session {
   // --- LA BOUCLE DE MISSION [GDD 4.1] (poste CONTROLE) ----------------------
   // La mission pilotée, son plan, et l'issue du dernier vol exécuté.
   int mission_pilotee{-1};              // index dans GameState::missions
+  // LE DÉTAIL DU DERNIER SCORE [GDD 3.3] : le joueur doit pouvoir lire LEQUEL des
+  // trois critères l'a fait progresser — un total nu n'apprend rien. Vit sur la
+  // session (c'est de l'affichage), le cumul étant sur `career.score`.
+  career::MissionScore dernier_score_mission{};
   mission::MissionPlan  mission_plan;
   mission::FlightOutcome mission_outcome;
   bool mission_outcome_pret{false};
+
+  // ═══ LE TOUR D'ASSISTANCE, CALCULÉ À LA DEMANDE ═══ [GDD 5.11, 7.4]
+  // Résoudre les époques d'un tour coûte 0,5 s (un survol) à 1,8 s (trois) :
+  // c'est un calcul de PLANIFICATION, pas de rafraîchissement d'écran. Il ne
+  // tourne donc QUE sur demande explicite du joueur (`choisir_tour`), et son
+  // résultat vit ici — exactement comme une trajectoire qu'un bureau d'études
+  // calcule une fois et garde. `evaluer_plan`, qui est rappelé à chaque
+  // reconstruction du poste, ne fait que LIRE ce bilan.
+  mission::BilanTour tour_bilan{};
+  // ═══ L'ALTITUDE MINIMALE EXIGÉE DU SURVOL ═══ [GDD 3.1, 8.5]
+  // Décision d'architecte, au même titre que la marge de correction ou le
+  // blindage : l'optimiseur colle toujours le périastre à sa borne basse, donc
+  // c'est cette borne qui décide. Viser plus haut élargit le corridor du plan-B
+  // et se paie en Δv. 0 = l'altitude du vol de référence (celle du catalogue).
+  double alt_survol_min_km{0.0};
+  // CE QUE LE SURVOL EXIGE [GDD 8.4] — corridor en paramètre d'impact, dispersion
+  // résiduelle et P(survol). Nul pour un transfert direct, qui n'en a pas.
+  mission::SurvolNav nav_survol_{};
+  std::string        tour_bilan_id;      // le tour auquel ce bilan correspond
+  std::string        tour_bilan_mission; // et la mission pour laquelle il a été calculé
+  double             tour_bilan_epoch{0.0};   // l'époque à laquelle il a été calculé
 
   // --- réglages d'affichage : UE les lit et applique, puis acquitte ---------
   int  res_choix{2};
@@ -553,12 +582,122 @@ struct Session {
     return true;
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // L'ASSISTANCE GRAVITATIONNELLE COMME DÉCISION D'ARCHITECTE [GDD 5.11, 3.1]
+  // ═══════════════════════════════════════════════════════════════════════════
+  // « Navigation et opérations interplanétaires : ... ASSISTANCES », colonne
+  // Senior → Directeur. C'était une capacité de joueur que rien ne permettait de
+  // prendre : `mission/Assistance.hpp` et les quatre modules d'astro_core qu'il
+  // consomme n'avaient d'appelant QUE dans les oracles. Le manque n'était pas un
+  // appelant — c'était une MISSION (voir CAT-13) et une PORTE. Voici la porte.
+
+  mission::CapaciteAssistance capacites_assistance() const {
+    mission::CapaciteAssistance c;
+    c.gravity_assist = techno_operationnelle("gravity_assist");
+    c.multi_survols  = techno_operationnelle("multi_survols");
+    return c;
+  }
+
+  // Les tours OFFERTS à une mission : ceux dont le corps d'arrivée est celui que
+  // le contrat vise. Un tour vers Jupiter n'a rien à proposer à un vol martien —
+  // et une famille sans cible nommée n'a pas de tour du tout.
+  std::vector<const mission::TourType*> tours_offerts(const mission::Mission& m) const {
+    std::vector<const mission::TourType*> v;
+    const mission::WindowTarget wt = mission::window_target_for_family(m.contract.family);
+    if (!wt.impose) return v;
+    for (const auto& t : mission::tour_catalog())
+      if (!t.seq.empty() && t.seq.back() == wt.arr && t.seq.front() == wt.dep)
+        v.push_back(&t);
+    return v;
+  }
+
+  // LE Δv DU TRANSFERT DIRECT, pour que le troc soit CHIFFRÉ des deux côtés.
+  double dv_direct_courant(const mission::Mission& m) const {
+    return mission::trajectory_dv_for_mission(m, fen::Epoch{jeu.epoch_courant()}, jeu.eph);
+  }
+
+  // Le bilan vaut-il encore pour cette mission et ce tour ?
+  bool tour_bilan_valide(const mission::Mission& m) const {
+    return !m.tour_id.empty() && tour_bilan_id == m.tour_id
+        && tour_bilan_mission == m.contract.id && tour_bilan.faisable;
+  }
+
+  // ═══ LA DURÉE DE TRANSIT RÉELLEMENT VISÉE ═══
+  // Un tour ne change pas que le Δv : il change le TEMPS, et c'est l'autre
+  // plateau de la balance [GDD 5.11]. Une seule fonction le dit, pour que
+  // l'évaluation du plan et le feu vert ne puissent pas diverger.
+  double duree_transit_jours(const mission::Mission& m) const {
+    if (tour_bilan_valide(m)) return tour_bilan.tof_ans * 365.25;
+    return mission::transfer_tof_days(m, fen::Epoch{jeu.epoch_courant()}, jeu.eph);
+  }
+
+  // CHOISIR — c'est ici que le calcul coûteux a lieu, et nulle part ailleurs.
+  // "" = transfert direct (et le bilan est jeté). Rend faux si le tour est
+  // refusé ; `tour_bilan.cause` porte alors le POURQUOI, affichable tel quel.
+  bool choisir_tour(const std::string& id) {
+    mission::Mission* m = mission_courante();
+    if (!m) return false;
+    if (id.empty()) {
+      m->tour_id.clear();
+      tour_bilan = mission::BilanTour{};
+      tour_bilan_id.clear(); tour_bilan_mission.clear();
+      evaluer_plan();
+      return true;
+    }
+    const mission::TourType* t = nullptr;
+    for (const auto* c : tours_offerts(*m)) if (id == c->id) t = c;
+    if (!t) {
+      tour_bilan = mission::BilanTour{};
+      tour_bilan.evalue = true;
+      tour_bilan.cause = "ce tour ne mene pas ou va cette mission";
+      tour_bilan_id.clear(); tour_bilan_mission.clear();
+      return false;
+    }
+    // LA GARDE CONTRE LE MENSONGE est celle du modèle : un tour qui ne bat pas
+    // le transfert direct est refusé, pas vendu moins cher qu'il ne coûte.
+    tour_bilan = mission::evaluer_tour_utile(
+        *t, jeu.eph, fen::Epoch{jeu.epoch_courant()}, FENETRE_TOUR_JOURS,
+        mission::parking_radius_m(), jeu.ares.etat->career.rank,
+        dv_direct_courant(*m), C3_MAX_TOUR_M2S2, capacites_assistance(),
+        alt_survol_min_km * 1000.0);
+    tour_bilan_epoch = jeu.epoch_courant();
+    if (!tour_bilan.faisable) {
+      tour_bilan_id.clear(); tour_bilan_mission.clear();
+      return false;
+    }
+    tour_bilan_id = t->id;
+    tour_bilan_mission = m->contract.id;
+    m->tour_id = t->id;
+    evaluer_plan();
+    return true;
+  }
+
+  // LARGEUR DE LA FENÊTRE DE DÉPART OFFERTE À L'OPTIMISEUR. Trois ans : la
+  // synodique Terre-Jupiter fait 398,9 j, celle de Terre-Vénus 583,9 — il faut
+  // couvrir plusieurs retours de géométrie pour qu'un tour à plusieurs survols
+  // ait une chance de se refermer. DÉCLARÉ [GDD 6.8].
+  static constexpr double FENETRE_TOUR_JOURS = 1095.0;
+  // CE QUE LE LANCEUR VEND. Le plafond de C3 est une contrainte DURE ici, et il
+  // encadre la gamme réelle : un Atlas V 551 vend ~31 km²/s² à faible masse.
+  static constexpr double C3_MAX_TOUR_M2S2 = 30.0e6;
+  // LARGEUR DU « MAINTENANT » POUR LE DÉPART D'UN TOUR. Cinq jours : c'est
+  // l'ordre de grandeur d'une fenêtre de tir quotidienne réelle, et c'est
+  // cohérent avec le pas de balayage de la carte porkchop (10 j) qui a produit la
+  // date. Au-delà, on ne part pas « à peu près » sur une trajectoire calculée
+  // pour une date précise (piège n°94).
+  static constexpr double TOLERANCE_DEPART_TOUR_J = 5.0;
+
   void evaluer_plan() {
     if (mission::Mission* m = mission_courante()) {
       // Δv de trajectoire tiré de la géométrie RÉELLE de la fenêtre (Mars) ;
       // forfait par famille sinon. Rend le budget sensible à la fenêtre [7.3].
       mission_plan.dv_traj_override = mission::trajectory_dv_for_mission(
           *m, fen::Epoch{jeu.epoch_courant()}, jeu.eph);
+      // ═══ ET SI L'ARCHITECTE A CHOISI UN TOUR, C'EST LUI QUI VOLE ═══
+      // [GDD 5.11] Le tour remplace le Δv de trajectoire par le sien : départ
+      // (C3 payé depuis le parking), manœuvres en espace profond, insertion. Le
+      // bilan est LU, jamais recalculé ici — voir `choisir_tour`.
+      if (tour_bilan_valide(*m)) mission_plan.dv_traj_override = tour_bilan.dv_total_ms;
       // ═══ P(NAVIGATION) N'EST PLUS 0,985 [GDD 7.5, 8.4] ═══
       // On évalue le vol QU'ON FERAIT EN PARTANT MAINTENANT : erreur d'injection
       // (Gates), amplifiée par Oberth, propagée par la matrice de transition de
@@ -568,6 +707,29 @@ struct Session {
       // conception, plus une constante.
       nav_disp = evaluer_navigation(*m);
       if (nav_disp.ok) mission_plan.p_physics = nav_disp.p_marge;
+      // ═══ ET UN SURVOL EST UN RENDEZ-VOUS DE PRÉCISION ═══ [GDD 8.4, 5.11]
+      // La navigation d'un tour ne se juge pas seulement à « la marge couvre-t-elle
+      // la correction » : il faut ENCORE toucher le corridor du survol, sous peine
+      // de rentrer dans l'atmosphère à 9 km/s ou de repartir sans la déviation
+      // qu'on était venu chercher. Les deux conditions se multiplient parce
+      // qu'elles sont indépendantes, et la seconde est NOMMÉE (un chiffre sans
+      // cause n'est pas actionnable).
+      nav_survol_ = mission::SurvolNav{};
+      if (nav_disp.ok && tour_bilan_valide(*m) && !tour_bilan.rp_survol_m.empty()) {
+        const mission::FlightTrace tr = trace_prospective(*m);
+        const auto corps = tour_courant(*m) ? tour_courant(*m)->seq[1] : ephem::Body::EarthBary;
+        // LE BORD DU CORRIDOR EST L'ATMOSPHÈRE, pas la borne de recherche : sous
+        // l'interface, le véhicule ne survole plus, il rentre.
+        const double rp_limite =
+            ephem::body_radius(corps)
+            + (corps == ephem::Body::Mars ? mission::ENTRY_INTERFACE_MARS_M
+                                          : mission::ENTRY_INTERFACE_EARTH_M);
+        nav_survol_ = mission::nav_survol(
+            tr, nav_disp, /*arc du survol*/ 1, tour_bilan.rp_survol_m[0], rp_limite,
+            tour_bilan.vinf_survol_ms.empty() ? 0.0 : tour_bilan.vinf_survol_ms[0],
+            ephem::body_mu(corps));
+        if (nav_survol_.ok) mission_plan.p_physics *= nav_survol_.p_survol;
+      }
       // ═══ ET CE QUE PÈSE L'ÉQUIPAGE ═══ [GDD 9.4, 5.10]
       // Mêmes deux grandeurs que le Δv : elles viennent du MONDE (le ciel et
       // l'arbre), pas d'une saisie, et le plan pur ne peut pas les atteindre.
@@ -584,6 +746,21 @@ struct Session {
       mission_plan.lanceurs_qualifies = [this](const mission::Launcher& L) {
         return L.tech_id.empty() || techno_operationnelle(L.tech_id.c_str());
       };
+      // ═══ ET LES MOTEURS ═══ [GDD 5.4] — même prédicat, même raison. Les
+      // dix-huit pièces réelles sont commandables ; celles de la branche 6
+      // (électrique, NTP, NEP, fusion) demandent leur nœud, sinon toute la
+      // branche serait disponible dès la première mission.
+      mission_plan.moteurs_qualifies = [this](const mission::EngineOption& E) {
+        return E.tech_id.empty() || techno_operationnelle(E.tech_id.c_str());
+      };
+      // ═══ ET LE VÉHICULE QUE LE JOUEUR A CONÇU ═══ [GDD 4.1, 12.2]
+      // Le poste CONCEPTION empilait des pièces réelles dans son coin et la
+      // mission volait avec autre chose : le joueur choisissait un moteur DEUX
+      // FOIS, dans deux postes, et seul l'autre comptait. C'est ici que la
+      // boucle de [GDD 4.1] se referme — « contrat -> CONCEPTION -> ... ->
+      // lancement ». La conception de départ reproduit exactement le véhicule
+      // que la mission dimensionnait jusqu'ici, donc brancher ne déplace rien.
+      mission_plan.pile = vehicule_design.stages;
       // ═══ ET CE QU'ELLE SAIT FAIRE EN ORBITE ═══ [GDD 5.2 branche 1]
       // Les trois nœuds que le GDD nomme (« transfert de propergol orbital,
       // rendez-vous automatisé robuste ») et que rien ne consommait.
@@ -596,6 +773,22 @@ struct Session {
       // vitesse, donc de la durée, donc des vivres — la boucle que
       // `bilan_relativiste` referme, et qui peut diverger [GDD 19.1].
       mission_plan.antimatiere_g = jeu.ares.etat->antimatiere.grams;
+      // ═══ CE QUE LES SOUS-SYSTÈMES AVANCÉS SUBISSENT ═══ [GDD 12.4, 7.8]
+      // Trois grandeurs que le plan pur ne peut pas connaître, toutes prises à
+      // leur source vivante : la qualité de confinement DÉCLARÉE par le palier
+      // d'antimatière, la durée pendant laquelle un cœur nucléaire tournera, et
+      // la densité du couloir que l'agence a POLLUÉ elle-même [GDD 10.5].
+      mission_plan.antimatiere_fuite_par_jour =
+          jeu.ares.etat->antimatiere.prod.loss_rate_per_day;
+      mission_plan.env_mission.duree_vol_jours =
+          mission_plan.crew_round_trip_days > 0.0
+              ? mission_plan.crew_round_trip_days
+              : duree_transit_jours(*m);
+      // Le couloir où une campagne d'assemblage attend : la LEO basse, celle-là
+      // même que les ruptures des missions passées polluent. `Corridor{}` par
+      // défaut a un volume NUL — donc une densité nulle et un mécanisme muet.
+      mission_plan.env_mission.densite_debris_m3 =
+          jeu.ares.etat->debris.spatial_density(env::standard_corridors()[0]);
       mission_plan.evaluate(*m);
     }
   }
@@ -626,24 +819,51 @@ struct Session {
                                      rel::burns_for_architecture(m.contract.crewed));
   }
 
-  // Le vol prospectif : « si on lançait maintenant ». C'est exactement ce qu'une
-  // évaluation de conception doit juger — le plan n'est pas encore parti.
-  mission::NavDispersion evaluer_navigation(const mission::Mission& m) {
+  // Le tour du catalogue que la mission a choisi (nul si transfert direct).
+  const mission::TourType* tour_courant(const mission::Mission& m) const {
+    if (m.tour_id.empty()) return nullptr;
+    return mission::find_tour(m.tour_id);
+  }
+
+  // LA TRACE DU VOL QU'ON FERAIT EN PARTANT MAINTENANT — la même construction que
+  // `evaluer_navigation`, sortie pour que le corridor de survol s'appuie sur elle
+  // au lieu d'en refaire une seconde qui pourrait en diverger.
+  mission::FlightTrace trace_prospective(const mission::Mission& m) {
     mission::Mission prospect = m;
     prospect.state = mission::MissionState::Launched;
     prospect.state_entered_days = jeu.ares.etat->clock.now_days();
     const double epoch = jeu.epoch_courant();
     prospect.beta_croisiere = beta_croisiere_de(prospect);
-    prospect.tof_days =
-        mission::transfer_tof_days(prospect, fen::Epoch{epoch}, jeu.eph);
+    prospect.tof_days = duree_transit_jours(prospect);
+    if (tour_bilan_valide(m))
+      for (const auto& a : tour_bilan.arcs) {
+        mission::Mission::TourArc s;
+        s.r0[0] = a.r0.x; s.r0[1] = a.r0.y; s.r0[2] = a.r0.z;
+        s.v0[0] = a.v0.x; s.v0[1] = a.v0.y; s.v0[2] = a.v0.z;
+        s.t0_tdb = a.t0; s.dt_s = a.dt;
+        prospect.tour_arcs.push_back(s);
+      }
     if (!mission::flight_has_arc(prospect)) return {};
-    const mission::FlightTrace tr = mission::build_flight_trace(
-        prospect, prospect.state_entered_days, epoch, jeu.eph);
+    return mission::build_flight_trace(prospect, prospect.state_entered_days, epoch,
+                                       jeu.eph);
+  }
+
+  // Le vol prospectif : « si on lançait maintenant ». C'est exactement ce qu'une
+  // évaluation de conception doit juger — le plan n'est pas encore parti.
+  mission::NavDispersion evaluer_navigation(const mission::Mission& m) {
+    const double epoch = jeu.epoch_courant();
+    // LA MÊME TRACE QUE CELLE QUI SE DESSINE, tour compris. Elle était construite
+    // ici une seconde fois, sans les morceaux du tour : la dispersion d'un vol
+    // avec assistance se jugeait donc sur l'arc DIRECT — approximation déclarée
+    // le matin même, et supprimée l'après-midi.
+    const mission::FlightTrace tr = trace_prospective(m);
     if (!tr.ok) return {};
+    mission::Mission prospect = m;
+    prospect.state_entered_days = jeu.ares.etat->clock.now_days();
     // Vitesse du corps quitté à la date de départ : c'est par rapport à ELLE que
     // se mesure le v∞ que l'injection doit fournir.
     const double t_dep_tdb =
-        epoch + (tr.nodes[0].t_days - prospect.state_entered_days) * cst::DAY;
+        epoch + (tr.depart().t_days - prospect.state_entered_days) * cst::DAY;
     const Vec3 v_terre =
         jeu.eph.state(ephem::Body::EarthBary, ephem::Body::Sun, fen::Epoch{t_dep_tdb}).v;
     return mission::nav_dispersion(tr, v_terre, mission_plan.program.dv_margin);
@@ -694,7 +914,7 @@ struct Session {
     const double now_days = jeu.ares.etat->clock.now_days();
     c.tr = mission::build_flight_trace(m, now_days, epoch, jeu.eph);
     if (!c.tr.ok || c.tr.n_nodes < 2) return c;
-    const double t_dep_tdb = epoch + (c.tr.nodes[0].t_days - now_days) * cst::DAY;
+    const double t_dep_tdb = epoch + (c.tr.depart().t_days - now_days) * cst::DAY;
     const Vec3 v_terre =
         jeu.eph.state(ephem::Body::EarthBary, ephem::Body::Sun, fen::Epoch{t_dep_tdb}).v;
     c.d = mission::nav_dispersion(c.tr, v_terre, mission_plan.program.dv_margin);
@@ -710,18 +930,42 @@ struct Session {
     // marge et rate quand même. Et l'arc est borné par le temps écoulé : au feu
     // vert il ne sait RIEN, quelle que soit la somme engagée.
     const double date = (a_la_date_days <= -1.0e17) ? now_days : a_la_date_days;
-    c.arc_jours = arc_poursuite_disponible(m, c.tr.nodes[0].t_days, date);
+    c.arc_jours = arc_poursuite_disponible(m, c.tr.depart().t_days, date);
     c.sol = mission::nav_solution(c.tr, c.d, c.r, c.arc_jours,
                                   t_dep_tdb, jeu.eph, graine);
     if (!c.sol.ok) return c;
-    c.t_arr_days = c.tr.nodes[1].t_days;
+    c.t_arr_days = c.tr.arrivee().t_days;
     const auto K = astro::kepler_propagate(
         c.tr.r_dep, c.tr.v_dep,
-        (c.t_arr_days - c.tr.nodes[0].t_days) * cst::DAY, cst::MU_SUN);
+        (c.t_arr_days - c.tr.depart().t_days) * cst::DAY, cst::MU_SUN);
     if (!K.converged) return c;
     c.cible = K.r;
     c.ok = true;
     return c;
+  }
+
+  // ═══ LE VAISSEAU QUI DÉCOLLE DEVIENT UN FAIT ═══ [GDD 12.2, 17.2]
+  // La pile conçue, sa capsule, sa charge utile et — surtout — les ergols que le
+  // dimensionnement de CETTE mission a exigés, étage par étage. C'est tout ce
+  // dont `vehicle::build_hull` a besoin pour redonner la coupe, au chargement
+  // comme au rendu. Rien n'est recalculé plus tard : la conception continue de
+  // vivre au poste CONCEPTION, et elle ne doit plus rien à ce vol.
+  void geler_vaisseau(mission::Mission& m) {
+    m.vaisseau_etages.clear();
+    m.vaisseau_capsule = -1;
+    m.vaisseau_payload_kg = 0.0;
+    const auto& pile = mission_plan.pile;
+    const auto& ergols = mission_plan.assessment.propellant_par_etage;
+    if (pile.empty() || ergols.size() != pile.size()) return;
+    for (std::size_t k = 0; k < pile.size(); ++k) {
+      mission::Mission::EtageVol e;
+      e.engine = pile[k].engine;
+      e.tank = pile[k].tank;
+      e.propellant_kg = ergols[k];
+      m.vaisseau_etages.push_back(e);
+    }
+    m.vaisseau_capsule = vehicule_design.capsule;
+    m.vaisseau_payload_kg = m.contract.terms.payload_kg;
   }
 
   // Tire l'erreur d'exécution de l'injection et ouvre l'ÉTAT VRAI du vol. Ce
@@ -746,7 +990,7 @@ struct Session {
     // L'ÉTAT VRAI DU VOL commence ici, à l'injection. Le joueur ne le verra
     // jamais [GDD 7.5] ; il n'en connaîtra que ce que sa poursuite lui rend.
     m.vol_vrai_valide = true;
-    m.vol_vrai_t_days = c.tr.nodes[0].t_days;
+    m.vol_vrai_t_days = c.tr.depart().t_days;
     for (int k = 0; k < 3; ++k) {
       m.vol_vrai_r[k] = c.tr.r_dep[k];
       m.vol_vrai_v[k] = c.r.v_dep_vraie[k];
@@ -845,7 +1089,7 @@ struct Session {
       // LA CONNAISSANCE DE CHAQUE RENDEZ-VOUS, pas celle de la fin du vol
       // [GDD 8.6] : l'arc de poursuite grandit entre TCM-1 et TCM-2, et corriger
       // la première avec les mesures de la seconde serait tricher avec le temps.
-      const ContexteVol c1 = contexte_vol(m, c.tr.nodes[0].t_days + c.d.t_tcm_days);
+      const ContexteVol c1 = contexte_vol(m, c.tr.depart().t_days + c.d.t_tcm_days);
       const ContexteVol c2 =
           contexte_vol(m, c.t_arr_days - mission::TCM2_AVANT_ARRIVEE_J);
       if (!c1.ok || !c2.ok) return;
@@ -883,13 +1127,13 @@ struct Session {
     if (!m.vol_vrai_valide || !trace_vol.ok || trace_vol.n_nodes < 2) return {};
     const auto Kc = astro::kepler_propagate(
         trace_vol.r_dep, trace_vol.v_dep,
-        (trace_vol.nodes[1].t_days - trace_vol.nodes[0].t_days) * cst::DAY, cst::MU_SUN);
+        (trace_vol.arrivee().t_days - trace_vol.depart().t_days) * cst::DAY, cst::MU_SUN);
     if (!Kc.converged) return {};
     mission::VueNavigation vn = mission::vue_navigation(
         trace_vol.r_dep, trace_vol.v_dep,
         Vec3{m.nav_connu_dv[0], m.nav_connu_dv[1], m.nav_connu_dv[2]}, Kc.r,
-        trace_vol.nodes[0].t_days, jeu.ares.etat->clock.now_days(),
-        trace_vol.nodes[1].t_days, m.nav_sigma_r, m.nav_sigma_v);
+        trace_vol.depart().t_days, jeu.ares.etat->clock.now_days(),
+        trace_vol.arrivee().t_days, m.nav_sigma_r, m.nav_sigma_v);
     if (vn.ok) vn.delai_com_s = delai_com_s(vn);
     return vn;
   }
@@ -985,10 +1229,10 @@ struct Session {
     // la campagne automatique, c'est celui que SA manœuvre a produit.
     const auto Kc = astro::kepler_propagate(
         trace_vol.r_dep, trace_vol.v_dep,
-        (trace_vol.nodes[1].t_days - trace_vol.nodes[0].t_days) * cst::DAY, cst::MU_SUN);
+        (trace_vol.arrivee().t_days - trace_vol.depart().t_days) * cst::DAY, cst::MU_SUN);
     if (Kc.converged) {
       mission::EtatVol e2 = e;
-      m.nav_miss_km = mission::manque_reel_km(e2, Kc.r, trace_vol.nodes[1].t_days);
+      m.nav_miss_km = mission::manque_reel_km(e2, Kc.r, trace_vol.arrivee().t_days);
       m.nav_dv_required = m.tcm_dv_depense;
     }
     return r.dv_depense;
@@ -1033,9 +1277,29 @@ struct Session {
     // GATE GÉOMÉTRIQUE : on ne signe le passage en qualification (= viser une
     // fenêtre) que si le ciel est là. Positions réelles des corps [GDD 7.3].
     if (target == St::Qualification) {
-      const mission::GateResult wg = mission::launch_window_gate(
-          *m, fen::Epoch{jeu.epoch_courant()}, jeu.eph);
-      if (!wg.allowed) return wg;
+      // ═══ UN TOUR A SA PROPRE FENÊTRE, ET C'EST LA SIENNE QUI FAIT FOI ═══
+      // [GDD 5.11, 7.3] La fenêtre du transfert DIRECT ne dit rien d'un tour :
+      // l'optimiseur a trouvé une date de départ précise, souvent des mois plus
+      // loin, et c'est elle l'opportunité. Partir un autre jour, c'est voler une
+      // trajectoire que personne n'a calculée — exactement le défaut du 2026-08-01,
+      // et on ne le repaiera pas.
+      if (tour_bilan_valide(*m)) {
+        const double attente_j =
+            (tour_bilan.epoque_depart_tdb - jeu.epoch_courant()) / cst::DAY;
+        if (attente_j > TOLERANCE_DEPART_TOUR_J) {
+          char buf[128];
+          std::snprintf(buf, sizeof buf,
+                        "depart du tour %s dans %.0f jours (son opportunite)",
+                        m->tour_id.c_str(), attente_j);
+          return {false, buf};
+        }
+        if (attente_j < -TOLERANCE_DEPART_TOUR_J)
+          return {false, "l opportunite du tour est passee : recalculer la trajectoire"};
+      } else {
+        const mission::GateResult wg = mission::launch_window_gate(
+            *m, fen::Epoch{jeu.epoch_courant()}, jeu.eph);
+        if (!wg.allowed) return wg;
+      }
     }
 
     // GATE D'ARRIVÉE [GDD 9] : le vol DURE. On ne débriefe pas une sonde qui est
@@ -1051,6 +1315,12 @@ struct Session {
     if (target == St::Launched) {
       if (!G.finance.engage(mission_plan.assessment.cost_total))
         return {false, "fonds insuffisants pour engager le programme"};
+      // ═══ CE QUE CE PROGRAMME A COÛTÉ EST UN FAIT DU VOL ═══ [GDD 3.3]
+      // Le critère « respect budgétaire » se juge à l'arrivée, contre l'enveloppe
+      // du contrat. Le coût doit donc être celui RÉELLEMENT engagé ici, et non
+      // celui d'une conception que le joueur aura retouchée entre-temps — même
+      // doctrine que la durée de transit et le vaisseau.
+      m->cout_engage_musd = mission_plan.assessment.cost_total;
       // ═══ LE β SE FIGE AVANT LA DURÉE, PARCE QU'IL LA DÉCIDE ═══
       // [GDD 6.7, décision 10] Pour une architecture relativiste, la durée de
       // transit N'EST PAS une géométrie de ciel : c'est la distance de la cible
@@ -1060,8 +1330,31 @@ struct Session {
       // LA DURÉE DE TRANSIT SE FIGE ICI, et nulle part ailleurs : c'est la
       // géométrie du ciel AU DÉCOLLAGE qui date l'arrivée. Recalculée en route,
       // elle ferait glisser l'arrivée d'un vol déjà parti [GDD 7.3].
-      m->tof_days = mission::transfer_tof_days(
-          *m, fen::Epoch{jeu.epoch_courant()}, jeu.eph);
+      // Un TOUR impose sa propre durée — c'est même tout son prix [GDD 5.11] :
+      // il achète du Δv avec des années. `duree_transit_jours` est le seul
+      // endroit où l'un ou l'autre est choisi, pour que le plan évalué et le vol
+      // réellement daté ne puissent pas diverger (piège n°94).
+      m->tof_days = duree_transit_jours(*m);
+      // ═══ ET SA TRAJECTOIRE SE FIGE AVEC LUI ═══ [GDD 8.3]
+      // Les morceaux que l'optimiseur a parcourus deviennent un FAIT du vol,
+      // sauvegardé : un tour se recalculerait différemment à chaque date, donc
+      // recalculer au chargement ferait voler un vol déjà parti sur une autre
+      // trajectoire que la sienne.
+      m->tour_arcs.clear();
+      if (tour_bilan_valide(*m))
+        for (const auto& a : tour_bilan.arcs) {
+          mission::Mission::TourArc s;
+          s.r0[0] = a.r0.x; s.r0[1] = a.r0.y; s.r0[2] = a.r0.z;
+          s.v0[0] = a.v0.x; s.v0[1] = a.v0.y; s.v0[2] = a.v0.z;
+          s.t0_tdb = a.t0; s.dt_s = a.dt;
+          m->tour_arcs.push_back(s);
+        }
+      // ═══ ET LE VAISSEAU QUI PART EST FIGÉ AVEC EUX ═══ [GDD 12.2, 17.2]
+      // Ce qui décolle est la pile conçue au poste CONCEPTION, avec les ergols que
+      // Tsiolkovsky a exigés pour CETTE mission. Le joueur continue de retoucher
+      // sa conception ensuite : sans ce gel, un vaisseau déjà parti changerait de
+      // forme à l'écran. Même doctrine que la durée de transit et le tour.
+      geler_vaisseau(*m);
       // ═══ L'INJECTION EST EXÉCUTÉE POUR DE BON ═══ [GDD 8.2]
       // L'écart d'exécution se TIRE ici, une fois, sur un sous-flux de la graine
       // de mission — rejouable, et figé comme l'arc. Le joueur ne le verra pas
@@ -1097,6 +1390,21 @@ struct Session {
       m->flight_success = mission_outcome.success;
       m->flight_has_anomaly = mission_outcome.has_anomaly;
       m->flight_anomaly = mission_outcome.anomaly;
+      // ═══ LE DEMI-PALIER DE [GDD 10.3] SE MÉRITE ═══
+      // « Rétrogradation possible d'un demi-palier selon les circonstances
+      // atténuantes. » `brilliant_recovery` existait depuis toujours dans
+      // `SeverityModifiers`, était sauvegardé, et n'était POSÉ PAR PERSONNE : le
+      // seul modificateur adoucissant du barème ne pouvait jamais s'appliquer.
+      // Il se pose ici, sur un FAIT : toutes les pannes survenues en vol ont été
+      // menées à réparation. Diagnostiquer et réparer sous contrainte de temps,
+      // avec les capacités qu'on a fait qualifier, c'est exactement ce que [3.3]
+      // appelle « sauvegarde d'objectifs ou d'équipage ».
+      if (m->flight_has_anomaly && m->crise_avaries > 0 &&
+          m->crise_reparees >= m->crise_avaries) {
+        m->flight_anomaly.modifiers.brilliant_recovery = true;
+        m->flight_anomaly.severity = mission::apply_modifiers(
+            m->flight_anomaly.severity, m->flight_anomaly.modifiers);
+      }
       mission_outcome_pret = true;
       // ═══ LE CARNET RETIENT LE VOL ═══ [GDD 15.4]
       // `NotebookEntry::mission_ref` attendait ça depuis le premier jour. Le
@@ -1116,6 +1424,30 @@ struct Session {
 
     // DÉBRIEF : triple lecture appliquée à TOUS les systèmes [GDD 10.4].
     if (target == St::Completed || target == St::Failed) {
+      // ═══ LE SCORE DE PROMOTION SE JUGE ICI, SUR TROIS CRITÈRES ═══ [GDD 3.3]
+      // C'est le seul endroit où les trois faits coexistent : l'issue, le coût
+      // engagé au feu vert contre l'enveloppe du contrat, et ce que le vol a
+      // traversé. Le barème vit dans `career::score_mission` — le HUD et les
+      // oracles lisent la même fonction, et le détail par critère reste LISIBLE
+      // (le joueur doit pouvoir savoir lequel des trois l'a fait progresser).
+      {
+        career::MissionBilan b;
+        b.succes = m->flight_success;
+        b.budget_contrat_musd = m->contract.terms.budget_musd;
+        b.cout_engage_musd = m->cout_engage_musd;
+        b.gravite = m->any_anomaly ? static_cast<int>(m->worst_severity) : 0;
+        b.avaries_subies = m->crise_avaries;
+        b.avaries_reparees = m->crise_reparees;
+        const career::MissionScore sc = career::score_mission(b);
+        G.career.add_score(sc.total());
+        if (G.career.score < 0.0) G.career.score = 0.0;
+        dernier_score_mission = sc;
+        char buf[192];
+        std::snprintf(buf, sizeof(buf),
+                      "[GDD 3.3] SCORE %+.0f — reussite %+.2f, budget %+.2f, crise %+.2f",
+                      sc.total(), sc.reussite, sc.budget, sc.crise);
+        jeu.agence.log(buf);
+      }
       if (m->flight_success) {
         jeu.agence.reussites += 1;
         // GAIN DE CONFIANCE [GDD 13.4] : +2..+5 nominal, davantage pour un
@@ -1179,16 +1511,24 @@ struct Session {
       return {false, "mission trop tot : concevoir d abord [GDD 4.1]"};
     if (!economy::crewed_allowed(G.career.confidence_ares))
       return {false, "confiance insuffisante : missions habitees suspendues [GDD 13.4]"};
-    // ═══ UN PERSONNAGE CONSOMMÉ NE REVOLE PAS ═══ [GDD 6.6]
-    // La limite de dose de carrière est un VERROU, pas un indicateur : c'est
-    // l'arbitrage réel des programmes habités réels. Elle ne se soigne pas et ne
-    // se remet pas à zéro — seule la passation change de personne [GDD 3.5].
-    if (G.dose_architecte.career_exceeded())
-      return {false, "limite de dose de carriere atteinte : inapte au vol [GDD 6.6]"};
-
     const double rt = mission::crew_round_trip_days(
         *m, fen::Epoch{jeu.epoch_courant()}, jeu.eph);
-    if (mission::mission_longue(m->contract.family, rt)) {
+    const bool longue = mission::mission_longue(m->contract.family, rt);
+
+    // ═══ UN PERSONNAGE CONSOMMÉ NE REVOLE PAS — SAUF POUR LE DERNIER VOL ═══
+    // [GDD 6.6, 9.2] La limite de dose de carrière est l'instrument qui protège
+    // un astronaute RÉUTILISABLE : elle interdit de rembarquer quelqu'un qu'on
+    // veut faire revoler. Or [GDD 9.2] dit que la mission longue est prise
+    // « lorsqu'il n'a plus de carrière à construire » — c'est le vol TERMINAL, et
+    // sur celui-là une limite de carrière protège une carrière qui n'existe plus.
+    // Elle reste donc opposable à TOUTE mission ordinaire, et cesse de l'être sur
+    // le vol terminal, qui est déjà gardé par le rang et la maturité ci-dessous.
+    // CE N'EST PAS UNE PORTE QU'ON OUVRE : c'est un risque qu'on ACCEPTE, et le
+    // verdict le chiffre pour que l'acceptation soit informée [GDD 12.5].
+    if (G.dose_architecte.career_exceeded() && !longue)
+      return {false, "limite de dose de carriere atteinte : inapte au vol [GDD 6.6]"};
+
+    if (longue) {
       if (!career::terminal_rank(G.career.rank))
         return {false, "mission longue : reservee a la fin de carriere [GDD 9.2]"};
       if (!techno_operationnelle("sejour_long"))
@@ -1300,9 +1640,40 @@ struct Session {
     G.notebook.write(career::journal_absence(
         G.lived.depart_days, retour, menees < 0 ? 0 : menees, G.finance.treasury_me));
     G.finance.suspended = false;
+
+    // ═══ CE QUE LA DOSE CHRONIQUE A COÛTÉ ═══ [GDD 6.6, 10.3 niveau 5]
+    // Elle ne tuait PERSONNE : seule la dose aiguë avait un barème (DL50), et le
+    // cumul chronique se contentait de verrouiller les vols suivants — c'est-à-dire
+    // rien du tout sur un vol terminal [GDD 9.2], le seul où de telles doses
+    // arrivent. Un aller-retour interstellaire rapporte ~10 Sv chroniques ; le
+    // modèle les enregistrait et les oubliait.
+    //
+    // UN EFFET CHRONIQUE EST STOCHASTIQUE, donc il se TIRE — mais sur la graine de
+    // mission, comme l'issue du vol et l'erreur d'injection : un rechargement
+    // rejoue le même sort [GDD 18, déterminisme]. Le risque est le REID de la
+    // mission, ICRP avec DDREF. Ce n'est pas une seconde punition superposée à la
+    // dose aiguë : `reid_mission` en retire expressément la part aiguë, déjà jugée.
+    const double reid = G.dose_architecte.reid_mission();
+    bool cancer = false;
+    if (reid > 0.0 && !G.character.operational_death) {
+      Rng rng(mission::mission_seed(jeu.agence.graine_agence, G.lived.mission_id)
+              ^ 0x5245494400000001ull);                       // « REID »
+      cancer = rng.uniform01() < reid;
+    }
+
     G.lived.disembark();
     G.avaries.clear();          // les avaries appartenaient au vol qui s'achève
-    jeu.agence.log("Retour de mission — l'Architecte reprend son poste");
+    if (cancer) {
+      // MORT AU RETOUR, PAS EN VOL : un cancer radio-induit se déclare des années
+      // plus tard. C'est donc une mort NATURELLE anticipée [GDD 3.4], qui OUVRE
+      // une passation — et non une mort opérationnelle, qui n'en ouvre aucune.
+      // La distinction est celle du GDD, et elle change tout pour la partie.
+      G.character.alive = false;
+      jeu.agence.log("Retour de mission — cancer radio-induit declare : "
+                     "l'Architecte ne reprendra pas son poste [GDD 6.6, 3.4]");
+    } else {
+      jeu.agence.log("Retour de mission — l'Architecte reprend son poste");
+    }
     return true;
   }
 
@@ -1411,6 +1782,90 @@ struct Session {
     // La chaîne financière se rouvre : il n'y a plus d'absent à protéger.
     G.finance.suspended = false;
     G.lived.disembark();
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // LA PASSATION [GDD 3.4, 3.5, décisions 6 et 7]
+  // ═══════════════════════════════════════════════════════════════════════
+  // « Portée multi-générationnelle : atteindre la fin de la branche 6 demande
+  // souvent plusieurs vies. » Le vieillissement existait (en temps PROPRE, écart
+  // relativiste compris), la fin de vie était calculable, `career::Succession`
+  // était écrite et sous oracle — et RIEN ne les reliait : un Architecte de
+  // 120 ans gardait son poste, un Architecte mort d'un cancer radio-induit
+  // aussi. La portée multi-générationnelle n'existait tout simplement pas.
+  bool passation_en_attente() const {
+    if (!jeu.ares.initialisee()) return false;
+    const auto& G = *jeu.ares.etat;
+    return G.passation_ouverte && !G.character.operational_death;
+  }
+
+  // Ce que le successeur trouve en prenant le poste — pour l'écran, avant qu'il
+  // n'accepte. Aucun calcul ici : le modèle a déjà tout tranché.
+  std::string resume_passation() const {
+    if (!jeu.ares.initialisee()) return {};
+    const auto& G = *jeu.ares.etat;
+    return std::string("RANG CONSERVE : ") + career::rank_name(G.career.rank)
+         + "  .  CONFIANCE REMISE A 70  .  CARNET TRANSMIS ("
+         + std::to_string(G.notebook.entries.size()) + " entrees)"
+         + "  .  ETAT PROGRAMMATIQUE INTACT";
+  }
+
+  // L'ACTE. Ne touche QUE ce qui est personnel ; l'état programmatique (arbre,
+  // finances, missions, station, catalogue, carnet) appartient à ARES et n'est
+  // pas même lu — c'est la ligne « État programmatique : Oui, INTÉGRALEMENT »
+  // du tableau de [GDD 3.5], et la meilleure façon de la tenir est de ne rien
+  // écrire.
+  bool passer_la_main() {
+    if (!passation_en_attente()) return false;
+    auto& G = *jeu.ares.etat;
+
+    // ═══ CE QUI RESTE AU POSTE ═══ [décision 6] Le rang est un droit
+    // institutionnel durable : il appartient au POSTE, pas à la personne.
+    const career::Rank rang = G.career.rank;
+    // ═══ CE QUI MEURT AVEC LA PERSONNE ═══ [décision 7] La crédibilité
+    // personnelle repart à 70, le score à zéro — et la DOSE avec eux : c'est un
+    // corps neuf, ce qui rouvre les vols terminaux que son prédécesseur ne
+    // pouvait plus faire [GDD 6.6, 9.2].
+    G.career = career::Succession::inherit_career(rang);
+    G.dose_architecte = env::DoseAccumulator{};
+    // L'ÉCART D'HORLOGE EST PERSONNEL AUSSI : il mesure ce que CE corps a vécu
+    // de moins que la Terre [GDD 6.7.5]. Le successeur repart à zéro d'écart.
+    G.dual_clock = rel::DualClock{};
+    ++G.generation;
+    G.character = career::Succession::inherit_character(
+        "L'Architecte", G.clock.sim_time_s());
+
+    // ═══ ET SI LE DÉFUNT ÉTAIT EN VOL ═══ [GDD 9.2, 9.3]
+    // Une mission vécue survit à son responsable scientifique : l'équipage est
+    // toujours à bord et la mission continue. Ce qui cesse, c'est l'ABSENCE —
+    // le successeur est à son poste, donc la protection financière de [9.3] n'a
+    // plus lieu d'être. Le vol, lui, n'est pas touché : ce serait le perdre pour
+    // une raison qui ne le concerne pas.
+    if (G.lived.active) {
+      G.lived.disembark();
+      G.finance.suspended = false;
+      jeu.agence.log("[GDD 9.3] Le successeur prend le poste au sol : l'agence "
+                     "n'est plus en absence, la chaine financiere reprend.");
+    }
+
+    modal = Modal::Aucun;
+    jeu.agence.log("[GDD 3.5] Passation : " + std::to_string(G.generation) +
+                   "e Architecte en fonction, rang " +
+                   std::string(career::rank_name(rang)) +
+                   " conserve, confiance remise a 70.");
+    // Le carnet est le lien entre deux vies : on l'y écrit, comme le ferait le
+    // successeur en ouvrant le cahier de son prédécesseur [GDD 15.4]. Le motif
+    // est lu AVANT d'être effacé — c'est ce qui reste du prédécesseur.
+    career::NotebookEntry e;
+    e.title = "Passation — prise de fonction du " +
+              std::to_string(G.generation) + "e Architecte";
+    e.body = G.passation_motif;
+    e.date_days = G.clock.now_days();
+    G.notebook.write(std::move(e));
+    G.passation_ouverte = false;
+    G.passation_motif.clear();
+    sauvegarder_partie();
+    return true;
   }
 
   // Quitter la partie : on sauve, puis retour au menu.
@@ -1650,10 +2105,19 @@ struct Session {
     // Au menu il n'y a plus de partie à condamner : la modale y est levée, même
     // si le modèle porte encore le drapeau (le joueur a déjà quitté la partie).
     if (scene == SceneJeu::Titre) {
-      if (modal == Modal::GameOver) modal = Modal::Aucun;
+      if (modal == Modal::GameOver || modal == Modal::Passation) modal = Modal::Aucun;
     } else if (jeu.game_over) {
       modal = Modal::GameOver;
     } else if (modal == Modal::GameOver) {
+      modal = Modal::Aucun;
+    } else if (passation_en_attente()) {
+      // ═══ LA PASSATION SE CONSTATE, ELLE NE SE SUBIT PAS ═══ [GDD 3.4, 3.5]
+      // Elle vient APRÈS le Game Over dans cette chaîne, et ce n'est pas un
+      // détail d'écriture : une mort opérationnelle est irrévocable, et « la
+      // passation ne l'annule jamais ». Si les deux se présentaient, c'est la fin
+      // de partie qui doit rester à l'écran.
+      modal = Modal::Passation;
+    } else if (modal == Modal::Passation) {
       modal = Modal::Aucun;
     }
 
@@ -1786,6 +2250,11 @@ struct Session {
     // et c'est le modèle qui les calcule (Lambert + Kepler sur l'éphéméride
     // réelle), jamais le rendu.
     publier_trace_vol(epoch);
+    // ═══ ET LA COUPE DE LA CONCEPTION EN COURS [GDD 12.2] ═══
+    // Seulement quand le poste CONCEPTION est ouvert : c'est le seul écran qui la
+    // dessine, et `evaluate_design` n'a rien à faire sous le plan système.
+    if (poste_conception_ouvert()) publier_coupe_design();
+    else g_render_bridge.hull_design.valid = false;
     rafraichir_poursuite();
     B.geo.valid = false;   // vol GEO 2D retiré (mécanique héritée)
   }
@@ -1858,7 +2327,9 @@ struct Session {
 
   void publier_trace_vol(double epoch) {
     auto& B = g_render_bridge;
-    auto invalider = [&] { B.vehicle.valid = false; trace_valide = false; };
+    auto invalider = [&] {
+      B.vehicle.valid = false; B.hull_vol.valid = false; trace_valide = false;
+    };
     if (!jeu.ares.initialisee()) { invalider(); return; }
     auto& G = *jeu.ares.etat;
     const double now_days = G.clock.now_days();
@@ -1877,7 +2348,7 @@ struct Session {
       // que de l'injection, qui est figée au feu vert comme l'arc lui-même.
       if (trace_vol.ok) {
         const double t_dep_tdb =
-            epoch + (trace_vol.nodes[0].t_days - now_days) * cst::DAY;
+            epoch + (trace_vol.depart().t_days - now_days) * cst::DAY;
         const Vec3 v_terre = jeu.eph.state(ephem::Body::EarthBary, ephem::Body::Sun,
                                            fen::Epoch{t_dep_tdb}).v;
         trace_disp = mission::nav_dispersion(trace_vol, v_terre,
@@ -1887,7 +2358,7 @@ struct Session {
     } else {
       mission::trace_avancer(trace_vol, now_days);
     }
-    if (!trace_vol.ok) { B.vehicle.valid = false; return; }
+    if (!trace_vol.ok) { B.vehicle.valid = false; B.hull_vol.valid = false; return; }
     // LE CORRIDOR 3σ [GDD 8.3] : ce que le joueur ne SAIT PAS de sa position. Il
     // croît depuis l'injection, et rien ne le rétrécit encore — la poursuite est
     // la brique suivante, et c'est DÉCLARÉ plutôt que simulé.
@@ -1904,15 +2375,100 @@ struct Session {
     B.vehicle.pos_m[0] = trace_vol.pos.x;
     B.vehicle.pos_m[1] = trace_vol.pos.y;
     B.vehicle.pos_m[2] = trace_vol.pos.z;
+    B.vehicle.vel_ms[0] = trace_vol.vel.x;
+    B.vehicle.vel_ms[1] = trace_vol.vel.y;
+    B.vehicle.vel_ms[2] = trace_vol.vel.z;
     B.vehicle.corridor_3s_m = trace_vol.corridor_3s_m;
-    B.vehicle.n_nodes = trace_vol.n_nodes;
-    for (int k = 0; k < trace_vol.n_nodes && k < 2; ++k) {
+    // LES NŒUDS : deux pour un transfert direct (injection, arrivée), jusqu'à six
+    // pour un tour d'assistance — chaque manœuvre profonde et chaque survol est un
+    // instant où quelque chose se passe, donc un point qui se voit [GDD 8.3].
+    B.vehicle.n_nodes = trace_vol.n_nodes < mission::FlightTrace::MAX_NODES
+                            ? trace_vol.n_nodes : mission::FlightTrace::MAX_NODES;
+    for (int k = 0; k < B.vehicle.n_nodes; ++k) {
       B.vehicle.nodes_m[k][0] = trace_vol.nodes[k].pos.x;
       B.vehicle.nodes_m[k][1] = trace_vol.nodes[k].pos.y;
       B.vehicle.nodes_m[k][2] = trace_vol.nodes[k].pos.z;
       B.vehicle.node_done[k] = trace_vol.nodes[k].done;
     }
     B.vehicle.valid = true;
+    publier_coupe(B.hull_vol, coupe_du_vol(*vol));
+  }
+
+  // ═══ LA COUPE, DU MODÈLE AU PONT ═══ [GDD 12.2, 17.2]
+  // Le rendu ne reçoit que des mètres. `gen` ne bouge que si la coupe CHANGE :
+  // reconstruire une géométrie à chaque frame pour un vaisseau qui ne change
+  // jamais serait le gaspillage que `last_arc_sig` évite déjà pour l'arc.
+  static void publier_coupe(RenderBridge::HullSnap& H,
+                            const vehicle::VehicleHull& h) {
+    if (!h.valid) { H.valid = false; H.n = 0; return; }
+    const int n = h.segments.size() < RenderBridge::HullSnap::MAX_SEG
+                      ? static_cast<int>(h.segments.size())
+                      : RenderBridge::HullSnap::MAX_SEG;
+    // Signature : la coupe a-t-elle bougé ? Longueur et diamètre suffisent — deux
+    // piles distinctes qui auraient EXACTEMENT les mêmes cotes se dessinent
+    // pareil, ce qui est précisément le cas où ne rien refaire est correct.
+    const bool change = !H.valid.load() || H.n != n ||
+                        std::fabs(H.length_m - h.length_m) > 1e-9 ||
+                        std::fabs(H.diameter_m - h.max_diameter_m) > 1e-9;
+    H.n = n;
+    H.length_m = h.length_m;
+    H.diameter_m = h.max_diameter_m;
+    for (int k = 0; k < n; ++k) {
+      const auto& s = h.segments[static_cast<std::size_t>(k)];
+      H.seg[k].role = static_cast<int>(s.role);
+      H.seg[k].stage = s.stage;
+      H.seg[k].z0_m = s.z0_m; H.seg[k].z1_m = s.z1_m;
+      H.seg[k].r0_m = s.r0_m; H.seg[k].r1_m = s.r1_m;
+    }
+    H.valid = true;
+    if (change) H.gen.fetch_add(1);
+  }
+
+  // La coupe du vaisseau EN VOL : reconstruite depuis ce que le feu vert a figé
+  // sur la mission, jamais depuis la conception courante.
+  static vehicle::VehicleHull coupe_du_vol(const mission::Mission& m) {
+    vehicle::VehicleHull h;
+    if (m.vaisseau_etages.empty()) return h;
+    std::vector<vehicle::StageChoice> pile;
+    std::vector<double> ergols;
+    pile.reserve(m.vaisseau_etages.size());
+    ergols.reserve(m.vaisseau_etages.size());
+    for (const auto& e : m.vaisseau_etages) {
+      vehicle::StageChoice st;
+      st.engine = e.engine;
+      st.tank = e.tank;
+      pile.push_back(st);
+      ergols.push_back(e.propellant_kg);
+    }
+    const auto& caps = vehicle::capsule_catalog();
+    const vehicle::CapsulePart* cap =
+        (m.vaisseau_capsule >= 0 && m.vaisseau_capsule < static_cast<int>(caps.size()))
+            ? &caps[static_cast<std::size_t>(m.vaisseau_capsule)] : nullptr;
+    return vehicle::build_hull(pile, ergols, cap, m.vaisseau_payload_kg);
+  }
+
+  bool poste_conception_ouvert() const {
+    if (poste_ouvert < 0) return false;
+    int n = 0;
+    const PosteDef* d = postes_def(n);
+    return poste_ouvert < n && std::string(d[poste_ouvert].id) == "conception";
+  }
+
+  // La coupe de la conception EN COURS — celle que le poste CONCEPTION dessine
+  // [GDD 12.2]. Elle bouge à chaque clic du joueur, et c'est sa raison d'être.
+  void publier_coupe_design() {
+    const DesignSummary s = evaluate_design(vehicule_design);
+    std::vector<double> ergols;
+    ergols.reserve(s.stages.size());
+    for (const auto& st : s.stages) ergols.push_back(st.propellant_kg);
+    const auto& caps = vehicle::capsule_catalog();
+    const vehicle::CapsulePart* cap =
+        (vehicule_design.capsule >= 0 &&
+         vehicule_design.capsule < static_cast<int>(caps.size()))
+            ? &caps[static_cast<std::size_t>(vehicule_design.capsule)] : nullptr;
+    publier_coupe(g_render_bridge.hull_design,
+                  vehicle::build_hull(vehicule_design.stages, ergols, cap,
+                                      vehicule_design.payload_kg));
   }
 };
 

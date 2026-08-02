@@ -25,6 +25,7 @@
 
 #include "fen/core/Constants.hpp"
 #include "fen/env/Debris.hpp"
+#include "fen/env/Micrometeoroid.hpp"
 
 namespace fen::reliability {
 
@@ -38,6 +39,21 @@ namespace fen::reliability {
 // Rendu : facteur de fiabilité (1 = neuf, décroît). NTP dégrade plus vite que la
 // fission de puissance : les cycles de chauffe/refroidissement de l'ergol
 // fissurent le cœur (déclaré via `is_ntp`).
+// VIE DE CŒUR À PLEINE PUISSANCE — la grandeur sous laquelle un réacteur spatial
+// se spécifie réellement. SP-100 était dimensionné pour 7 années-pleine-puissance,
+// Kilopower vise 15, les concepts de puissance de surface 10. On retient la
+// borne BASSE et documentée [GDD 12.5] : un réacteur qui tourne 7 ans à pleine
+// charge a consommé sa vie nominale.
+inline constexpr double CORE_FULL_POWER_YEARS = 7.0;
+
+// Fraction de vie consommée par une mission qui fait tourner le réacteur en
+// continu pendant `days`. Un NTP, lui, ne brûle presque rien : il tire quelques
+// minutes — c'est son CYCLAGE THERMIQUE qui le tue, et il est déjà dans `is_ntp`.
+inline double burnup_from_days(double days, bool continuous) {
+  if (!continuous || days <= 0.0) return 0.0;
+  return days / (CORE_FULL_POWER_YEARS * 365.25);
+}
+
 inline double nuclear_core_reliability(double burnup_fraction, double calendar_years,
                                        bool is_ntp = false) {
   const double b = std::clamp(burnup_fraction, 0.0, 2.0);
@@ -62,17 +78,28 @@ struct RadiatorWear {
   double vulnerability{0.15};   // 0,15 = perte locale, panneaux redondants
 };
 
+// Forme PRIMITIVE : la densité de particules est donnée. C'est elle qui se
+// branche, parce que le consommateur (`assess_multistage`) est une fonction PURE
+// — lui passer l'objet d'environnement entier ferait entrer l'état de l'agence
+// dans une évaluation de conception.
+inline double radiator_capacity_at_density(const RadiatorWear& rad,
+                                           double density_per_m3,
+                                           double exposure_days,
+                                           double v_rel_ms = 1.0e4) {
+  if (rad.area_m2 <= 0.0 || exposure_days <= 0.0 || density_per_m3 <= 0.0) return 1.0;
+  // Perforations attendues = flux de rencontres × vulnérabilité.
+  const double punctures =
+      density_per_m3 * rad.area_m2 * v_rel_ms * exposure_days * cst::DAY * rad.vulnerability;
+  return std::exp(-punctures);
+}
+
 inline double radiator_capacity_fraction(const RadiatorWear& rad,
                                           const env::DebrisEnvironment& debris,
                                           const env::Corridor& corridor,
                                           double exposure_days,
                                           double v_rel_ms = 1.0e4) {
-  if (rad.area_m2 <= 0.0 || exposure_days <= 0.0) return 1.0;
-  const double n = debris.spatial_density(corridor);        // objets/m³
-  // Perforations attendues = flux de rencontres × vulnérabilité.
-  const double punctures =
-      n * rad.area_m2 * v_rel_ms * exposure_days * cst::DAY * rad.vulnerability;
-  return std::exp(-punctures);
+  return radiator_capacity_at_density(rad, debris.spatial_density(corridor),
+                                      exposure_days, v_rel_ms);
 }
 
 // Un radiateur érodé rejette moins : si la capacité tombe sous la charge
@@ -80,6 +107,64 @@ inline double radiator_capacity_fraction(const RadiatorWear& rad,
 inline bool thermal_still_ok(double capacity_fraction, double nominal_reject_w,
                              double heat_load_w) {
   return capacity_fraction * nominal_reject_w >= heat_load_w;
+}
+
+// ═══ 2 bis. PERFORATION SUB-MILLIMÉTRIQUE [GDD 12.4, 6.5] ═══
+// L'AUTRE mécanisme radiateur de 12.4, celui qui était déclaré non modélisé
+// « faute d'un modèle de flux que rien dans le dépôt ne porte ». Il en porte un
+// maintenant : `env/Micrometeoroid.hpp` (Grün 1985 + Cour-Palais). Ce qui suit
+// n'est plus de la physique — c'est la CONSÉQUENCE de mission.
+//
+// Le radiateur a été TAILLÉ pour une endurance : sa surface excédentaire tolère
+// un nombre calculé de circuits morts. La question de mission n'est donc pas
+// « combien en meurt-il » mais « en meurt-il plus que ce qu'on a payé ». Le
+// nombre de morts est poissonien ; on répond par sa queue.
+
+// P(K ≤ k) pour K ~ Poisson(moyenne). Somme exacte tant qu'elle a un sens,
+// approximation normale au-delà — la somme de 200 termes ne dit rien de plus.
+inline double poisson_cdf(double mean, double k) {
+  if (k < 0.0) return 0.0;
+  if (mean <= 0.0) return 1.0;
+  const double kf = std::floor(k);
+  if (mean > 200.0) {
+    const double z = (kf + 0.5 - mean) / std::sqrt(mean);
+    // ERFC, PAS 1 + ERF. Avec `0,5·(1 + erf(z/√2))`, erf sature à −1,0 dès
+    // |z| > 6 et la queue basse rend un ZÉRO EXACT — c'est-à-dire un verdict
+    // binaire déguisé en probabilité, exactement ce que [GDD 12.4] interdit
+    // (« jamais un verdict binaire décrété »). Mesuré sur un vol de 23 ans :
+    // z = −22,8, la vraie valeur est ~1e−115, largement représentable, et
+    // l'annulation la ramenait à 0,000e+00. erfc ne s'annule pas.
+    const double a = -z / std::sqrt(2.0);
+    return z < 0.0 ? 0.5 * std::erfc(a) : 1.0 - 0.5 * std::erfc(-a);
+  }
+  double terme = std::exp(-mean);
+  double somme = terme;
+  const long long imax = static_cast<long long>(kf);
+  for (long long i = 1; i <= imax; ++i) {
+    terme *= mean / static_cast<double>(i);
+    somme += terme;
+    if (terme < 1.0e-18 * somme) break;
+  }
+  return std::clamp(somme, 0.0, 1.0);
+}
+
+// PROBABILITÉ QUE LE RADIATEUR TIENNE SA CHARGE jusqu'au bout d'un vol de
+// `flight_days`, sachant qu'il a été dimensionné pour `design_days`.
+// À flight_days = design_days elle vaut ~0,999 (c'est le sens du 3σ de
+// dimensionnement) ; elle s'effondre quand on vole nettement plus longtemps que
+// ce pour quoi on a construit. Un vol PLUS COURT ne rapporte rien : on ne rembourse
+// pas la marge, on la garde.
+inline double radiator_load_survival(double area_m2, double flight_days,
+                                     double design_days, double wall_mm,
+                                     double segment_area_m2 = env::RADIATOR_SEGMENT_AREA_M2,
+                                     const env::WallMaterial* material = nullptr) {
+  if (area_m2 <= 0.0 || flight_days <= 0.0) return 1.0;
+  const double toleres = env::radiator_tolerated_dead(area_m2, design_days, wall_mm,
+                                                      segment_area_m2, material);
+  const double n = env::radiator_segment_count(area_m2, segment_area_m2);
+  const double q = 1.0 - env::radiator_capacity_after(flight_days, wall_mm,
+                                                      segment_area_m2, material);
+  return poisson_cdf(n * q, toleres);
 }
 
 // ═══ 3. CONFINEMENT ANTIMATIÈRE [GDD 12.4, 5.12.12, 19.3] ═══

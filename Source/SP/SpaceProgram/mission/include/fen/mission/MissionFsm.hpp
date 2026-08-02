@@ -74,6 +74,59 @@ struct Mission {
   // parti. 0 = cible non nommée par le contrat, croisière non datée [GDD 6.8].
   double tof_days{0.0};
 
+  // ═══ LE TOUR CHOISI, FIGÉ AU FEU VERT ═══ [GDD 5.11, compétences Senior]
+  // L'assistance gravitationnelle est une DÉCISION D'ARCHITECTE : partir direct
+  // et payer l'énergie, ou passer par un ou plusieurs survols et payer des
+  // ANNÉES. Le choix décide du Δv (donc de la masse, donc du lanceur) ET de la
+  // durée de transit, si bien qu'il est figé au décollage exactement comme
+  // `tof_days` — pour la même raison, un vol parti ne change pas de trajectoire
+  // parce que l'optimiseur a retrouvé mieux depuis. Vide = transfert direct.
+  std::string tour_id;
+
+  // ═══ ET LA TRAJECTOIRE QU'IL A CHOISIE, FIGÉE AVEC LUI ═══ [GDD 8.3, 17.3]
+  // Deux morceaux par jambe (dérive vers la manœuvre profonde, puis arc vers le
+  // corps suivant) : état héliocentrique de départ, date absolue, durée. C'est ce
+  // qui permet de DESSINER le vol dans le monde en le propageant par Kepler.
+  //
+  // POURQUOI C'EST SUR LA MISSION ET NON DANS UN CACHE : résoudre un tour coûte
+  // des secondes ET rend une trajectoire différente à chaque date de balayage —
+  // recalculer au chargement ferait donc voler un vol déjà parti sur une autre
+  // trajectoire que la sienne. Même raison que `tof_days` et le tirage de
+  // navigation : ce qui est parti est un FAIT. Vide = transfert direct, dont l'arc
+  // se reconstruit à l'identique par Lambert.
+  struct TourArc { double r0[3]{}, v0[3]{}; double t0_tdb{0.0}, dt_s{0.0}; };
+  std::vector<TourArc> tour_arcs;
+
+  // ═══ LE VAISSEAU RÉELLEMENT PARTI, FIGÉ AU FEU VERT ═══ [GDD 12.2, 17.2]
+  // « Un véhicule assemblé par le joueur doit être RENDU » [17.2], et ce qu'on
+  // rend est CE QUI VOLE. La conception vit au poste CONCEPTION et le joueur
+  // continue de la retoucher pendant qu'une mission est en route : lire la
+  // conception COURANTE ferait changer de forme un vaisseau déjà parti, exactement
+  // le défaut que `tof_days` et `tour_arcs` évitent. Ces quatre champs suffisent à
+  // reconstruire la coupe (`vehicle::build_hull`) — les ergols y sont parce que
+  // c'est Tsiolkovsky qui les a fixés au décollage, pas la fenêtre d'aujourd'hui.
+  // Vide = mission d'avant ce champ, ou vol sans véhicule conçu.
+  struct EtageVol {
+    int    engine{0};            // index dans vehicle::engine_catalog()
+    int    tank{0};              // index dans vehicle::tank_catalog()
+    double propellant_kg{0.0};   // ce que le dimensionnement a exigé
+  };
+  std::vector<EtageVol> vaisseau_etages;
+  int    vaisseau_capsule{-1};   // index dans capsule_catalog() ; -1 = charge nue
+  double vaisseau_payload_kg{0.0};
+
+  // ═══ CE QUE LA MISSION AURA COÛTÉ, ET CE QU'ELLE AURA TRAVERSÉ ═══ [GDD 3.3]
+  // Les deux tiers manquants du score de promotion : « respect budgétaire » et
+  // « gestion de crise » se jugent à l'arrivée, sur des faits que personne ne
+  // gardait. Le coût est celui ENGAGÉ au feu vert, figé comme la durée de transit
+  // — le relire à l'arrivée le prendrait à une conception retouchée depuis. Les
+  // deux compteurs de pannes, eux, s'incrémentent au fil du vol : une panne
+  // réparée avant qu'elle ne coûte est exactement le « sauvetage » que [10.3]
+  // récompense d'un demi-palier.
+  double cout_engage_musd{0.0};
+  int    crise_avaries{0};      // pannes survenues pendant le vol
+  int    crise_reparees{0};     // ... et menées à réparation
+
   // ═══ LE β DE CROISIÈRE, FIGÉ AU FEU VERT ═══ [GDD 6.7, 19.4, décision 10]
   // « β découle de l'architecture » : il se calcule une fois, depuis l'antimatière
   // embarquée et la masse sèche du plan, et il est FIGÉ comme `tof_days` et le

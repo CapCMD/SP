@@ -10,6 +10,7 @@
 #pragma once
 #include <cmath>
 #include "fen/core/Constants.hpp"
+#include "fen/env/Micrometeoroid.hpp"
 
 namespace fen::env {
 
@@ -57,19 +58,46 @@ struct RadiatorSpec {
   double eps{0.85};             // émissivité de surface
   double areal_density{6.0};    // kg/m^2 (panneau + caloducs + fluide), modèle DÉCLARÉ
   double t_env_k{3.0};
-  double redundancy_margin{1.15}; // surface excédentaire (perforations tolérées)
+
+  // ═══ LA MARGE N'EST PLUS UN FORFAIT ═══ [GDD 12.4, 12.5, 6.5]
+  // Elle valait 1,15, avec pour toute justification « surface excédentaire,
+  // perforations tolérées ». Le chiffre n'était pas absurde — MESURÉ APRÈS COUP :
+  // à 1,5 mm de paroi et 1 m² par circuit, 1,15 correspond à 3,56 ans
+  // d'exposition, ce qui est exactement l'ordre de grandeur d'une mission
+  // lointaine. C'était une bonne intuition sans calcul derrière. Elle en a un
+  // maintenant : `env/Micrometeoroid.hpp` la DÉRIVE du flux de Grün, de la limite
+  // balistique de Cour-Palais et de la durée pour laquelle on construit.
+  //
+  // ENDURANCE = la durée d'exposition pour laquelle le radiateur est TAILLÉ. Y
+  // voler plus longtemps n'est pas gratuit, et c'est ce que [GDD 12.4] sanctionne.
+  // 900 jours = l'aller-retour martien de conjonction, la classe de mission que
+  // le jeu porte réellement. Mettre 0 revient à utiliser `redundancy_margin`
+  // tel quel (utile pour un oracle qui veut figer la surface).
+  double endurance_days{900.0};
+  double wall_mm{1.5};          // paroi de caloduc blindée, valeur DÉCLARÉE
+  double segment_area_m2{RADIATOR_SEGMENT_AREA_M2};
+  double redundancy_margin{1.15};  // repli quand endurance_days <= 0
 };
 
 struct RadiatorSizing {
   double area_m2{};
   double mass_kg{};
+  double margin{1.0};           // marge effectivement appliquée
+  double armour_kg_per_m2{};    // blindage au-delà de la paroi de référence
 };
 
 inline RadiatorSizing size_radiator(double p_reject_w, const RadiatorSpec& s) {
   RadiatorSizing r;
-  r.area_m2 = radiator_area(p_reject_w, s.eps, s.t_run_k, s.t_env_k)
-              * s.redundancy_margin;
-  r.mass_kg = r.area_m2 * s.areal_density;
+  const double aire_nue = radiator_area(p_reject_w, s.eps, s.t_run_k, s.t_env_k);
+  r.margin = s.endurance_days > 0.0
+                 ? radiator_redundancy_margin(s.endurance_days, s.wall_mm, aire_nue,
+                                              s.segment_area_m2)
+                 : s.redundancy_margin;
+  r.area_m2 = aire_nue * r.margin;
+  // LE BLINDAGE EST DE LA MASSE, PAS UNE OPTION. Sans ce terme, épaissir la paroi
+  // serait gratuit et le joueur n'aurait aucune raison de ne pas mettre 5 mm.
+  r.armour_kg_per_m2 = radiator_armour_kg_per_m2(s.wall_mm);
+  r.mass_kg = r.area_m2 * (s.areal_density + r.armour_kg_per_m2);
   return r;
 }
 

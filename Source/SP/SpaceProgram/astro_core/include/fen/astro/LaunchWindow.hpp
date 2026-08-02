@@ -55,6 +55,19 @@ struct WindowResult {
   // réponse qui DATE l'insertion et l'EDL d'une mission [GDD 9, 14.3].
   double tof_days{0.0};         // durée de transit de l'OPTIMUM synodique (j)
   double local_tof_days{0.0};   // ... du meilleur transfert disponible MAINTENANT
+  // ═══ LA DATE DE DÉPART DU MEILLEUR TRANSFERT LOCAL ═══
+  // ELLE ÉTAIT CALCULÉE PUIS JETÉE, et c'est ce qui cassait tout. `local_best`,
+  // `local_tof_days` et `open` décrivent un transfert qui part quelque part dans
+  // `[now, now + slop]` — jusqu'à 60 jours plus tard par défaut. Tous les
+  // consommateurs les lisaient comme « en partant MAINTENANT » : le gate ouvrait,
+  // la mission décollait le jour même, et elle emportait la durée de transit d'un
+  // départ qu'elle ne faisait pas. Mesuré le 2026-08-01 : `open = 1` avec
+  // `next_open_days = 50,6` — contradiction visible dans la structure — et l'arc
+  // résultant plongeait à **0,862 UA** pour une injection de **5 827 m/s** au lieu
+  // des ~3 600 d'un vrai transfert martien.
+  // La date est donc PUBLIÉE, et le couple (départ, durée) devient indissociable.
+  double local_dep_tdb{0.0};    // époque de départ du meilleur transfert local
+  double local_wait_days{0.0};  // ... exprimée en attente depuis `now`
 };
 
 // Métrique de coût géométrique d'un point : la somme des excès hyperboliques.
@@ -77,7 +90,7 @@ inline WindowResult launch_window(const ephem::IEphemeris& eph,
   std::vector<double> col_t(static_cast<std::size_t>(p.n_dep), 0.0);
   double global_best = INF, local_best = INF, best_dep = t0;
   double best_vinf_dep = 0.0, best_vinf_arr = 0.0;
-  double best_tof = 0.0, local_tof = 0.0;
+  double best_tof = 0.0, local_tof = 0.0, local_dep = t0;
 
   for (int i = 0; i < p.n_dep; ++i) {
     double bi = INF, bi_dep = 0.0, bi_arr = 0.0, bi_tof = 0.0;
@@ -94,7 +107,9 @@ inline WindowResult launch_window(const ephem::IEphemeris& eph,
       global_best = bi; best_dep = td;
       best_vinf_dep = bi_dep; best_vinf_arr = bi_arr; best_tof = bi_tof;
     }
-    if (td <= slop_end && bi < local_best) { local_best = bi; local_tof = bi_tof; }
+    if (td <= slop_end && bi < local_best) {
+      local_best = bi; local_tof = bi_tof; local_dep = td;
+    }
   }
 
   if (!std::isfinite(global_best)) return w;   // aucune solution : ok reste false
@@ -111,6 +126,9 @@ inline WindowResult launch_window(const ephem::IEphemeris& eph,
   // lui qui donne la durée de croisière d'un vol qui décolle aujourd'hui.
   // Même repli que `local_best` quand rien n'est calculable dans le slop.
   w.local_tof_days = std::isfinite(local_best) ? local_tof / cst::DAY : w.tof_days;
+  // Le couple (départ, durée) est indissociable : on publie les deux ensemble.
+  w.local_dep_tdb = std::isfinite(local_best) ? local_dep : best_dep;
+  w.local_wait_days = std::max(0.0, (w.local_dep_tdb - t0) / cst::DAY);
 
   const double threshold = p.factor * global_best;
   w.open = std::isfinite(local_best) && local_best <= threshold;

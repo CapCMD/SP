@@ -23,7 +23,16 @@ namespace
 	int32  Cadence = -1;
 	bool   bVol = false;
 	bool   bVecu = false;
+	bool   bVaisseau = false;
+	bool   bPassation = false;
+	int32  VaisseauDistM = 50;            // « plan vaisseau (mètres) » [GDD 17.4]
 	bool   bAntimatiere = false;
+	bool   bNep = false;
+	bool   bNepQualifie = false;
+	bool   bRentree = false;
+	FString RentreeCaps;
+	bool   bTour = false;
+	FString TourId;
 	bool   bCode = false;
 	bool   bCodeAtelier = true;
 	FString VolPhase = TEXT("ascension");
@@ -94,6 +103,36 @@ namespace
 			if (!FParse::Value(Cmd, TEXT("-spvol="), VolPhase) || VolPhase.IsEmpty())
 				VolPhase = TEXT("croisiere");
 		}
+		// `-spvaisseau` : CADRE LE VAISSEAU CONÇU, DANS SON MONDE [GDD 12.2, 17.2,
+		// 17.4]. « De la vue système au plan vaisseau (mètres) par simple zoom » :
+		// l'instant existe, mais il demande un vol en cours ET une caméra à
+		// quelques dizaines de mètres d'un objet qui est à des centaines de
+		// millions de kilomètres — aucune capture ne peut l'atteindre autrement.
+		// Il RÉUTILISE `-spvol=croisiere` au lieu de poser un second état, et se
+		// contente de verrouiller le focus sur le vaisseau (`FOCUS_VAISSEAU`,
+		// exactement comme le clic du joueur le ferait) à distance de coque.
+		// `-spdist=<km>` reste maître si on veut s'éloigner.
+		// ⚠ LA DISTANCE EST EN MÈTRES ENTIERS, ET CE N'EST PAS UN CAPRICE :
+		// `-spdist=` passe par un parse FLOTTANT dépendant de la LOCALE. Sur une
+		// machine française, « 0.4 » rend 0,0 — le drapeau semblait donc appliqué
+		// (le journal affichait bien une valeur) alors que la caméra ne bougeait
+		// pas d'un mètre entre deux captures. Mesuré le 2026-08-01. Un entier en
+		// mètres n'a pas de séparateur décimal, donc pas de locale.
+		// `-sppassation` : l Architecte arrive en fin de vie [GDD 3.4, 3.5].
+		bPassation = FParse::Param(Cmd, TEXT("sppassation"));
+		bVaisseau = FParse::Param(Cmd, TEXT("spvaisseau"));
+		int32 VaisseauM = 0;
+		if (FParse::Value(Cmd, TEXT("-spvaisseau="), VaisseauM) && VaisseauM > 0)
+		{
+			bVaisseau = true;
+			VaisseauDistM = VaisseauM;
+		}
+		if (bVaisseau)
+		{
+			bVol = true;
+			if (!FParse::Value(Cmd, TEXT("-spvol="), VolPhase) || VolPhase.IsEmpty())
+				VolPhase = TEXT("croisiere");
+		}
 		// `-spantimatiere` : LA FILIÈRE DE FIN D'ARBRE EST QUALIFIÉE ET SON STOCK
 		// A COULÉ [GDD 5.12.12, 19.3]. Le bloc ANTIMATIÈRE du poste AGENCE ne
 		// s'affiche que si le nœud `antimatiere` est opérationnel — délibérément,
@@ -103,6 +142,44 @@ namespace
 		// seuil relativiste. Même office que `-spvol` et `-spvecu` — poser dans le
 		// MODÈLE un état qui demande autrement plusieurs vies de jeu.
 		bAntimatiere = FParse::Param(Cmd, TEXT("spantimatiere"));
+		// `-spnep` : UNE FILIÈRE ALIMENTÉE DANS L'ATELIER [GDD 5.12.1, 6.2, 6.5].
+		// Le poste CONCEPTION s'ouvre sur une pile chimique, qui ne porte NI
+		// centrale NI radiateurs — correctement. La ligne qui prouve que
+		// « énergie ≠ propulsion » a désormais un consommateur n'apparaît donc sur
+		// AUCUNE capture par défaut. Même office que `-spantimatiere` : poser
+		// l'ÉTAT DU MODÈLE, jamais l'affichage.
+		FString NepVal;
+		if (FParse::Value(Cmd, TEXT("spnep="), NepVal))
+		{
+			bNep = true;
+			bNepQualifie = NepVal.Equals(TEXT("qualifie"), ESearchCase::IgnoreCase);
+		}
+		else
+		{
+			bNep = FParse::Param(Cmd, TEXT("spnep"));
+		}
+		// `-sprentree[=<id de capsule>]` : LE BOUCLIER EST OPPOSABLE [GDD 9.2].
+		// La conception de départ n'a AUCUNE capsule montée (« charge nue »), donc
+		// la ligne RENTREE n'apparaît sur aucune capture par défaut — et c'est
+		// exact, une sonde ne revient pas. Ce drapeau monte une capsule et pose un
+		// retour LUNAIRE, l'état qui fait parler le corridor. Défaut SOYUZ-SA : la
+		// capsule jamais qualifiée au-delà de l'orbite basse, donc le refus.
+		// `-sprentree=APOLLO-CM` montre l'inverse.
+		if (!FParse::Value(Cmd, TEXT("sprentree="), RentreeCaps))
+			RentreeCaps.Empty();
+		bRentree = !RentreeCaps.IsEmpty() || FParse::Param(Cmd, TEXT("sprentree"));
+		// `-sptour[=<id>]` : L'ASSISTANCE GRAVITATIONNELLE COMME DÉCISION [GDD 5.11].
+		// La ligne TRAJECTOIRE du poste CONTRÔLE n'apparaît que pour une mission
+		// dont un tour du catalogue rejoint la cible — donc jamais sur la mission
+		// de départ, qui va en orbite basse. Ce drapeau pilote CAT-13 (orbiteur du
+		// système solaire externe, rang Senior), et le tour est ensuite CHOISI par
+		// le chemin du jeu (`Session::choisir_tour`) : le Δv, la masse et la durée
+		// affichés sont ceux que l'optimiseur trouve, jamais des nombres écrits à
+		// la main. `-sptour` nu montre le transfert DIRECT, ce qui est l'autre
+		// moitié du troc. À combiner avec `-sppost=3`.
+		if (!FParse::Value(Cmd, TEXT("sptour="), TourId))
+			TourId.Empty();
+		bTour = !TourId.IsEmpty() || FParse::Param(Cmd, TEXT("sptour"));
 		// -spoeil=x,y,z[,yaw,pitch] : POSE L'ŒIL DU PAWN dans la station (repère
 		// station, mètres et degrés — le même que `NOVELLUS_OEIL_M`). Le point
 		// d'apparition du jeu est dans le module Novellus ; des endroits qui
@@ -127,9 +204,9 @@ namespace
 		}
 		UE_LOG(LogTemp, Log,
 		       TEXT("[SPCapture] scene=%d focus=%d post=%d dist=%.0f handoff=%d cadence=%d vol=%d(%s) vecu=%d "
-		            "antimatiere=%d oeil=%d(%.2f,%.2f,%.2f cap %.0f/%.0f) frames=%d -> %s"),
+		            "antimatiere=%d nep=%d oeil=%d(%.2f,%.2f,%.2f cap %.0f/%.0f) frames=%d -> %s"),
 		       Scene, Focus, Post, Dist, bHandoff ? 1 : 0, Cadence, bVol ? 1 : 0, *VolPhase, bVecu ? 1 : 0,
-		       bAntimatiere ? 1 : 0,
+		       bAntimatiere ? 1 : 0, bNep ? 1 : 0,
 		       bOeil ? 1 : 0, OeilM[0], OeilM[1], OeilM[2], OeilCap[0], OeilCap[1],
 		       Frames, *OutPath);
 	}
@@ -144,7 +221,16 @@ bool SPCapture::RequestedHandoff() { ParseOnce(); return bHandoff; }
 int  SPCapture::RequestedCadence() { ParseOnce(); return Cadence; }
 bool SPCapture::RequestedVol() { ParseOnce(); return bVol; }
 bool SPCapture::RequestedVecu() { ParseOnce(); return bVecu; }
+bool SPCapture::RequestedPassation() { ParseOnce(); return bPassation; }
+bool SPCapture::RequestedVaisseau() { ParseOnce(); return bVaisseau; }
+int  SPCapture::VaisseauDistanceM() { ParseOnce(); return VaisseauDistM; }
 bool SPCapture::RequestedAntimatiere() { ParseOnce(); return bAntimatiere; }
+bool SPCapture::RequestedNep() { ParseOnce(); return bNep; }
+bool SPCapture::RequestedNepQualifie() { ParseOnce(); return bNepQualifie; }
+bool SPCapture::RequestedRentree() { ParseOnce(); return bRentree; }
+FString SPCapture::RentreeCapsule() { ParseOnce(); return RentreeCaps; }
+bool SPCapture::RequestedTour() { ParseOnce(); return bTour; }
+FString SPCapture::TourChoisi() { ParseOnce(); return TourId; }
 const TCHAR* SPCapture::RequestedVolPhase() { ParseOnce(); return *VolPhase; }
 bool SPCapture::RequestedCode() { ParseOnce(); return bCode; }
 bool SPCapture::RequestedCodeAtelier() { ParseOnce(); return bCode && bCodeAtelier; }

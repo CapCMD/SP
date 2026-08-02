@@ -16,27 +16,35 @@
 // physiquement infaisable (étage continu au décollage, non-convergence).
 #pragma once
 #include <algorithm>
+#include <cmath>
 #include <string>
 #include <vector>
 
+#include "fen/env/Atmosphere.hpp"
+#include "fen/mission/Rentree.hpp"
+#include "fen/vehicle/Geometry.hpp"     // la coupe du véhicule [GDD 12.2, 17.2]
 #include "fen/vehicle/PartsCatalog.hpp"
 #include "fen/vehicle/Vehicle.hpp"
 
 namespace fen::app {
 
 // Un étage choisi : quelle pièce, quel réservoir, combien de Δv on lui confie.
-struct StagePick {
-  int    engine{0};            // index dans vehicle::engine_catalog()
-  int    tank{0};              // index dans vehicle::tank_catalog()
-  double dv_target_ms{3000.0}; // partage du Δv — DÉCISION du joueur
-  double structure_mass_kg{300.0};
-};
+// LE TYPE VIT DANS LE CATALOGUE (`vehicle/PartsCatalog.hpp`), avec les pièces
+// qu'il désigne : c'est le vocabulaire COMMUN de l'atelier et de l'évaluation de
+// mission [GDD 4.1, 12.2]. Le redéfinir ici en ferait deux véhicules, ce qui est
+// exactement le défaut qu'on vient de solder.
+using StagePick = vehicle::StageChoice;
 
 // La conception en cours. `stages[0]` = étage du BAS (allumé en premier).
 struct VehicleDesign {
   std::vector<StagePick> stages;
   int    capsule{-1};          // index dans capsule_catalog() ; -1 = charge nue
   double payload_kg{500.0};    // charge utile hors capsule
+  // ═══ D'OÙ CE VÉHICULE REVIENT-IL ? ═══ [GDD 9.2]
+  // La rentrée n'est pas un décor : c'est la vitesse d'interface qui décide si le
+  // bouclier tient. 0 = le véhicule ne revient pas (sonde, satellite), et il n'y a
+  // alors rien à vérifier. Défaut : retour d'orbite basse, la mission de départ.
+  double v_interface_retour_ms{0.0};
 
   // Charge utile totale = charge nue + masse sèche de la capsule choisie.
   double payload_total_kg() const {
@@ -47,17 +55,32 @@ struct VehicleDesign {
     return p;
   }
 
-  // Une conception de départ raisonnable : deux étages chimiques liquides.
+  // ═══ CE QUE L'ATELIER CONÇOIT : LE VAISSEAU, PAS LE LANCEUR ═══
+  // [GDD 4.1, 5.2 br.1] Découvert en branchant l'atelier sur la mission, et
+  // c'était une incohérence INVISIBLE tant qu'il ne nourrissait rien : la
+  // conception de départ était une FUSÉE (RD-180 au sol, puis RL10), alors que
+  // le modèle de mission ACHÈTE son lanceur au catalogue et ne fait voler que ce
+  // que le lanceur met en orbite. Les deux couches décrivaient donc deux objets
+  // différents sous le même nom.
+  // C'est la mission qui a raison — c'est ainsi qu'une agence procède : on
+  // achète un Falcon 9, on construit la sonde. La pile de départ est donc un
+  // VAISSEAU ORBITAL, et elle reproduit exactement le véhicule que la mission
+  // dimensionnait jusqu'ici (deux étages RL10C-1 à parts égales, structure
+  // 150 kg) — de sorte que brancher l'atelier ne déplace RIEN par surprise.
   static VehicleDesign starter() {
     VehicleDesign d;
-    // RD-180 en bas (fort), RL10 en haut (haut Isp). Indices dans le catalogue.
-    const int rd180 = index_moteur("RD-180");
     const int rl10 = index_moteur("RL10C-1");
-    const int tk_rp1 = index_reservoir("TANK-LOX-RP1");
     const int tk_lh2 = index_reservoir("TANK-LOX-LH2");
-    d.stages.push_back({rd180 < 0 ? 0 : rd180, tk_rp1 < 0 ? 0 : tk_rp1, 3500.0, 1200.0});
-    d.stages.push_back({rl10 < 0 ? 0 : rl10, tk_lh2 < 0 ? 0 : tk_lh2, 4600.0, 400.0});
+    d.stages.push_back({rl10 < 0 ? 0 : rl10, tk_lh2 < 0 ? 0 : tk_lh2, 4050.0, 150.0});
+    d.stages.push_back({rl10 < 0 ? 0 : rl10, tk_lh2 < 0 ? 0 : tk_lh2, 4050.0, 150.0});
     d.payload_kg = 1500.0;
+    // LE VÉHICULE DE DÉPART REVIENT D'ORBITE BASSE [GDD 9.2]. Le chiffre n'est pas
+    // posé à la main : c'est la vis-viva d'une ellipse de désorbitation depuis
+    // 400 km, soit 7 912 m/s à l'interface — le ~7 800 m/s publié des rentrées de
+    // LEO. Tant qu'aucune capsule n'est montée, il ne décide de rien.
+    d.v_interface_retour_ms = fen::mission::vitesse_interface_orbite(
+        cst::R_EARTH + 400000.0, cst::MU_EARTH, cst::R_EARTH,
+        fen::mission::ENTRY_INTERFACE_EARTH_M);
     return d;
   }
 
@@ -82,6 +105,9 @@ struct StageReadout {
   double dry_kg{};
   double wet_kg{};
   bool   converged{};
+  // Ce que la filière traîne derrière elle [GDD 5.12.1, 6.5] : zéro pour le
+  // chimique et le NTP, dominant pour la NEP.
+  vehicle::PowerPlant power{};
 };
 
 // Le bilan complet, RECALCULÉ à chaque modification [GDD 12.2].
@@ -94,11 +120,23 @@ struct DesignSummary {
   bool   converged{false};     // le point fixe de sizing a convergé
   bool   valid{false};         // au moins un étage
   bool   liftoff_capable{false}; // l'étage du bas peut-il décoller ? [GDD 6.3]
+  bool   power_ok{true};       // toute filière alimentée a une source [GDD 5.12.1]
+  double powerplant_mass_kg{}; // centrales + radiateurs, tous étages [GDD 6.5]
+  // LE BOUCLIER TIENT-IL ? [GDD 9.2] `evalue` faux = ce véhicule ne revient pas.
+  fen::mission::BilanRentree rentree{};
   std::string warning;         // motif d'infaisabilité, s'il y en a un
 };
 
 namespace detail {
 inline int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+}
+
+// Équipage que la capsule choisie doit pouvoir loger — sert à ne proposer, en cas
+// de refus, qu'une capsule qui tienne le MÊME nombre de personnes.
+inline int cap_equipage(const VehicleDesign& d) {
+  const auto& caps = vehicle::capsule_catalog();
+  if (d.capsule < 0 || d.capsule >= (int)caps.size()) return 0;
+  return caps[static_cast<std::size_t>(d.capsule)].crew;
 }
 
 // Évalue une conception : c'est le CŒUR de l'atelier. Il n'optimise rien ; il
@@ -113,18 +151,29 @@ inline DesignSummary evaluate_design(const VehicleDesign& d) {
   const auto& engs = engine_catalog();
   const auto& tanks = tank_catalog();
 
-  std::vector<StageSpec> specs;
+  std::vector<StageSpec>  specs;
+  std::vector<PowerPlant> plants;
   specs.reserve(d.stages.size());
+  plants.reserve(d.stages.size());
   for (const auto& sp : d.stages) {
     const EnginePart& e = engs[static_cast<std::size_t>(
         detail::clampi(sp.engine, 0, (int)engs.size() - 1))];
     const TankPart& t = tanks[static_cast<std::size_t>(
         detail::clampi(sp.tank, 0, (int)tanks.size() - 1))];
+    // ═══ LA CENTRALE EST DE LA MASSE SÈCHE ═══ [GDD 5.12.1, 6.1, 6.5]
+    // Elle entre dans la structure de l'étage, donc Tsiolkovsky la PAIE — et
+    // c'est le seul endroit où elle doit entrer : le haut Isp d'une filière
+    // alimentée s'achète en masse morte, pas en rien.
+    const PowerPlant pp = power_plant_for(e, sp.source);
+    plants.push_back(pp);
+    if (pp.source_missing) s.power_ok = false;
+    s.powerplant_mass_kg += pp.total_mass_kg();
+
     StageSpec spec;
     spec.dv_target = std::max(0.0, sp.dv_target_ms);
     spec.engine = to_engine(e);
     spec.tank_dry_fraction = t.dry_fraction;
-    spec.structure_mass = std::max(0.0, sp.structure_mass_kg);
+    spec.structure_mass = std::max(0.0, sp.structure_mass_kg) + pp.total_mass_kg();
     spec.residual_fraction = t.residual_fraction;
     specs.push_back(spec);
     s.total_dv_ms += spec.dv_target;
@@ -149,6 +198,7 @@ inline DesignSummary evaluate_design(const VehicleDesign& d) {
     ro.dry_kg = r.stages[k].stage_dry;
     ro.wet_kg = r.stages[k].m0 - (k == 0 ? s.payload_kg : 0.0);  // approx d'affichage
     ro.converged = r.stages[k].converged;
+    ro.power = plants[k];
     s.stages.push_back(ro);
   }
 
@@ -159,9 +209,44 @@ inline DesignSummary evaluate_design(const VehicleDesign& d) {
   const PropFamilyClass* fam = prop_family(bas.family);
   s.liftoff_capable = fam && fam->regime == BurnRegime::Impulsive;
 
-  if (!s.converged) s.warning = "sizing non convergent (Dv trop ambitieux ?)";
+  // ═══ LE BOUCLIER EST DIMENSIONNÉ ICI, PAS DÉCORATIF ═══ [GDD 9.2, 7.6]
+  // `flight/Reentry.hpp` portait 120 oracles et zéro appelant, pendant que
+  // `CapsulePart` traînait cinq champs (Cd hypersonique, section, rayon de nez,
+  // finesse, limite en g) qui n'existent QUE pour lui, et que l'arbre vendait
+  // trois nœuds de rentrée. La masse qui rentre, c'est la capsule PLUS ce qu'elle
+  // ramène : c'est ce couple qui décide, et le joueur le choisit ici.
+  const auto& caps = capsule_catalog();
+  if (d.capsule >= 0 && d.capsule < (int)caps.size() && d.v_interface_retour_ms > 0.0) {
+    const CapsulePart& cap = caps[static_cast<std::size_t>(d.capsule)];
+    const env::ExponentialAtmosphere atmo = env::earth_atmosphere(1.0);
+    s.rentree = fen::mission::evaluer_rentree(
+        cap, cap.dry_mass_kg + std::max(0.0, d.payload_kg), d.v_interface_retour_ms,
+        atmo, cst::MU_EARTH);
+  }
+
+  // LA CAUSE LA PLUS ACTIONNABLE D'ABORD (piège n°42). Une filière alimentée
+  // sans source rend TOUTES les masses fausses — la centrale y pèse zéro — donc
+  // ce motif prime sur une non-convergence, qui n'en serait que le symptôme.
+  if (!s.power_ok)
+    s.warning = "filiere alimentee sans source d energie : choisir solaire, RTG ou reacteur [GDD 5.12.1]";
+  else if (!s.converged) s.warning = "sizing non convergent (Dv trop ambitieux ?)";
   else if (!s.liftoff_capable)
     s.warning = "etage du bas en regime continu : incapable de decoller [GDD 6.3]";
+  else if (s.rentree.evalue && !s.rentree.ok) {
+    // UN REFUS NOMME LA DIRECTION : de combien on dépasse, et avec quoi ça passe.
+    const fen::vehicle::CapsulePart* mieux = fen::mission::capsule_capable(
+        d.v_interface_retour_ms, s.rentree.masse_rentree_kg,
+        env::earth_atmosphere(1.0), cst::MU_EARTH, cap_equipage(d));
+    // FORME COURTE, MESURÉE SUR CAPTURE : la rédaction longue (la cause complète
+    // suivie de la marge et du renvoi au GDD) était TRONQUÉE au bord du panneau,
+    // et c'est le nom de la capsule capable qui disparaissait — la seule partie
+    // ACTIONNABLE. Deuxième fois de la journée : ce qui compte se met devant.
+    s.warning = "rentree refusee : flux a "
+              + std::to_string((int)std::lround(100.0 / std::max(1e-9, s.rentree.marge_flux)))
+              + " % du tenable"
+              + (mieux ? std::string(" ; capable : ") + mieux->id : std::string())
+              + " [9.2]";
+  }
   return s;
 }
 

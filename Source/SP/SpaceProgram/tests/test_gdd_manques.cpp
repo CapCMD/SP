@@ -17,6 +17,7 @@
 #include <string>
 
 #include "fen/env/Debris.hpp"
+#include "fen/env/Micrometeoroid.hpp"
 #include "fen/game/GameState.hpp"
 #include "fen/mission/Mail.hpp"
 
@@ -267,6 +268,190 @@ int main() {
     CHECK(b.inbox.pending_contracts().empty(),
           "sauvegarde : un contrat repondu ne se rouvre pas");
     CHECK(a.hash() == b.hash(), "sauvegarde : hash d etat identique");
+  }
+
+  // ═══════════════ MICROMÉTÉOROÏDES ET PERFORATION [GDD 12.4, 6.5] ═══════════
+  // La population que `env::Debris` ne porte PAS. Débris = objets catalogués issus
+  // d'une fragmentation, donc une COLLISION ; micrométéoroïdes = fond naturel
+  // permanent, donc une PERFORATION. Deux populations, deux conséquences.
+  {
+    using namespace fen::env;
+
+    // ---- A. LE RECOUPEMENT D'ABORD, ET SANS LE FLATTER ---------------------
+    // SSP-30425B publie le flux de météoroïdes à l'orbite de la Station. C'est le
+    // seul point de comparaison indépendant disponible, et il ne donne PAS raison
+    // à Grün : il est plus haut partout. On mesure l'écart au lieu de l'ignorer.
+    struct Ancre { const char* nom; double d_um, rho, ssp; };
+    const Ancre ancres[] = {
+        {"10 um",  10.0,   2.0, 7.91e2},
+        {"100 um", 100.0,  2.0, 8.78e0},
+        {"1 mm",   1000.0, 0.5, 5.22e-3},
+    };
+    std::printf("\n     RECOUPEMENT Grun 1985 / SSP-30425B (flux cumule, /m2/an) :\n");
+    double pire_ratio = 0.0;
+    for (const Ancre& a : ancres) {
+      const double m = meteoroid_mass_g(a.d_um * 1.0e-4, a.rho);
+      const double f = grun_flux_per_m2_year(m);
+      const double ratio = a.ssp / f;
+      if (ratio > pire_ratio) pire_ratio = ratio;
+      std::printf("       >= %-7s (m=%9.3e g) : Grun %10.4e | SSP %10.4e"
+                  " -> SSP est %5.2f fois plus haut\n", a.nom, m, f, a.ssp, ratio);
+      CHECK(f > 0.0 && ratio > 1.0,
+            "12.4 : SSP-30425B est majorant sur chaque ancre (ecart declare)");
+    }
+    // L'écart se resserre vers les tailles qui percent une paroi réelle. C'est
+    // l'énoncé qu'on verrouille, PAS un accord qu'on n'a pas.
+    const double m_1mm = meteoroid_mass_g(0.1, 0.5);
+    const double m_10um = meteoroid_mass_g(1.0e-3, 2.0);
+    CHECK(5.22e-3 / grun_flux_per_m2_year(m_1mm)
+              < 7.91e2 / grun_flux_per_m2_year(m_10um),
+          "12.4 : l ecart avec SSP se resserre vers le millimetre");
+    CHECK(pire_ratio < 10.0,
+          "12.4 : l ecart avec SSP reste sous un ordre de grandeur");
+
+    // ---- B. le flux est cumulé : décroissant, jamais négatif ---------------
+    CHECK(grun_flux_per_m2_year(1.0e-9) > grun_flux_per_m2_year(1.0e-6),
+          "Grun : flux cumule decroissant en masse");
+    CHECK(grun_flux_per_m2_year(1.0e-6) > grun_flux_per_m2_year(1.0e-3),
+          "Grun : decroissant encore plus haut");
+    CHECK(grun_flux_per_m2_year(0.0) == 0.0, "Grun : masse nulle = flux nul");
+    // Le facteur 3,15576e7 EST le nombre de secondes d'une année julienne.
+    CHECK(std::fabs(grun_flux_per_m2_year(1.0e-6)
+                    / grun_flux_per_m2_s(1.0e-6) - 3.15576e7) < 1.0,
+          "Grun : an et seconde sont le meme flux, au facteur 3,15576e7");
+    // HORS DOMAINE : on borne, on n'extrapole pas.
+    CHECK(grun_flux_per_m2_year(10.0) == grun_flux_per_m2_year(GRUN_MASS_MAX_G),
+          "Grun : au-dela de 1 g on borne (surestimation declaree)");
+
+    // ---- C. masse et diamètre s'inversent exactement -----------------------
+    for (double d : {1.0e-3, 1.0e-2, 0.1}) {
+      const double m = meteoroid_mass_g(d, 1.0);
+      CHECK(std::fabs(meteoroid_diameter_cm(m, 1.0) - d) < 1e-12 * d,
+            "geometrie : masse et diametre sont inverses l un de l autre");
+    }
+    CHECK(meteoroid_density_g_cm3(1.0e-9) == 2.0
+          && meteoroid_density_g_cm3(1.0e-4) == 1.0
+          && meteoroid_density_g_cm3(1.0) == 0.5,
+          "SSP-30425B : les trois paliers de densite, dans l ordre");
+
+    // ---- D. limite balistique de Cour-Palais ------------------------------
+    // Une paroi plus épaisse demande un projectile plus gros. Une cible plus dure
+    // aussi. Un projectile plus dense perce mieux, donc son diamètre critique est
+    // PLUS PETIT — c'est le sens qui compte, et il est facile à écrire à l'envers.
+    CHECK(critical_diameter_cm(0.2, wall_al_6061(), 1.0)
+              > critical_diameter_cm(0.05, wall_al_6061(), 1.0),
+          "Cour-Palais : paroi plus epaisse = projectile critique plus gros");
+    CHECK(critical_diameter_cm(0.15, wall_ti_6al4v(), 1.0)
+              > critical_diameter_cm(0.15, wall_al_6061(), 1.0),
+          "Cour-Palais : titane plus dur = projectile critique plus gros");
+    CHECK(critical_diameter_cm(0.15, wall_al_6061(), 2.0)
+              < critical_diameter_cm(0.15, wall_al_6061(), 0.5),
+          "Cour-Palais : projectile dense = perce avec un diametre plus petit");
+    CHECK(critical_diameter_cm(0.15, wall_al_6061(), 1.0, 40.0)
+              < critical_diameter_cm(0.15, wall_al_6061(), 1.0, 10.0),
+          "Cour-Palais : plus vite = perce avec un diametre plus petit");
+    // k = 1,8 perforation, 2,2 ecaillage detache, 3,0 naissant : il faut un
+    // projectile PLUS GROS pour un mode de defaillance plus severe.
+    CHECK(critical_diameter_cm(0.15, wall_al_6061(), 1.0, 20.0, SPALL_INCIPIENT_K)
+              < critical_diameter_cm(0.15, wall_al_6061(), 1.0, 20.0, PERFORATION_K),
+          "Cour-Palais : k plus grand = seuil atteint par un projectile plus petit");
+    // AUCUNE PAROI N'EST PAS AUCUN IMPACT (piege n°84 : le modele sans consequence).
+    CHECK(perforation_flux_per_m2_year(0.0, wall_al_6061()) > 1.0e3,
+          "12.4 : sans paroi, tout passe — le flux n est pas nul");
+
+    // ---- E. le gradient de conception, MESURÉ ------------------------------
+    std::printf("     PERFORATION Al 6061-T6 a 20 km/s, circuit de %.2f m2 (ISS HRS) :\n",
+                RADIATOR_SEGMENT_AREA_M2);
+    const double parois[] = {0.5, 1.0, 1.5, 2.0, 3.0};
+    double flux_prec = 1.0e9, cap_prec = 0.0;
+    for (double mm : parois) {
+      const double phi = perforation_flux_per_m2_year(mm * 0.1, wall_al_6061());
+      const double cap = radiator_capacity_after(900.0, mm);
+      std::printf("       paroi %4.1f mm : Phi = %10.4e /m2/an, capacite a 900 j = %6.4f\n",
+                  mm, phi, cap);
+      CHECK(phi < flux_prec, "12.4 : epaissir la paroi reduit le flux de perforation");
+      CHECK(cap > cap_prec, "12.4 : epaissir la paroi preserve la capacite");
+      flux_prec = phi; cap_prec = cap;
+    }
+    // LA CAPACITÉ DÉCROÎT AVEC LE TEMPS, jamais l'inverse.
+    CHECK(radiator_capacity_after(0.0, 1.5) == 1.0, "12.4 : duree nulle = intact");
+    CHECK(radiator_capacity_after(1826.0, 1.5) < radiator_capacity_after(900.0, 1.5),
+          "12.4 : la capacite decroit avec l exposition");
+
+    // ---- F. CE QUI VALAIT LE DÉTOUR : LA SURFACE TOTALE N'EST PAS LE LEVIER --
+    // Chaque circuit meurt de SA première perforation. La fraction survivante est
+    // donc la probabilité qu'un circuit soit intact — elle ne dépend pas du nombre
+    // de circuits. Mille m² découpés en mille circuits vieillissent comme un seul
+    // m². Le levier, c'est la SEGMENTATION, et c'est contre-intuitif.
+    CHECK(radiator_capacity_after(900.0, 1.5, 1.0)
+              == radiator_capacity_after(900.0, 1.5, 1.0),
+          "12.4 : la capacite ne depend pas de la surface totale");
+    CHECK(radiator_capacity_after(900.0, 1.5, 0.25)
+              > radiator_capacity_after(900.0, 1.5, 1.0),
+          "12.4 : segmenter plus finement preserve la capacite");
+
+    // ---- G. LE FORFAIT 1,15 VALAIT QUOI ? ---------------------------------
+    // La marge de surface était posée à 1,15 avec pour toute justification
+    // « perforations tolérées ». On la DÉRIVE maintenant. La question honnête
+    // n'est pas « avait-il tort » mais « à quoi son chiffre correspondait » — et
+    // la réponse est qu'il correspondait à UN cas, là où la statistique en exige
+    // deux : le forfait unique ENCADRE les deux marges dérivées, trop généreux
+    // pour une grande aile, trop chiche pour une petite. C'est le 1/√N.
+    const double m_grande = radiator_redundancy_margin(900.0, 1.5, 1000.0);
+    const double m_petite = radiator_redundancy_margin(900.0, 1.5, 10.0);
+    std::printf("     LE FORFAIT 1,15 : a 900 j et 1,5 mm, la marge derivee vaut"
+                " %5.3f sur 1000 m2 et %5.3f sur 10 m2 — un seul chiffre pour deux\n",
+                m_grande, m_petite);
+    CHECK(m_grande < 1.15 && m_petite > 1.15,
+          "12.4 : le forfait unique encadre les marges derivees (statistique en 1/racine N)");
+
+    // ---- H. la marge dérivée, et le sens de sa dépendance à la surface ----
+    const double m900 = m_grande;
+    const double m1826 = radiator_redundancy_margin(1826.0, 1.5, 1000.0);
+    const double m900_petit = radiator_redundancy_margin(900.0, 1.5, 100.0);
+    std::printf("     MARGE DERIVEE (paroi 1,5 mm) : 900 j sur 1000 m2 = %5.3f |"
+                " 1826 j = %5.3f | 900 j sur 100 m2 = %5.3f\n",
+                m900, m1826, m900_petit);
+    // LE POINT FIXE EST EXACT, pas itéré : on le vérifie en le réinjectant.
+    // perte tolérée = q + k√(q·a/A) doit redonner exactement 1 − 1/M.
+    {
+      const double q = 1.0 - radiator_capacity_after(900.0, 1.5);
+      const double A = 1000.0 * m900;
+      const double perte = q + RADIATOR_DESIGN_SIGMA
+                             * std::sqrt(q * RADIATOR_SEGMENT_AREA_M2 / A);
+      CHECK(std::fabs((1.0 - 1.0 / m900) - perte) < 1e-12,
+            "12.4 : la marge est le point fixe EXACT, pas une iteration tronquee");
+    }
+    CHECK(m900 > 1.0 && m1826 > m900,
+          "12.4 : voler plus longtemps demande plus de surface excedentaire");
+    // 3σ/N décroît en 1/√N : une GRANDE aile moyenne ses pertes et exige
+    // RELATIVEMENT moins de marge. Statistique, pas arbitraire.
+    CHECK(m900_petit > m900,
+          "12.4 : une petite aile exige relativement plus de marge (3 sigma / racine N)");
+    CHECK(radiator_redundancy_margin(0.0, 1.5, 1000.0) == 1.0,
+          "12.4 : duree nulle = aucune marge de perforation");
+    CHECK(radiator_redundancy_margin(900.0, 3.0, 1000.0) < m900,
+          "12.4 : une paroi plus epaisse achete de la marge de surface");
+
+    // ---- I. UN REFUS DOIT NOMMER LA DIRECTION ------------------------------
+    // `required_wall_mm` est ce que le joueur peut FAIRE, pas un constat.
+    const double req900 = required_wall_mm(900.0, 0.13);
+    const double req1826 = required_wall_mm(1826.0, 0.13);
+    std::printf("     PAROI REQUISE a 13 %% de perte : 900 j = %.2f mm | 1826 j = %.2f mm"
+                " (croissance en T^1/3, pas lineaire)\n", req900, req1826);
+    CHECK(req1826 > req900, "12.4 : une mission plus longue demande plus de paroi");
+    CHECK(radiator_capacity_after(900.0, req900) > 0.86
+              && radiator_capacity_after(900.0, req900 * 0.9) < 0.88,
+          "12.4 : la paroi requise est le SEUIL, pas une marge de confort");
+    // Le blindage se paie au kilo — sinon personne n'aurait de raison de ne pas
+    // mettre 5 mm partout.
+    CHECK(radiator_armour_kg_per_m2(RADIATOR_WALL_BASELINE_MM) == 0.0,
+          "12.4 : la paroi de reference est deja payee dans la densite surfacique");
+    CHECK(radiator_armour_kg_per_m2(2.0) > radiator_armour_kg_per_m2(1.0),
+          "12.4 : epaissir la paroi coute de la masse");
+    CHECK(radiator_armour_kg_per_m2(2.0, RADIATOR_TUBE_COVERAGE, &wall_ti_6al4v())
+              > radiator_armour_kg_per_m2(2.0),
+          "12.4 : le titane blinde mieux mais pese plus");
   }
 
   std::printf("\nGDD (debris + mail) : %d oracles OK, %d en echec.\n", g_ok, g_ko);

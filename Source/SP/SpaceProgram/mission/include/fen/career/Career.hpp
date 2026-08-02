@@ -64,11 +64,98 @@ struct CareerState {
   void promote() { if (rank != Rank::Directeur) rank = static_cast<Rank>(static_cast<int>(rank) + 1); }
 };
 
+// ═══════════════════════════════════════════════════════════════════════════
+// LE SCORE DE PROMOTION — TROIS CRITÈRES À PONDÉRATION ÉGALE [GDD 3.3]
+// ═══════════════════════════════════════════════════════════════════════════
+// « Score cumulé à PONDÉRATION ÉGALE de trois critères » : réussite de mission,
+// respect budgétaire, gestion de crise. Le code n'en portait qu'UN — « +40 par
+// réussite, −10 par échec », compté sur les compteurs de l'agence —, si bien que
+// dépenser deux fois son enveloppe ou perdre un équipage par impréparation ne
+// pesait rien sur la carrière. Les deux tiers du barème n'existaient pas.
+//
+// CE QUI EST DIFFÉRÉ ET CE QUI NE L'EST PAS. [Annexe E] diffère « le barème de
+// points », qui dépend du rythme de progression visé : c'est `POINTS_PAR_MISSION`
+// ci-dessous, et il est CHOISI pour ne rien déplacer (une mission nominale vaut
+// toujours 40 points, comme avant). Ce que [3.3] fixe, en revanche, est la
+// STRUCTURE — trois critères, pondération égale —, et elle n'est pas différée.
+//
+// CHAQUE CRITÈRE REND UNE NOTE DANS [−1, +1]. La somme, divisée par trois, donne
+// la fraction du barème. Aucun critère ne peut donc en dominer un autre, ce qui
+// est exactement ce que « pondération égale » veut dire.
+inline constexpr double POINTS_PAR_MISSION = 40.0;
+
+// Ce qu'une mission achevée rapporte à la carrière. Structure PURE : elle ne lit
+// que des faits déjà établis par le modèle, et n'en calcule aucun.
+struct MissionScore {
+  double reussite{0.0};   // [−1, +1] objectifs atteints, conformité au profil
+  double budget{0.0};     // [−1, +1] écart au contrat, tenue des marges
+  double crise{0.0};      // [−1, +1] qualité de la réponse aux anomalies
+  double total() const {
+    return POINTS_PAR_MISSION * (reussite + budget + crise) / 3.0;
+  }
+};
+
+// Les faits que la mission a laissés derrière elle. Tous EXISTENT déjà dans le
+// modèle : on ne demande pas au joueur de renseigner quoi que ce soit.
+struct MissionBilan {
+  bool   succes{false};
+  double budget_contrat_musd{0.0};
+  double cout_engage_musd{0.0};
+  int    gravite{0};          // mission::Severity, 0 = aucune anomalie
+  int    avaries_subies{0};   // pannes survenues en vol
+  int    avaries_reparees{0}; // ... et réparées avant qu'elles ne coûtent
+};
+
+inline double clamp_note(double v) { return v < -1.0 ? -1.0 : (v > 1.0 ? 1.0 : v); }
+
+inline MissionScore score_mission(const MissionBilan& b) {
+  MissionScore s;
+
+  // ─── 1. RÉUSSITE ─── « atteinte des objectifs primaires et secondaires ».
+  // Binaire par nature : une mission perdue n'a pas atteint son objectif.
+  s.reussite = b.succes ? 1.0 : -1.0;
+
+  // ─── 2. RESPECT BUDGÉTAIRE ─── « écart entre coût engagé et enveloppe
+  // contractuelle, TENUE DES MARGES ». La note est la marge relative laissée sur
+  // l'enveloppe : dépenser exactement son budget, c'est le respecter sans marge —
+  // note nulle, aucun mérite. Le facteur 4 dit qu'une marge du QUART de
+  // l'enveloppe vaut la note pleine ; au-delà, on ne récompense plus de
+  // sous-dimensionner un programme. Un dépassement du quart coûte la note pleine
+  // en négatif, symétriquement.
+  if (b.budget_contrat_musd > 0.0) {
+    const double marge = (b.budget_contrat_musd - b.cout_engage_musd) / b.budget_contrat_musd;
+    s.budget = clamp_note(4.0 * marge);
+  }
+
+  // ─── 3. GESTION DE CRISE ─── « qualité de la réponse aux anomalies :
+  // diagnostic, arbitrage, sauvegarde d'objectifs ou d'équipage ». Une mission
+  // sans anomalie part de la note pleine : il n'y a rien eu à mal gérer. Chaque
+  // cran de gravité subi en retire ; chaque panne RÉPARÉE avant qu'elle ne coûte
+  // en rend — c'est précisément ce que [GDD 10.3] appelle le demi-palier de
+  // rétrogradation, et [3.3] dit qu'il « alimente DIRECTEMENT ce critère ».
+  double crise = 1.0;
+  crise -= 0.5 * static_cast<double>(b.gravite);          // 1 = mineur ... 5 = catastrophe
+  if (b.avaries_subies > 0) {
+    const double part = static_cast<double>(b.avaries_reparees) /
+                        static_cast<double>(b.avaries_subies);
+    // Réparer TOUT ce qui est tombé rattrape un demi-palier (+0,5) ; ne rien
+    // réparer n'en rattrape aucun. La proportion est la mesure de la réponse.
+    crise += 0.5 * part;
+  }
+  s.crise = clamp_note(crise);
+  return s;
+}
+
 // --- Le personnage [GDD 3.4] -------------------------------------------------
 // L'âge biologique suit le TEMPS PROPRE (τ) ; l'âge "historique" suit le temps
 // terrestre. Ils divergent uniquement en régime relativiste (rel::DualClock).
 inline constexpr double LIFE_EXPECTANCY_Y = 85.0;
 inline constexpr double YEAR_S = 365.25 * cst::DAY;
+// ÂGE D'ENTRÉE EN FONCTION. Celui du premier Architecte (`AresLayer::fonder`),
+// donc celui de tout successeur : le poste ne se prend pas plus jeune, et le
+// GDD ne donne pas d'autre nombre. Une seule source, pour que la durée d'une
+// génération (≈ 53 ans de jeu) ne dépende pas de l'endroit où on la lit.
+inline constexpr double ENTRY_AGE_Y = 32.0;
 
 struct Character {
   std::string name;
@@ -121,6 +208,24 @@ struct Succession {
     s.score = 0.0;                // le score, lui, est personnel
     s.confidence_ares = 70.0;     // [GDD 13.4] valeur initiale de la confiance
     return s;
+  }
+
+  // ═══ LE SUCCESSEUR PREND LE POSTE ═══ [GDD 3.5]
+  // Ce qui change de personne, et RIEN d'autre : l'état programmatique (arbre,
+  // finances, missions, station, catalogue) appartient à ARES et ne se touche
+  // pas ici — c'est même toute la ligne « État programmatique : Oui —
+  // INTÉGRALEMENT » du tableau de 3.5. Le carnet non plus (il se transmet).
+  // Le nouvel Architecte entre en fonction à l'âge d'entrée, avec le calendrier
+  // du monde pour date de naissance : l'écart d'âge accumulé par son
+  // prédécesseur en régime relativiste ne se lègue pas plus que sa crédibilité.
+  static Character inherit_character(const std::string& nom, double world_now_s) {
+    Character c;
+    c.name = nom;
+    c.age_bio_s = ENTRY_AGE_Y * YEAR_S;
+    c.birth_world_s = world_now_s - c.age_bio_s;
+    c.alive = true;
+    c.operational_death = false;
+    return c;
   }
 };
 

@@ -42,6 +42,7 @@
 
 #include <cstdint>
 
+#include "fen/astro/BPlane.hpp"
 #include "fen/astro/Kepler.hpp"
 #include "fen/astro/Stm.hpp"
 #include "fen/core/Constants.hpp"
@@ -130,8 +131,15 @@ inline NavDispersion nav_dispersion(const FlightTrace& tr, const Vec3& v_depart_
   d.sigma_vinf = d.oberth_gain * d.sigma_dv_inj;
   const double s_axe = d.sigma_vinf / std::sqrt(3.0);
 
-  // 3) PROPAGATION jusqu'à l'arrivée, et 4) CORRECTION à TCM-1.
-  const double t_dep = tr.nodes[0].t_days, t_arr = tr.nodes[1].t_days;
+  // 3) PROPAGATION jusqu'à LA PREMIÈRE VISÉE, et 4) CORRECTION à TCM-1.
+  // ⚠ « LA PREMIÈRE VISÉE » N'EST PAS TOUJOURS L'ARRIVÉE. Pour un transfert
+  // direct, si — et `t_nav_fin_days` vaut alors exactement la date d'arrivée,
+  // donc rien ne change. Pour un TOUR d'assistance, la première chose que
+  // l'erreur d'injection déforme est la manœuvre profonde de la première jambe,
+  // à quelques mois : corriger « pour Jupiter dans cinq ans » d'un seul coup
+  // n'aurait aucun sens opérationnel, et la matrice de transition sur cinq ans
+  // n'aurait aucune validité.
+  const double t_dep = tr.depart().t_days, t_arr = tr.t_nav_fin_days;
   const double tof_s = (t_arr - t_dep) * cst::DAY;
   d.t_tcm_days = TCM_ARC_DAYS < (t_arr - t_dep) ? TCM_ARC_DAYS : 0.5 * (t_arr - t_dep);
   const double t_c_s = d.t_tcm_days * cst::DAY;
@@ -205,7 +213,7 @@ inline NavRealisation nav_realisation(const FlightTrace& tr, const NavDispersion
   // dispersion et pour sa réalisation, sinon les deux divergeraient en silence.
   r.v_dep_vraie = tr.v_dep + err * d.oberth_gain;
 
-  const double t_dep = tr.nodes[0].t_days, t_arr = tr.nodes[1].t_days;
+  const double t_dep = tr.depart().t_days, t_arr = tr.t_nav_fin_days;
   const double tof_s = (t_arr - t_dep) * cst::DAY;
   const double t_c_s = d.t_tcm_days * cst::DAY;
 
@@ -232,6 +240,97 @@ inline NavRealisation nav_realisation(const FlightTrace& tr, const NavDispersion
   return r;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// VISER UN SURVOL : LE PLAN-B [GDD 8.4, 8.5, 5.11]
+// ═══════════════════════════════════════════════════════════════════════════
+// `astro/BPlane.hpp` était le QUATRIÈME en-tête mort de la série des assistances,
+// et son propre commentaire disait à quoi il devait servir : « on ne cible pas
+// une orbite, on cible un point dans un plan perpendiculaire à l'asymptote
+// d'arrivée ; l'ellipse de dispersion superposée au corridor admissible EST
+// l'interface de la sanction ». Il n'avait aucun appelant parce que le jeu
+// n'avait aucun survol. Il en a un.
+//
+// ═══ CE QU'UN SURVOL EXIGE, ET QUE PERSONNE N'EXIGEAIT ═══
+// Un transfert direct arrive « à Jupiter » : rater de 100 000 km se corrige. Un
+// SURVOL est un rendez-vous de précision — la déviation qu'il fournit dépend du
+// périastre, et 100 km d'écart en paramètre d'impact valent 91 km d'altitude.
+// En dessous de l'interface atmosphérique, le véhicule ne survole plus : il rentre
+// à 9 km/s. Le corridor est donc BORNÉ PAR LA PHYSIQUE, pas par une règle.
+//
+// ═══ LA CASCADE, ET SON RÉSULTAT INATTENDU ═══
+//   1. TCM-1 annule le manque au but prédit ; son coût est `d.sigma_corr`.
+//   2. Son EXÉCUTION est imparfaite (Gates), et cette erreur-là se propage
+//      jusqu'au survol : c'est le manque résiduel.
+//   3. Une DERNIÈRE correction, quelques jours avant le survol, l'annule.
+//   4. C'est SON erreur d'exécution qui décide — et elle, plus rien ne la corrige.
+// MESURÉ : le résidu final est **insensible à la date de cette dernière
+// correction** (111 km à E−3 j, 113 km à E−10 j, 123 km à E−30 j). La raison est
+// structurelle : corriger plus tard coûte plus cher (bras de levier plus court),
+// donc l'erreur d'exécution grandit dans la même proportion que le levier
+// diminue. Le délai déclaré n'est donc PAS un réglage caché — c'est ce qui rend
+// ce modèle publiable.
+struct SurvolNav {
+  bool   ok{false};
+  double b_vise_m{0.0};          // paramètre d'impact visé
+  double b_limite_m{0.0};        // celui qui amène à l'interface atmosphérique
+  double demi_corridor_m{0.0};   // ce qu'on peut rater vers le bas
+  double dv_derniere_corr{0.0};  // p99 de la dernière correction (m/s)
+  double sigma_b_m{0.0};         // dispersion résiduelle dans le plan-B
+  double p_survol{1.0};          // P(le survol reste dans le corridor)
+};
+
+// Délai de la DERNIÈRE correction avant un survol. Dix jours : c'est la pratique
+// réelle (Galileo, Cassini et Juno ont tous placé leur dernier TCM entre E−10 j et
+// E−3 j). Et la mesure ci-dessus montre que le résultat n'en dépend pas.
+inline constexpr double TCM_FINALE_AVANT_SURVOL_J = 10.0;
+
+inline SurvolNav nav_survol(const FlightTrace& tr, const NavDispersion& d,
+                            int arc_du_survol, double rp_vise_m, double rp_limite_m,
+                            double vinf_fb_ms, double mu_corps,
+                            double lead_days = TCM_FINALE_AVANT_SURVOL_J,
+                            const nav::GatesParams& gates = {}) {
+  SurvolNav s;
+  if (!tr.ok || !d.ok || arc_du_survol <= 0 || arc_du_survol >= tr.n_arcs) return s;
+  if (!(vinf_fb_ms > 0.0) || !(rp_vise_m > rp_limite_m)) return s;
+
+  // 1) LE CORRIDOR, en paramètre d'impact — la conversion exacte de `BPlane.hpp`.
+  s.b_vise_m   = astro::b_from_rp(rp_vise_m, vinf_fb_ms, mu_corps);
+  s.b_limite_m = astro::b_from_rp(rp_limite_m, vinf_fb_ms, mu_corps);
+  s.demi_corridor_m = s.b_vise_m - s.b_limite_m;
+  if (!(s.demi_corridor_m > 0.0)) return s;
+
+  // 2) CE QUE TCM-1 LAISSE AU SURVOL : son erreur d'exécution, propagée.
+  const double sig_e1 =
+      nav::gates_sigma_total(MAXWELL_P99 * d.sigma_corr, gates) / std::sqrt(3.0);
+  double t_vers_survol = 0.0;
+  for (int a = 0; a <= arc_du_survol; ++a) t_vers_survol += tr.arcs[a].dt_days;
+  const double dt1 = (t_vers_survol - d.t_tcm_days) * cst::DAY;
+  if (dt1 <= 0.0) return s;
+  const StmBlocks S1 = kepler_stm(tr.arcs[0].r0, tr.arcs[0].v0, dt1, cst::MU_SUN);
+  if (!S1.ok) return s;
+  const double miss1 = sig_e1 * std::sqrt(S1.rv.frob2() / 3.0);
+
+  // 3) LA DERNIÈRE CORRECTION, et 4) ce qu'ELLE laisse.
+  const StmBlocks S2 = kepler_stm(tr.arcs[arc_du_survol].r0, tr.arcs[arc_du_survol].v0,
+                                  lead_days * cst::DAY, cst::MU_SUN);
+  if (!S2.ok) return s;
+  const double levier = std::sqrt(S2.rv.frob2() / 3.0);   // m de manque par m/s
+  if (!(levier > 0.0)) return s;
+  const double sig_c2 = miss1 / levier;
+  s.dv_derniere_corr = MAXWELL_P99 * sig_c2;
+  const double sig_e2 = nav::gates_sigma_total(s.dv_derniere_corr, gates) / std::sqrt(3.0);
+  s.sigma_b_m = sig_e2 * levier;
+  if (!(s.sigma_b_m > 0.0)) return s;
+
+  // 5) LA LOI EST CELLE DU PLAN-B, et c'est pour ça qu'on y travaille : le manque
+  // au but y est un vecteur à DEUX composantes (B·T, B·R), donc sa norme suit une
+  // loi de RAYLEIGH — pas Maxwell (3D), qui vaut pour un Δv.
+  const double z = s.demi_corridor_m / s.sigma_b_m;
+  s.p_survol = 1.0 - std::exp(-0.5 * z * z);
+  s.ok = true;
+  return s;
+}
+
 // Le corridor 3σ à un instant donné : la dispersion de POSITION autour de l'arc
 // nominal, propagée depuis l'erreur d'injection. C'est ce que le joueur ne sait
 // PAS de sa position [GDD 7.5, 8.3]. Il CROÎT tant que rien ne le rétrécit — et
@@ -240,8 +339,11 @@ inline NavRealisation nav_realisation(const FlightTrace& tr, const NavDispersion
 inline double corridor_3sigma_m(const FlightTrace& tr, const NavDispersion& d,
                                 double now_days) {
   if (!tr.ok || !d.ok || tr.n_nodes < 2) return 0.0;
-  const double t_dep = tr.nodes[0].t_days;
-  const double dt_s = (now_days - t_dep) * cst::DAY;
+  const double t_dep = tr.depart().t_days;
+  // LE CORRIDOR NE CROÎT QUE JUSQU'À LA PREMIÈRE VISÉE. Au-delà, la manœuvre qui
+  // l'attend le remet à zéro par définition (c'est ce qu'une correction FAIT), et
+  // propager la matrice de transition sur cinq ans de tour ne voudrait rien dire.
+  const double dt_s = (std::min(now_days, tr.t_nav_fin_days) - t_dep) * cst::DAY;
   if (dt_s <= 0.0) return 0.0;
   const StmBlocks S = kepler_stm(tr.r_dep, tr.v_dep, dt_s, cst::MU_SUN);
   if (!S.ok) return 0.0;

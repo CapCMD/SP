@@ -1255,6 +1255,14 @@ int main(int argc, char** argv) {
     // embarque hors de son domaine — l'issue changerait au rechargement.
     mv.code_embarque = true;
     mv.code_non_couvert = true;
+    // ═══ ET LE VAISSEAU PARTI EN EST UN AUSSI ═══ [GDD 12.2, 17.2] (V8)
+    // La coupe du véhicule se reconstruit depuis la pile, ses ergols, sa capsule
+    // et sa charge utile. Les recalculer au chargement les prendrait à la
+    // conception COURANTE — que le joueur a pu retoucher pendant le vol.
+    mv.vaisseau_etages.push_back({0, 0, 4200.0});
+    mv.vaisseau_etages.push_back({0, 0, 1900.0});
+    mv.vaisseau_capsule = -1;
+    mv.vaisseau_payload_kg = 1500.0;
     Gs.missions.push_back(mv);
     const std::string chemin_v = tmp + "/oracle_chrono.sav";
     sv.chemin_sauvegarde = chemin_v;
@@ -1288,6 +1296,35 @@ int main(int argc, char** argv) {
             "chrono : la date d arrivee est identique avant et apres rechargement");
       CHECK(a1.reste_jours > 250.0,
             "chrono : une croisiere martienne rechargee dure encore des mois");
+
+      // ═══ LE VAISSEAU PARTI SURVIT, ET SA COUPE EST LA MÊME ═══ [GDD 12.2, 17.2]
+      CHECK(r.vaisseau_etages.size() == 2,
+            "vaisseau : la pile figee au feu vert survit a la sauvegarde (V8)");
+      if (r.vaisseau_etages.size() == 2) {
+        CHECK(std::fabs(r.vaisseau_etages[0].propellant_kg - 4200.0) < 1e-9 &&
+              std::fabs(r.vaisseau_etages[1].propellant_kg - 1900.0) < 1e-9,
+              "vaisseau : les ergols de CHAQUE etage survivent — la coupe en depend");
+        CHECK(r.vaisseau_capsule == -1 &&
+              std::fabs(r.vaisseau_payload_kg - 1500.0) < 1e-9,
+              "vaisseau : capsule et charge utile survivent");
+      }
+      const fen::vehicle::VehicleHull h0 = Session::coupe_du_vol(mv);
+      const fen::vehicle::VehicleHull h1 = Session::coupe_du_vol(r);
+      CHECK(h0.valid && h1.valid, "vaisseau : le vol recharge a une coupe");
+      CHECK(std::fabs(h0.length_m - h1.length_m) < 1e-12 &&
+            std::fabs(h0.max_diameter_m - h1.max_diameter_m) < 1e-12,
+            "vaisseau : la coupe est identique avant et apres rechargement");
+      std::printf("     VAISSEAU : coque rechargee %.2f m x %.2f m (%d segments)\n",
+                  h1.length_m, h1.max_diameter_m, (int)h1.segments.size());
+
+      // ET L'INVARIANT QUI JUSTIFIE LE GEL : retoucher la conception ne touche
+      // PAS un vaisseau déjà parti. C'est le défaut que `tof_days` et
+      // `tour_arcs` évitent déjà, appliqué à la géométrie.
+      sv2.vehicule_design.payload_kg *= 4.0;
+      sv2.vehicule_design.stages[0].dv_target_ms *= 2.0;
+      const fen::vehicle::VehicleHull h2 = Session::coupe_du_vol(G2.missions[0]);
+      CHECK(std::fabs(h2.length_m - h1.length_m) < 1e-12,
+            "vaisseau : retoucher l atelier ne deforme pas un vol deja parti");
     }
 
     // (i) LE VOL EST PUBLIE SUR LE PONT : phase et jours restants. Sans eux, une
@@ -1330,8 +1367,15 @@ int main(int argc, char** argv) {
     const auto W0 = fen::astro::launch_window(
         tv.jeu.eph, fen::ephem::Body::EarthBary, fen::ephem::Body::Mars,
         fen::Epoch{now_tdb});
-    const double attente = (W0.ok && !W0.open && W0.next_open_days > 0.0)
-                               ? W0.next_open_days : 0.0;
+    // ═══ L'ATTENTE VIENT DU MÊME TRANSFERT QUE LA DURÉE ═══ [défaut du 2026-08-01]
+    // Cette ligne calculait l'attente sur `open`/`next_open_days` puis prenait la
+    // durée de transit AILLEURS. Or `open` peut être vrai GRÂCE À un départ dans
+    // 50 jours : le vol partait alors le jour même en emportant la durée d'un
+    // départ qu'il ne faisait pas, et l'arc plongeait à 0,862 UA pour une injection
+    // de 5 827 m/s. Les deux grandeurs sortent maintenant du MÊME appel de fenêtre.
+    (void)W0;
+    const double attente = fen::mission::transfer_wait_days(mt, fen::Epoch{now_tdb},
+                                                            tv.jeu.eph);
     mt.state_entered_days = now_days + attente;
     mt.tof_days = fen::mission::transfer_tof_days(
         mt, fen::Epoch{now_tdb + attente * cst::DAY}, tv.jeu.eph);
@@ -1341,6 +1385,35 @@ int main(int argc, char** argv) {
     const fen::mission::FlightTrace T =
         fen::mission::build_flight_trace(mt, now_days, now_tdb, tv.jeu.eph);
     CHECK(T.ok && T.n >= 2, "trace : l arc heliocentrique est resolu");
+
+    // ═══ LE GATE ET LA TRAJECTOIRE DOIVENT PARLER DU MÊME VOL ═══
+    // L INVARIANT QUI MANQUAIT, et son absence a coute trois oracles rouges le
+    // 2026-08-01. Le gate utilisait `slop_days` = 60 et la duree de transit un pas
+    // de balayage (10 j) : le gate ouvrait grace a un transfert partant dans
+    // 50 jours pendant que le vol decollait le jour meme avec la duree de CE
+    // transfert-la. Arc a 0,862 UA, injection a 5 827 m/s. Un seul reglage
+    // maintenant (`mission_window_params`), et l invariant se verifie :
+    //   attendre `transfer_wait_days` DOIT rendre la fenetre ouverte.
+    // Il ne depend d aucune date : il est vrai tous les jours de l annee.
+    {
+      const double t_apres = now_tdb + attente * cst::DAY;
+      const fen::mission::GateResult g_apres =
+          fen::mission::launch_window_gate(mt, fen::Epoch{t_apres}, tv.jeu.eph);
+      CHECK(g_apres.allowed,
+            "fenetre : apres l attente annoncee, le gate est OUVERT (un seul reglage)");
+      if (attente == 0.0)
+        CHECK(fen::mission::launch_window_gate(mt, fen::Epoch{now_tdb},
+                                               tv.jeu.eph).allowed,
+              "fenetre : attente nulle signifie gate deja ouvert, jamais l inverse");
+      // Et le couple (depart, duree) est celui du MEME instant.
+      CHECK(std::fabs(mt.tof_days
+                      - fen::mission::transfer_tof_days(mt, fen::Epoch{t_apres},
+                                                        tv.jeu.eph)) < 1e-9,
+            "fenetre : la duree de transit est celle de la date de DEPART");
+      std::printf("     fenetre : attente %.1f j -> depart a +%.1f j, transit %.1f j"
+                  " (un seul reglage de fenetre pour le gate et la trajectoire)\n",
+                  attente, T.nodes[0].t_days - now_days, mt.tof_days);
+    }
 
     // (a) L'ARC RELIE LES DEUX CORPS, AUX DATES DE LA CHRONOLOGIE. C'est
     // l'oracle qui compte : si le depart ne tombe pas sur la Terre a la date
@@ -2858,35 +2931,46 @@ int main(int argc, char** argv) {
     // Meme doctrine que le calendrier : le sous-pas fixe, donc 4 frames et 100
     // frames donnent le MEME etat. Un equipage qu on affame en achetant un
     // meilleur GPU serait un bug de rendu deguise en gameplay.
-    // On compare des DELTAS et non des absolus : les deux parties n'ont pas le
-    // meme passe (l'une a servi aux oracles precedents), et ce qu'on veut
-    // prouver est bien « meme temps reel ecoule => meme consommation », pas
-    // « memes conditions initiales ».
-    const double reste_avant = G.lived.days_left();
-    for (int i = 0; i < 40; ++i) s.tick(0.05);      // 2 s reelles en 40 frames
-    const double conso_40 = reste_avant - G.lived.days_left();
-    std::printf("     vecu : %.2f j d autonomie -> %.2f j apres 2 s a mois/s\n",
-                reste_avant, G.lived.days_left());
-
-    Session s2;
-    s2.nouvelle_partie("Oracle Vecu 2", ModeAide::Normal);
-    s2.tick(0.0);
-    fen::game::GameState& G2 = *s2.jeu.ares.etat;
-    G2.missions.push_back(mv);
-    s2.piloter_premiere_mission();
-    CHECK(s2.embarquer(), "vecu : seconde partie embarquee a l identique");
-    s2.mission_courante()->state = fen::mission::MissionState::Launched;
-    s2.mission_courante()->state_entered_days = G2.clock.now_days() - 10.0;
-    s2.tick(0.0);
-    s2.jeu.regler_cadence(fen::game::TimeRate::Month);
-    const double reste2_avant = G2.lived.days_left();
+    // ═══ LE MEME ETAT, DEUX DECOUPAGES — ET C EST TOUT CE QUI CHANGE ═══
+    // ⚠ CET ORACLE COMPARAIT DEUX PARTIES AUX PASSES DIFFERENTS (« on compare des
+    // DELTAS et non des absolus »), et ca ne prouve plus rien depuis que les
+    // AVARIES comptent : chaque partie a les siennes, a des dates differentes, et
+    // leurs deltas DOIVENT differer. Mesure du 2026-07-29, apres le recalibrage du
+    // taux de support-vie sur l ISS : une avarie de chaque cote, et 21,6 JOURS
+    // d autonomie d ecart. L oracle disait « le sous-pas fuit » alors qu il
+    // comparait deux vaisseaux differents.
+    // On sauvegarde donc l ETAT EXACT, on le rejoue deux fois, et seul le
+    // decoupage en frames change. C est enfin ce que le nom de l oracle annonce.
+    // DEUX PARTIES FRAICHES ET IDENTIQUES : meme nom, donc meme graine, donc meme
+    // etat — la seule difference est le decoupage en frames. (Recharger `s` en
+    // place ne marche pas : `Session` garde l index de sa mission courante, que
+    // `GameState::load` remplace sous ses pieds.)
     // 0,2 s PAR FRAME, et c'est deliberé : au-dela de 0,25 s le modele BORNE la
     // frame (« un gel de shaders ne coute pas des mois »), si bien que 4 frames
     // de 0,5 s ne valent pas 2 s de jeu mais 1 s. Le garde-fou est correct — il
     // faut simplement rester sous son seuil pour comparer des durees egales.
-    for (int i = 0; i < 10; ++i) s2.tick(0.2);      // 2 s reelles en 10 frames
-    const double conso_10 = reste2_avant - G2.lived.days_left();
-
+    auto conso_en = [&mv](int n_frames, double dt) {
+      Session sc;
+      sc.nouvelle_partie("Oracle Cadence", ModeAide::Normal);
+      sc.tick(0.0);
+      fen::game::GameState& Gc = *sc.jeu.ares.etat;
+      Gc.missions.push_back(mv);
+      sc.piloter_premiere_mission();
+      sc.embarquer();
+      sc.mission_courante()->state = fen::mission::MissionState::Launched;
+      sc.mission_courante()->state_entered_days = Gc.clock.now_days() - 10.0;
+      sc.tick(0.0);
+      sc.jeu.regler_cadence(fen::game::TimeRate::Month);
+      const double avant = Gc.lived.days_left();
+      for (int i = 0; i < n_frames; ++i) sc.tick(dt);
+      return avant - Gc.lived.days_left();
+    };
+    const double reste_avant = G.lived.days_left();
+    const double conso_40 = conso_en(40, 0.05);      // 2 s reelles en 40 frames
+    const double conso_10 = conso_en(10, 0.20);      // 2 s reelles en 10 frames
+    std::printf("     vecu : %.2f j d autonomie provisionnee ; 40 frames -> %.6f j "
+                "consommes | 10 frames -> %.6f j (ecart %.2e)\n",
+                reste_avant, conso_40, conso_10, std::fabs(conso_40 - conso_10));
     CHECK(conso_40 > 0.0, "vecu : le temps qui coule CONSOMME les vivres [GDD 9.1]");
     CHECK(std::fabs(conso_40 - conso_10) < 1e-9,
           "vecu : 10 frames ou 40 frames consomment AUTANT (sous-pas fixe)");
@@ -3650,6 +3734,158 @@ int main(int argc, char** argv) {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════════════════════════
+    // (e1a) LE CISLUNAIRE EXISTE, ET L ALUNISSAGE SE CALCULE [GDD 3.3, 7.6, 19.7]
+    // ═══════════════════════════════════════════════════════════════════════
+    // Le GDD nommait le lunaire QUATRE fois et le catalogue n en avait aucune
+    // mission ; `flight/Descent.hpp` attendait exactement ce consommateur.
+    {
+      const fen::mission::CatalogEntry* lune = nullptr;
+      for (const auto& e : G.catalog.entries())
+        if (e.contract.id == "CAT-12") lune = &e;
+      CHECK(lune != nullptr, "10.1 : le catalogue porte enfin une mission cislunaire");
+      CHECK(lune->contract.crewed && lune->contract.prerequisites.min_rank ==
+                fen::career::Rank::Principal,
+            "3.3 : le rang Principal est DEFINI par le vol habite cislunaire");
+      CHECK(lune->contract.terms.crew_required == 3,
+            "10.1 : trois a bord, comme Apollo");
+      // Les CINQ verrous de la matrice 19.7 sont des prerequis reels.
+      for (const char* v : {"lanceur_super_lourd", "eclss_habite", "radioprotection",
+                            "automatisation_bord", "amarrage_habite"}) {
+        bool trouve = false;
+        for (const auto& t : lune->contract.prerequisites.required_tech)
+          if (t == v) trouve = true;
+        CHECK(trouve, "19.7 : chaque verrou de la matrice est un prerequis");
+      }
+
+      // LE CONTROLE QUI COMPTE : le budget post-LEO doit retrouver celui d Apollo
+      // (~8,9 km/s : TLI 3050 + LOI 900 + descente 2050 + remontee 1850 + TEI 1000).
+      // Le forfait n en donne que 5 000 ; le reste SORT de l integration.
+      fen::mission::Mission ml;
+      ml.contract = lune->contract;
+      ml.state = fen::mission::MissionState::Qualification;
+      G.missions.clear(); G.missions.push_back(ml);
+      s.piloter_premiere_mission();
+      s.mission_plan = fen::mission::MissionPlan{};
+      s.evaluer_plan();
+      const auto& AL = s.mission_plan.assessment;
+      const double forfait = fen::mission::trajectory_dv_for_family("lunaire_habite");
+      {   // Le T/W de l atterrisseur, sur sa masse REELLEMENT allumee.
+        const double g_l = fen::cst::MU_MOON / (fen::cst::R_MOON * fen::cst::R_MOON);
+        const auto& lp = s.mission_plan.pile.back().engine_part();
+        const double ma = AL.m0_dernier_etage_kg;
+        std::printf("     cislunaire : atterrisseur %s %.0f kN, masse allumee %.0f kg, "
+                    "T/W lunaire %.2f\n",
+                    lp.id, lp.thrust_vac_n / 1000.0, ma,
+                    ma > 0.0 ? lp.thrust_vac_n / (ma * g_l) : 0.0);
+        CHECK(ma > ml.contract.terms.payload_kg,
+              "7.6 : la masse allumee comprend l etage et ses ergols, pas la seule charge");
+      }
+      std::printf("     cislunaire : forfait %.0f m/s + alunissage derive -> "
+                  "Dv de conception %.0f m/s (Apollo post-LEO ~8900)\n",
+                  forfait, AL.dv_design);
+      CHECK(AL.dv_design > forfait + 2500.0,
+            "7.6 : l alunissage AJOUTE un Delta-v derive, il n est pas dans le forfait");
+      CHECK(AL.dv_design > 8000.0 && AL.dv_design < 9800.0,
+            "7.6 : le total retrouve le budget post-LEO d Apollo (~8,9 km/s)");
+
+      // ET IL DEPEND DU MOTEUR CHOISI — mais SEULEMENT dans le regime ou les
+      // pertes de gravite existent. A T/W 12, le RL10 est deja au PLANCHER
+      // IMPULSIONNEL (v_circ = 1680 m/s) : plus de poussee n y achete rien, et
+      // c est la physique qui le dit, pas une limite du modele. Le comparer a un
+      // RS-25 ne mesurerait donc rien. Ce qui mesure, c est un atterrisseur SOUS
+      // -dimensionne en poussee.
+      const double v_circ_l = std::sqrt(fen::cst::MU_MOON / fen::cst::R_MOON);
+      const double dv_fort = AL.dv_design;
+      CHECK(std::fabs((dv_fort - forfait - s.mission_plan.finite_loss)
+                      - 2.0 * v_circ_l) < 5.0,
+            "7.6 : a T/W eleve, l alunissage colle au plancher impulsionnel");
+      // AJ10-190 : 26,7 kN, le moteur de manoeuvre orbitale de la navette. Sur un
+      // atterrisseur habite, il est FAIBLE — et les pertes de gravite se paient.
+      s.vehicule_design.stages.back().engine =
+          fen::app::VehicleDesign::index_moteur("AJ10-190");
+      s.evaluer_plan();
+      const double dv_faible = s.mission_plan.assessment.dv_design;
+      const double ma_faible = s.mission_plan.assessment.m0_dernier_etage_kg;
+      std::printf("     cislunaire : RL10 102 kN -> %.0f m/s (plancher) | "
+                  "AJ10 26,7 kN -> %.0f m/s (T/W %.2f, pertes de gravite %.0f m/s)\n",
+                  dv_fort, dv_faible,
+                  ma_faible > 0.0 ? 26700.0 / (ma_faible * (fen::cst::MU_MOON /
+                      (fen::cst::R_MOON * fen::cst::R_MOON))) : 0.0,
+                  0.5 * (dv_faible - dv_fort));
+      CHECK(dv_faible > dv_fort + 50.0,
+            "7.6 : un moteur trop faible paie des pertes de gravite REELLES");
+      // Un moteur qui ne souleve pas l atterrisseur est REFUSE, et le refus le dit.
+      for (auto& st : s.vehicule_design.stages)
+        st.engine = fen::app::VehicleDesign::index_moteur("SPT-100");  // 83 mN
+      s.evaluer_plan();
+      CHECK(!s.mission_plan.assessment.ok &&
+            s.mission_plan.assessment.why.find("SOULEVE") != std::string::npos,
+            "6.3 : un propulseur de 83 mN ne pose pas un atterrisseur habite");
+      s.vehicule_design = fen::app::VehicleDesign::starter();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // (e1b) « PERTE DE CONFINEMENT = EVENEMENT CATASTROPHIQUE » [GDD 12.4]
+    // ═══════════════════════════════════════════════════════════════════════
+    // Le modele savait le dire et ne le faisait nulle part :
+    // `antimatter_confinement_survival` n avait aucun appelant vivant. Le TAUX
+    // n est pas invente ici — c est celui que le palier d antimatiere DECLARE
+    // (`loss_rate_per_day`), deja calibre avec la fin de jeu. Une seconde
+    // constante serait un nombre que personne n aurait calibre.
+    {
+      using namespace fen::reliability;
+      const double j_ar = 8365.0;   // aller-retour Proxima, 22,9 ans terrestres
+      // Le palier ABOUTI : 1e-5/j. Sur vingt-deux ans, c est un RISQUE, pas un mur.
+      const double taux_abouti =
+          fen::rel::AntimatterProduction::for_tier(fen::rel::AntimatterTier::Mature)
+              .loss_rate_per_day;
+      const double p_ar = 1.0 - antimatter_confinement_survival(j_ar, 1.0, taux_abouti);
+      std::printf("     confinement 12.4 : palier abouti %.0e /j -> %.1f %% de perte sur "
+                  "l aller-retour de 22,9 ans\n", taux_abouti, 100.0 * p_ar);
+      CHECK(p_ar > 0.02 && p_ar < 0.30,
+            "12.4 : le confinement de fin d arbre rend l aller-retour risque, pas impossible");
+      // Et le palier D AUJOURD HUI (1e-2/j, le CERN) l interdit purement.
+      const double taux_aujourdhui =
+          fen::rel::AntimatterProduction::for_tier(fen::rel::AntimatterTier::Fission)
+              .loss_rate_per_day;
+      const double p_1an = 1.0 - antimatter_confinement_survival(365.0, 1.0, taux_aujourdhui);
+      std::printf("     confinement 12.4 : palier d aujourd hui %.0e /j -> %.1f %% de perte "
+                  "sur UN an\n", taux_aujourdhui, 100.0 * p_1an);
+      CHECK(p_1an > 0.95,
+            "12.4 : au palier d aujourd hui, un an de vol perd le confinement a coup sur");
+      CHECK(taux_aujourdhui > taux_abouti,
+            "5.12.12 : progresser dans la branche 6 AMELIORE le confinement");
+      // Le risque CROIT avec la duree — c est un processus de Poisson, pas un seuil.
+      CHECK(antimatter_confinement_survival(2.0 * j_ar, 1.0, taux_abouti) <
+            antimatter_confinement_survival(j_ar, 1.0, taux_abouti),
+            "12.4 : deux fois plus longtemps, deux fois plus d occasions de perdre");
+    }
+
+    // (e2) LA LIMITE DE DOSE PROTEGE UNE CARRIERE — PAS LE DERNIER VOL
+    // ═══════════════════════════════════════════════════════════════════════
+    // [GDD 6.6, 9.2] Elle est l'instrument qui protege un astronaute REUTILISABLE.
+    // Sur le vol terminal — celui qu'on prend « lorsqu'il n'a plus de carriere a
+    // construire » — elle protegeait une carriere qui n'existe plus, et elle
+    // interdisait donc precisement le seul vol pour lequel tout le reste existe.
+    // Elle reste opposable a TOUTE mission ordinaire.
+    {
+      Session sd;
+      sd.nouvelle_partie("Oracle Dose", ModeAide::Normal);
+      sd.tick(0.0);
+      auto& Gd = *sd.jeu.ares.etat;
+      Gd.dose_architecte.career_sv = 2.0;                 // deja consomme
+      CHECK(Gd.dose_architecte.career_exceeded(),
+            "6.6 : deux Sv de carriere depassent la limite institutionnelle");
+      // Le RISQUE, lui, se lit toujours — c'est ce qui rend l acceptation informee.
+      CHECK(Gd.dose_architecte.reid_career() > 0.03,
+            "6.6 : ... et il se chiffre en REID, pas en booleen");
+      std::printf("     dose : carriere 2,0 Sv -> REID %.1f %% ; limite %s\n",
+                  100.0 * Gd.dose_architecte.reid_career(),
+                  Gd.dose_architecte.career_exceeded() ? "depassee" : "tenue");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     // (f) LE VOL RELATIVISTE A ENFIN UNE ARRIVEE [GDD 3.4, 9.3]
     // ═══════════════════════════════════════════════════════════════════════
     // `window_target_for_family` ne nommait AUCUNE cible a la famille
@@ -4138,6 +4374,523 @@ int main(int argc, char** argv) {
           "3.1 : ... il s amarre a une station, il n emporte pas sa maison");
     CHECK(s.mission_plan.vital.total_kg() > 0.0,
           "9.4 : ... mais il emporte bien ses consommables");
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 36. L ASSISTANCE GRAVITATIONNELLE EST UNE DECISION D ARCHITECTE [GDD 5.11]
+  // ═══════════════════════════════════════════════════════════════════════════
+  // La branche entiere (`mission/Assistance.hpp` + quatre modules d astro_core)
+  // n avait d appelant que dans les oracles de PHYSIQUE : le catalogue n avait
+  // aucune mission qu un tour puisse servir. CAT-13 est cette mission, et
+  // `Session::choisir_tour` est la porte.
+  {
+    using namespace fen::mission;
+    Session s;
+    s.nouvelle_partie("Oracle Assistance", ModeAide::Normal);
+    s.tick(0.0);
+    fen::game::GameState& G = *s.jeu.ares.etat;
+    for (auto& n : const_cast<std::vector<fen::tech::TechNode>&>(G.tree.all()))
+      n.trl = fen::tech::TRL_OPERATIONAL;
+    G.career.rank = fen::career::Rank::Directeur;
+
+    // (a) LES REGLAGES DE FENETRE ETAIENT CEUX DE MARS, ET RIEN NE LE DISAIT.
+    // Le transfert de Hohmann vers Jupiter dure 997 j ; les bornes par defaut
+    // explorent 150 a 400 j. Le balayage butait sur son plafond et rendait un arc
+    // de 400 jours a 17,6 km/s d injection.
+    {
+      const fen::Epoch t0{s.jeu.epoch_courant()};
+      const auto pm = fen::mission::mission_window_params_for(
+          fen::ephem::Body::EarthBary, fen::ephem::Body::Mars, s.jeu.eph, t0);
+      const auto pj = fen::mission::mission_window_params_for(
+          fen::ephem::Body::EarthBary, fen::ephem::Body::Jupiter, s.jeu.eph, t0);
+      const auto def = fen::mission::mission_window_params();
+      CHECK(pm.tof_min_days == def.tof_min_days && pm.tof_max_days == def.tof_max_days
+                && pm.horizon_days == def.horizon_days && pm.slop_days == def.slop_days,
+            "7.3 : MARS NE BOUGE PAS D UN BIT — les bornes par defaut la decrivent deja");
+      CHECK(pj.tof_max_days > 1000.0,
+            "7.3 : ... et Jupiter recoit des bornes qui contiennent son Hohmann (997 j)");
+      CHECK(pj.tof_min_days > def.tof_min_days,
+            "7.3 : ... derivees de la geometrie, pas d une seconde table");
+      std::printf("     ASSISTANCE : fenetre Mars %.0f-%.0f j (defaut) | Jupiter %.0f-%.0f j"
+                  " (derivee du Hohmann)\n",
+                  pm.tof_min_days, pm.tof_max_days, pj.tof_min_days, pj.tof_max_days);
+    }
+
+    // (b) LE CONTRAT EXISTE ET IL EST REALISABLE.
+    const fen::mission::CatalogEntry* src = nullptr;
+    for (const auto& e : G.catalog.entries())
+      if (e.contract.id == "CAT-13") src = &e;
+    CHECK(src != nullptr, "10.1 : le catalogue porte l orbiteur du systeme solaire externe");
+    if (src) {
+      Mission m;
+      m.contract = src->contract;
+      m.state = MissionState::Design;
+      G.missions.clear();
+      G.missions.push_back(m);
+      s.piloter_premiere_mission();
+      s.mission_plan = MissionPlan{};
+      s.mission_plan.program.dv_margin = 150.0;   // une marge de conception normale
+      s.evaluer_plan();
+      const double dv_direct = s.mission_plan.dv_traj_override;
+      const double m0_direct = s.mission_plan.assessment.m0_kg;
+      const double cout_direct = s.mission_plan.assessment.cost_total;
+      const double tof_direct = s.duree_transit_jours(*s.mission_courante());
+      CHECK(s.mission_plan.assessment.ok,
+            "4.1 : CAT-13 est realisable en transfert direct");
+      CHECK(dv_direct > 6000.0 && dv_direct < 12000.0,
+            "7.3 : le Dv d un transfert direct vers Jupiter est de l ordre de 8-9 km/s");
+      CHECK(tof_direct > 700.0 && tof_direct < 1300.0,
+            "7.3 : ... et sa duree de l ordre du Hohmann (997 j)");
+
+      // (c) LE TOUR EST OFFERT, ET SEULEMENT A QUI VA LA-BAS.
+      CHECK(!s.tours_offerts(*s.mission_courante()).empty(),
+            "5.11 : un vol vers Jupiter se voit offrir les tours qui y menent");
+      {
+        Mission mm;
+        mm.contract.id = "TOUR-MARS";
+        mm.contract.family = "mars";
+        mm.contract.terms = contract_terms_for_family("mars");
+        mm.state = MissionState::Design;
+        G.missions.push_back(mm);
+        const Mission& ref = G.missions.back();
+        CHECK(s.tours_offerts(ref).empty(),
+              "5.11 : un vol martien ne se voit PAS offrir un tour vers Jupiter");
+        G.missions.pop_back();
+      }
+
+      // (d) LE TROC EST REEL, ET IL SE PAIE EN ANNEES.
+      const bool pris = s.choisir_tour("E-E-J");
+      CHECK(pris, "5.11 : le tour se choisit, et le modele en calcule les consequences");
+      if (pris) {
+        const double dv_tour = s.mission_plan.dv_traj_override;
+        const double m0_tour = s.mission_plan.assessment.m0_kg;
+        const double tof_tour = s.duree_transit_jours(*s.mission_courante());
+        std::printf("     ASSISTANCE : CAT-13 direct %.0f m/s / %.1f t / %.0f M$ / %.0f j"
+                    "  ->  E-E-J %.0f m/s / %.1f t / %.0f M$ / %.0f j\n",
+                    dv_direct, m0_direct / 1000.0, cout_direct, tof_direct,
+                    dv_tour, m0_tour / 1000.0, s.mission_plan.assessment.cost_total,
+                    tof_tour);
+        CHECK(dv_tour < dv_direct, "5.11 : le tour coute MOINS de Delta-v que le direct");
+        CHECK(m0_tour < m0_direct, "6.1 : ... donc moins de masse au decollage (Tsiolkovsky)");
+        CHECK(s.mission_plan.assessment.cost_total < cout_direct,
+              "13.3 : ... donc un lanceur moins cher");
+        CHECK(tof_tour > tof_direct * 1.5,
+              "5.11 : ... et il se paie en ANNEES de vol, ce qui est tout son prix");
+        CHECK(s.mission_courante()->tour_id == "E-E-J",
+              "5.11 : le choix vit sur la MISSION, pas sur l ecran qui l a pris");
+        // La duree est la MEME dans l evaluation du plan et au feu vert : un seul
+        // endroit la decide (piege n°94).
+        CHECK(std::fabs(s.mission_plan.env_mission.duree_vol_jours - tof_tour) < 1e-9,
+              "12.4 : la duree qui use le vaisseau est celle du tour, pas celle du direct");
+      }
+
+      // (e) LES DEUX AXES DE [GDD 5.4] GARDENT VRAIMENT.
+      s.choisir_tour("");
+      CHECK(s.mission_courante()->tour_id.empty(),
+            "5.11 : on revient au transfert direct, et le bilan est jete");
+      if (auto* n = G.tree.find_mut("gravity_assist")) n->trl = 4;
+      CHECK(!s.choisir_tour("E-E-J"),
+            "5.4 : sans le noeud d arbre, l agence ne sait pas planifier d assistance");
+      CHECK(s.tour_bilan.cause.find("gravity_assist") != std::string::npos,
+            "5.4 : ... et le refus NOMME la techno a rechercher");
+      if (auto* n = G.tree.find_mut("gravity_assist")) n->trl = fen::tech::TRL_OPERATIONAL;
+      G.career.rank = fen::career::Rank::Junior;
+      CHECK(!s.choisir_tour("E-E-J"),
+            "3.2 : le RANG est l autre verrou, et il est distinct de la maturite");
+      CHECK(s.tour_bilan.cause.find("Senior") != std::string::npos,
+            "3.2 : ... le refus nomme le rang exige");
+      G.career.rank = fen::career::Rank::Directeur;
+
+      // (e2) LA TRACE DU TOUR EST CELLE DU TOUR [GDD 8.3, 17.3]
+      // « Trajectoires, position et prochain noeud sont dessines DANS LE MONDE, a
+      // leur position reelle. » Un vol qui passe par la Terre et met 4,8 ans ne
+      // peut pas s afficher avec l arc direct de 893 jours : ce serait montrer une
+      // trajectoire que personne ne vole. Les morceaux sont ceux que l optimiseur
+      // a PARCOURUS, figes sur la mission au feu vert.
+      CHECK(s.choisir_tour("E-E-J"), "5.11 : le tour se reprend pour la trace");
+      if (s.tour_bilan_valide(*s.mission_courante())) {
+        Mission mv;
+        mv.contract = src->contract;
+        mv.state = MissionState::Launched;
+        mv.state_entered_days = G.clock.now_days();
+        mv.tof_days = s.tour_bilan.tof_ans * 365.25;
+        mv.tour_id = "E-E-J";
+        for (const auto& a : s.tour_bilan.arcs) {
+          Mission::TourArc ta;
+          ta.r0[0] = a.r0.x; ta.r0[1] = a.r0.y; ta.r0[2] = a.r0.z;
+          ta.v0[0] = a.v0.x; ta.v0[1] = a.v0.y; ta.v0[2] = a.v0.z;
+          ta.t0_tdb = a.t0; ta.dt_s = a.dt;
+          mv.tour_arcs.push_back(ta);
+        }
+        const FlightTrace tv = build_flight_trace(
+            mv, G.clock.now_days(), s.jeu.epoch_courant(), s.jeu.eph);
+        CHECK(tv.ok, "8.3 : un vol qui suit un tour a une trace");
+        CHECK(tv.n_arcs == 4,
+              "8.3 : deux morceaux par jambe — derive vers la manoeuvre profonde, puis arc");
+        CHECK(tv.n_nodes == 5,
+              "8.3 : cinq noeuds — depart, DSM, survol, DSM, arrivee");
+        // LE CONTROLE QUI PROUVE QUE C EST BIEN UN SURVOL : au noeud du survol, le
+        // vaisseau est A LA TERRE. Ce n est pas une tolerance de dessin — dans le
+        // modele a coniques raccordees, le survol A LIEU a la position du corps.
+        {
+          const double t_fb = tv.nodes[2].t_days;
+          const double tdb = s.jeu.epoch_courant()
+                           + (t_fb - G.clock.now_days()) * fen::cst::DAY;
+          const fen::Vec3 rT = s.jeu.eph.state(fen::ephem::Body::EarthBary,
+                                               fen::ephem::Body::Sun,
+                                               fen::Epoch{tdb}).r;
+          const double d_km = norm(tv.nodes[2].pos - rT) / 1000.0;
+          std::printf("     ASSISTANCE : au noeud de survol, le vaisseau est a %.0f km"
+                      " de la Terre (%.2f ans apres le depart)\n",
+                      d_km, (t_fb - tv.depart().t_days) / 365.25);
+          CHECK(d_km < 1.0, "8.3 : le noeud de survol EST a la position de la Terre");
+        }
+        // LA POSITION SUIT LES MORCEAUX, pas le premier : apres le survol, propager
+        // l etat de depart donnerait un vaisseau qui n est plus sur sa trajectoire.
+        {
+          FlightTrace t2 = tv;
+          const double t_mid = 0.5 * (tv.nodes[2].t_days + tv.arrivee().t_days);
+          trace_avancer(t2, t_mid);
+          double d_min = 1e30;
+          for (int k = 0; k < t2.n; ++k)
+            d_min = std::min(d_min, norm(t2.pos - t2.traj[k]));
+          CHECK(t2.sur_arc, "8.3 : a mi-chemin de la seconde jambe, le vol est sur son arc");
+          CHECK(d_min < 5.0e9,
+                "8.3 : ... et sa position est UN POINT de la polyligne tracee");
+        }
+        // ET LA NAVIGATION SE JUGE SUR LA PREMIERE VISEE, pas sur Jupiter dans
+        // cinq ans : la matrice de transition n aurait aucune validite sur un tel
+        // arc, et aucune correction ne se fait « pour dans cinq ans ».
+        CHECK(tv.t_nav_fin_days < tv.arrivee().t_days,
+              "8.4 : un tour vise d abord sa manoeuvre profonde, pas sa destination");
+        CHECK(std::fabs(tv.t_nav_fin_days
+                        - (tv.depart().t_days + tv.arcs[0].dt_days)) < 1e-9,
+              "8.4 : ... c est-a-dire la fin du premier morceau");
+      }
+
+      // (e3) LE SURVOL SE VISE DANS LE PLAN-B [GDD 8.4, 8.5]
+      // `astro/BPlane.hpp` etait le quatrieme en-tete mort de la serie, et son
+      // commentaire disait a quoi il devait servir : « l ellipse de dispersion
+      // superposee au corridor admissible EST l interface de la sanction ». Il n
+      // avait aucun appelant parce que le jeu n avait aucun survol.
+      s.evaluer_plan();
+      if (s.nav_survol_.ok) {
+        const auto& sv = s.nav_survol_;
+        std::printf("     ASSISTANCE : survol — b vise %.0f km, corridor %.0f km,"
+                    " derniere correction %.1f m/s, residu %.0f km -> P(survol) %.4f\n",
+                    sv.b_vise_m / 1000.0, sv.demi_corridor_m / 1000.0,
+                    sv.dv_derniere_corr, sv.sigma_b_m / 1000.0, sv.p_survol);
+        CHECK(sv.b_vise_m > sv.b_limite_m,
+              "8.4 : le parametre d impact vise est AU-DESSUS de celui qui fait rentrer");
+        // LE CORRIDOR EST BORNE PAR L ATMOSPHERE, pas par une regle de jeu : la
+        // conversion b <-> rp est exacte (conservation de h et de l energie), et
+        // on la verifie en revenant.
+        {
+          const double vinf = s.tour_bilan.vinf_survol_ms[0];
+          const double rp = fen::astro::rp_from_b(sv.b_vise_m, vinf, fen::cst::MU_EARTH);
+          CHECK(std::fabs(rp - s.tour_bilan.rp_survol_m[0]) < 1.0,
+                "8.4 : b -> rp -> b est une identite, pas une approximation");
+          const double rp_lim = fen::astro::rp_from_b(sv.b_limite_m, vinf, fen::cst::MU_EARTH);
+          CHECK(std::fabs(rp_lim - (fen::cst::R_EARTH + 122000.0)) < 1000.0,
+                "8.4 : le bord du corridor EST l interface atmospherique (122 km)");
+        }
+        CHECK(sv.p_survol > 0.0 && sv.p_survol <= 1.0,
+              "8.4 : P(survol) est une probabilite, jamais un verdict binaire");
+        // ET ELLE ENTRE DANS P(NAVIGATION) : viser un survol est une exigence de
+        // PLUS, pas la meme exigence.
+        CHECK(s.mission_plan.p_physics <= s.nav_disp.p_marge + 1e-12,
+              "8.4 : un tour ne peut pas etre plus sur qu un vol qui n a rien a viser");
+        // ET L ARCHITECTE PEUT EXIGER PLUS HAUT [GDD 3.1] — c est LA decision,
+        // puisque l optimiseur colle toujours le periastre a sa borne basse.
+        {
+          const double rp_defaut = s.tour_bilan.rp_survol_m[0];
+          const double p_defaut = s.nav_survol_.p_survol;
+          s.alt_survol_min_km = 2000.0;
+          const bool ok2 = s.choisir_tour("E-E-J");
+          s.evaluer_plan();
+          CHECK(ok2, "3.1 : un plancher de survol plus haut reste faisable");
+          if (ok2) {
+            std::printf("     ASSISTANCE : plancher %s -> rp %.0f km, P %.4f ;"
+                        " plancher 2000 km -> rp %.0f km, P %.4f\n",
+                        "du vol reel", (rp_defaut - fen::cst::R_EARTH) / 1000.0,
+                        p_defaut,
+                        (s.tour_bilan.rp_survol_m[0] - fen::cst::R_EARTH) / 1000.0,
+                        s.nav_survol_.p_survol);
+            CHECK(s.tour_bilan.rp_survol_m[0] > rp_defaut,
+                  "3.1 : ... et le survol trouve respecte le plancher exige");
+            // ⚠ ON N EXIGE PAS ICI que P monte : relancer l optimiseur avec un
+            // autre plancher rend un AUTRE tour (autre v_inf, autre date, autre
+            // dispersion), et comparer deux vols differents ne prouverait rien.
+            // La pente du modele se verifie a v_inf FIXE, juste en dessous.
+            CHECK(s.nav_survol_.ok || s.tour_bilan.faisable,
+                  "8.5 : ... et le tour releve reste evaluable de bout en bout");
+          }
+          s.alt_survol_min_km = 0.0;
+          s.choisir_tour("E-E-J");
+          s.evaluer_plan();
+        }
+        // LE MODELE A UNE PENTE, ET ELLE VA DANS LE BON SENS : un survol plus BAS
+        // laisse moins de corridor, donc moins de chances. On le verifie sur le
+        // modele pur, sans retoucher la mission.
+        {
+          const fen::mission::FlightTrace tr = s.trace_prospective(*s.mission_courante());
+          const double vinf = s.tour_bilan.vinf_survol_ms[0];
+          const double rp_lim = fen::cst::R_EARTH + 122000.0;
+          const auto bas = fen::mission::nav_survol(
+              tr, s.nav_disp, 1, rp_lim + 50000.0, rp_lim, vinf, fen::cst::MU_EARTH);
+          const auto haut = fen::mission::nav_survol(
+              tr, s.nav_disp, 1, rp_lim + 2000000.0, rp_lim, vinf, fen::cst::MU_EARTH);
+          if (bas.ok && haut.ok) {
+            std::printf("     ASSISTANCE : survol a +50 km d altitude -> P %.4f ;"
+                        " a +2000 km -> P %.4f\n", bas.p_survol, haut.p_survol);
+            CHECK(bas.p_survol < haut.p_survol,
+                  "8.4 : raser le corps est plus RISQUE que passer large — la pente existe");
+          }
+        }
+      }
+
+      // (f) LE CHOIX SURVIT A UNE SAUVEGARDE (V6).
+      CHECK(s.choisir_tour("E-E-J"), "5.11 : le tour se reprend apres un refus");
+      const std::string avant = s.mission_courante()->tour_id;
+      fen::save::Writer w;
+      G.save(w);
+      fen::save::Reader r(w.bytes().data(), w.bytes().size());
+      // MÊME précondition que les autres oracles de sauvegarde : le catalogue est
+      // reconstruit par la graine AVANT le chargement.
+      fen::game::GameState G2 = G;
+      G2.missions.clear();
+      G2.load(r);
+      bool retrouve = false;
+      for (const auto& mm : G2.missions)
+        if (mm.contract.id == "CAT-13" && mm.tour_id == avant) retrouve = true;
+      CHECK(retrouve, "18 : le tour figé se recharge — une trajectoire n est pas un reglage d ecran");
+    }
+  }
+
+  // ═══════════ LE SCORE A TROIS CRITÈRES [GDD 3.3] ═════════════════════════
+  // « Score cumulé à PONDÉRATION ÉGALE de trois critères. » Le code n'en portait
+  // qu'un — « +40 par réussite, −10 par échec », compté sur les compteurs de
+  // l'agence —, si bien que dépenser deux fois son enveloppe ou perdre un
+  // équipage par impréparation ne pesait RIEN sur la carrière.
+  {
+    using fen::career::MissionBilan;
+    using fen::career::score_mission;
+    using fen::career::POINTS_PAR_MISSION;
+
+    // --- (a) LA PONDÉRATION EST ÉGALE, ET C'EST VÉRIFIABLE -----------------
+    // Aucun critère ne peut peser plus qu'un autre : à note extrême égale, les
+    // trois déplacent le total de la même quantité.
+    MissionBilan neutre;
+    neutre.succes = true;
+    neutre.budget_contrat_musd = 1000.0;
+    neutre.cout_engage_musd = 1000.0;   // enveloppe tenue de justesse : note nulle
+    neutre.gravite = 2;                 // une anomalie modérée : crise à 0
+    const double t0 = score_mission(neutre).total();
+    MissionBilan mieux_budget = neutre; mieux_budget.cout_engage_musd = 750.0;
+    MissionBilan mieux_crise = neutre;  mieux_crise.gravite = 0;
+    const double d_budget = score_mission(mieux_budget).total() - t0;
+    const double d_crise = score_mission(mieux_crise).total() - t0;
+    CHECK(std::fabs(d_budget - d_crise) < 1e-9,
+          "3.3 : ponderation EGALE — un point de budget vaut un point de crise");
+    CHECK(std::fabs(d_budget - POINTS_PAR_MISSION / 3.0) < 1e-9,
+          "3.3 : chaque critere vaut au plus un tiers du bareme");
+
+    // --- (b) LA CALIBRATION NE BOUGE PAS ----------------------------------
+    // Une mission NOMINALE — réussie, dans son enveloppe avec de la marge, sans
+    // anomalie — vaut toujours 40 points, comme le comptage d'avant. Les seuils
+    // de promotion gardent donc exactement le sens qu'ils avaient.
+    MissionBilan nominale;
+    nominale.succes = true;
+    nominale.budget_contrat_musd = 1000.0;
+    nominale.cout_engage_musd = 600.0;   // 40 % de marge : note pleine
+    const fen::career::MissionScore sn = score_mission(nominale);
+    CHECK(std::fabs(sn.total() - 40.0) < 1e-9,
+          "3.3 : une mission nominale vaut toujours 40 points (calibration tenue)");
+    CHECK(sn.reussite == 1.0 && sn.budget == 1.0 && sn.crise == 1.0,
+          "3.3 : ... et c est parce que les trois criteres sont pleins");
+
+    // --- (c) CHAQUE CRITÈRE MORD, ET SEUL LE SIEN --------------------------
+    MissionBilan gouffre = nominale;
+    gouffre.cout_engage_musd = 1600.0;    // 60 % de dépassement
+    const fen::career::MissionScore sg = score_mission(gouffre);
+    CHECK(sg.reussite == 1.0 && sg.crise == 1.0,
+          "3.3 : un depassement budgetaire ne touche PAS les deux autres criteres");
+    CHECK(sg.budget == -1.0, "3.3 : ... et il coute la note pleine en negatif");
+    CHECK(sg.total() < sn.total(),
+          "3.3 : une mission reussie mais ruineuse rapporte MOINS qu une mission tenue");
+    std::printf("     SCORE 3.3 : nominale %+.1f pts | ruineuse (+60 %% de budget) %+.1f | "
+                "perdue %+.1f\n",
+                sn.total(), sg.total(),
+                [&]{ MissionBilan p = nominale; p.succes = false; p.gravite = 4;
+                     return score_mission(p).total(); }());
+
+    // --- (d) LA GESTION DE CRISE SE MESURE SUR CE QU'ON A FAIT ------------
+    // « Qualité de la RÉPONSE aux anomalies. » Deux vols identiques, dont un où
+    // tout ce qui est tombé a été réparé : ce n'est pas la même carrière.
+    MissionBilan subi;
+    subi.succes = true; subi.budget_contrat_musd = 1000.0; subi.cout_engage_musd = 600.0;
+    subi.gravite = 2; subi.avaries_subies = 4; subi.avaries_reparees = 0;
+    MissionBilan sauve = subi; sauve.avaries_reparees = 4;
+    CHECK(score_mission(sauve).crise > score_mission(subi).crise,
+          "3.3 : reparer ce qui tombe AMELIORE la gestion de crise");
+    CHECK(std::fabs((score_mission(sauve).crise - score_mission(subi).crise) - 0.5) < 1e-9,
+          "10.3 : tout reparer vaut exactement le DEMI-PALIER du bareme");
+    CHECK(score_mission(subi).crise < 1.0,
+          "3.3 : une mission qui a connu des anomalies n a pas la note pleine");
+
+    // --- (e) ET LE DEMI-PALIER DE [10.3] EXISTE POUR DE BON ----------------
+    // `brilliant_recovery` était sauvegardé et POSÉ PAR PERSONNE : le seul
+    // modificateur adoucissant du barème ne pouvait jamais s appliquer.
+    {
+      fen::mission::SeverityModifiers m0;
+      const fen::mission::Severity base = fen::mission::Severity::Major;
+      m0.brilliant_recovery = true;
+      CHECK(static_cast<int>(fen::mission::apply_modifiers(base, m0)) <
+                static_cast<int>(base),
+            "10.3 : le sauvetage brillant retrograde d un demi-palier");
+      fen::mission::SeverityModifiers m1;
+      CHECK(fen::mission::apply_modifiers(base, m1) == base,
+            "10.3 : ... et sans lui la gravite ne bouge pas");
+    }
+  }
+
+  // ═══════════ LA PASSATION [GDD 3.4, 3.5, décisions 6 et 7] ═══════════════
+  // « Trois fins de partie seulement : mort naturelle (ouvre une PASSATION),
+  // mort opérationnelle (Game Over sec), licenciement. » Le personnage
+  // vieillissait et pouvait mourir ; `natural_death_due()` et
+  // `career::Succession` n'avaient AUCUN lecteur. Un Architecte de 120 ans
+  // gardait son poste, un Architecte mort aussi, et la portée
+  // multi-générationnelle que [3.5] exige pour finir la branche 6 n'existait pas.
+  {
+    Session s;
+    s.nouvelle_partie("PASSATION", ModeAide::Normal);
+    s.chemin_sauvegarde = tmp + "/oracle_passation.sav";
+    s.tick(0.0);                      // `AresLayer::assurer` cree l etat ARES
+    CHECK(s.jeu.ares.initialisee(), "passation : la couche ARES est prete");
+    auto& G = *s.jeu.ares.etat;
+
+    CHECK(G.generation == 1, "passation : la partie commence a la 1re generation");
+    CHECK(!s.passation_en_attente(), "passation : rien a passer au depart");
+    const double age0 = G.character.age_bio_years();
+    CHECK(std::fabs(age0 - fen::career::ENTRY_AGE_Y) < 1e-9,
+          "3.4 : l Architecte entre en fonction a 32 ans");
+
+    // --- (a) LE TEMPS FAIT SON OFFICE, ET LA FIN DE VIE SE CONSTATE ---------
+    // On ne pose aucun drapeau : on fait COULER le temps, exactement comme le
+    // joueur qui accélère. La mort doit arriver toute seule.
+    // ⚠ `avancer_temps` DÉPLACE LE CALENDRIER ; la couche ARES (donc le
+    // vieillissement) ne rattrape qu au tick suivant — c est `assurer` qui
+    // appelle `avancer`. Le jeu le fait a chaque frame ; un oracle doit le dire.
+    auto couler = [&s](double jours) {
+      s.jeu.avancer_temps(jours);
+      s.jeu.ares.assurer(s.jeu.agence, s.jeu.epoch_courant());
+    };
+    // ⚠ ON NE PEUT PAS SIMPLEMENT LAISSER COULER CINQUANTE-TROIS ANS, et le
+    // modele a raison de l interdire : une agence qui n entreprend rien fait
+    // FAILLITE en six ans [GDD 13.2, 14.2] — mesure ici meme —, si bien que le
+    // calendrier s arrete bien avant la fin de vie. C est la TROISIEME issue de
+    // [GDD 3.4], le licenciement, et elle est deja sous oracle ailleurs. On pose
+    // donc l AGE, qui est un fait du personnage, et on laisse le temps le
+    // constater — la meme doctrine que les drapeaux de capture.
+    couler(120.0);
+    CHECK(G.character.age_bio_years() > age0,
+          "3.4 : le temps qui passe VIEILLIT l Architecte");
+    G.character.age_bio_s = (fen::career::LIFE_EXPECTANCY_Y - 0.4) * fen::career::YEAR_S;
+    couler(30.0);
+    CHECK(G.character.alive && !G.passation_ouverte,
+          "3.4 : a 84,7 ans l Architecte est toujours en fonction");
+    couler(200.0);
+    CHECK(!G.character.alive, "3.4 : la mort naturelle survient vers 85 ans");
+    CHECK(G.passation_ouverte, "3.5 : et elle OUVRE une passation");
+    CHECK(!G.character.operational_death,
+          "3.4 : une mort naturelle n est pas une mort operationnelle");
+    CHECK(s.passation_en_attente(), "passation : la session la propose");
+    std::printf("     PASSATION : fin de vie a %.1f ans apres %.1f ans de fonction — %s\n",
+                G.character.age_bio_years(),
+                G.character.age_bio_years() - fen::career::ENTRY_AGE_Y,
+                G.passation_motif.c_str());
+
+    // --- (b) LA MODALE SE POSE, ET CE N EST PAS UN GAME OVER ---------------
+    s.tick(0.016);
+    CHECK(s.modal == Modal::Passation, "3.4 : l ecran constate la passation");
+    CHECK(!s.jeu.game_over, "3.4 : une mort naturelle ne termine PAS la partie");
+
+    // --- (c) CE QUI SE TRANSMET, ET CE QUI NE SE TRANSMET PAS --------------
+    // On monte le rang et on abîme la confiance AVANT, pour que les deux
+    // colonnes du tableau de [3.5] se distinguent l'une de l'autre.
+    G.career.rank = fen::career::Rank::Principal;
+    G.career.confidence_ares = 31.0;
+    G.career.score = 4242.0;
+    G.dose_architecte.add_chronic(3.0);
+    G.notebook.write({"note du predecesseur", "corps", 12.0, ""});
+    const std::size_t notes_avant = G.notebook.entries.size();
+    const double tresorerie_avant = G.finance.treasury_me;
+    const std::size_t noeuds_avant = G.tree.all().size();
+
+    CHECK(s.passer_la_main(), "3.5 : la passation s execute");
+    CHECK(G.generation == 2, "3.5 : le poste change de titulaire");
+    CHECK(G.career.rank == fen::career::Rank::Principal,
+          "decision 6 : le RANG est conserve — c est un droit du poste");
+    CHECK(std::fabs(G.career.confidence_ares - 70.0) < 1e-12,
+          "decision 7 : la confiance PERSONNELLE repart a 70");
+    CHECK(G.career.score == 0.0, "3.5 : le score est personnel, il ne se legue pas");
+    CHECK(G.dose_architecte.career_sv == 0.0,
+          "6.6 : la dose est celle d un CORPS — le successeur repart neuf");
+    CHECK(G.character.alive && !G.character.operational_death,
+          "3.5 : le successeur est vivant");
+    CHECK(std::fabs(G.character.age_bio_years() - fen::career::ENTRY_AGE_Y) < 1e-9,
+          "3.5 : le successeur entre en fonction au meme age");
+    CHECK(G.notebook.entries.size() == notes_avant + 1,
+          "3.5 : le CARNET est transmis (et la passation s y ecrit)");
+    CHECK(std::fabs(G.finance.treasury_me - tresorerie_avant) < 1e-12,
+          "3.5 : l etat programmatique passe INTEGRALEMENT (finances)");
+    CHECK(G.tree.all().size() == noeuds_avant,
+          "3.5 : ... et l acces technologique, qui appartient a ARES");
+    CHECK(!G.passation_ouverte && !s.passation_en_attente(),
+          "passation : une fois faite, elle se referme");
+    CHECK(s.modal != Modal::Passation, "passation : la modale se leve");
+
+    // --- (d) ET ELLE SURVIT A UNE SAUVEGARDE (V9) --------------------------
+    // Sans cela, quitter pendant la modale RESSUSCITERAIT le defunt.
+    Session s2;
+    s2.nouvelle_partie("PASSATION2", ModeAide::Normal);
+    s2.chemin_sauvegarde = tmp + "/oracle_passation2.sav";
+    s2.tick(0.0);
+    auto& G2 = *s2.jeu.ares.etat;
+    G2.character.age_bio_s = 90.0 * fen::career::YEAR_S;
+    s2.jeu.avancer_temps(40.0);
+    s2.jeu.ares.assurer(s2.jeu.agence, s2.jeu.epoch_courant());
+    CHECK(G2.passation_ouverte, "3.4 : la fin de vie est constatee au tick");
+    s2.sauvegarder_partie();
+    Session s3;
+    CHECK(s3.charger_partie(s2.chemin_sauvegarde), "passation : la partie se recharge");
+    if (s3.jeu.ares.initialisee()) {
+      auto& G3 = *s3.jeu.ares.etat;
+      CHECK(G3.passation_ouverte && !G3.character.alive,
+            "V9 : le defunt ne ressuscite pas au rechargement");
+      CHECK(G3.generation == 1, "V9 : la generation survit");
+      CHECK(s3.passer_la_main() && G3.generation == 2,
+            "V9 : la passation se conclut apres rechargement");
+    }
+
+    // --- (e) L INVARIANT QUI PROTEGE LE GAME OVER --------------------------
+    // « Une mort operationnelle reste un Game Over — la passation ne l annule
+    // JAMAIS » [GDD 3.5]. C est l invariant que `Career.hpp` declare en tete.
+    Session s4;
+    s4.nouvelle_partie("PASSATION3", ModeAide::Normal);
+    s4.chemin_sauvegarde = tmp + "/oracle_passation3.sav";
+    s4.tick(0.0);
+    auto& G4 = *s4.jeu.ares.etat;
+    G4.character.alive = false;
+    G4.character.operational_death = true;
+    s4.jeu.avancer_temps(365.25);
+    s4.jeu.ares.assurer(s4.jeu.agence, s4.jeu.epoch_courant());
+    CHECK(!G4.passation_ouverte,
+          "3.5 : un deces OPERATIONNEL n ouvre aucune passation");
+    CHECK(!s4.passation_en_attente() && !s4.passer_la_main(),
+          "3.5 : ... et la session refuse de la faire");
+    CHECK(!fen::career::Succession::allowed(G4.character),
+          "3.5 : l invariant est celui que Career.hpp declare");
   }
 
   std::printf("\nSESSION : %d oracles OK, %d en echec.\n", g_ok, g_ko);

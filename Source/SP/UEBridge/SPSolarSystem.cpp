@@ -690,6 +690,39 @@ void USPSolarSystemSubsystem::BuildScene()
 		MapActor->FleetMarkers.Add(M);
 	}
 
+	// ═══ LA COQUE DU VAISSEAU CONÇU [GDD 12.2, 17.2, 17.4] ═══
+	// Le modèle publie une COUPE : une pile de solides de révolution coaxiaux, en
+	// mètres. Un cylindre par réservoir, un cône par ajutage et par capsule — les
+	// primitives d'UE suffisent, et c'est exactement ce que [17.2] demande (« un
+	// véhicule assemblé par le joueur doit être RENDU, pas modélisé »).
+	// L'ÉCHELLE TOMBE JUSTE : 1 km = 1e5 u, donc 1 m = 100 u, et les primitives de
+	// base font 100 u — l'échelle d'un composant EST sa cote en mètres.
+	{
+		UStaticMesh* Cyl = LoadObject<UStaticMesh>(
+			nullptr, TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
+		UStaticMesh* Cone = LoadObject<UStaticMesh>(
+			nullptr, TEXT("/Engine/BasicShapes/Cone.Cone"));
+		if (!Cyl || !Cone)
+			UE_LOG(LogTemp, Warning,
+			       TEXT("[SPSolarSystem] primitives absentes : la coque du vaisseau ne rendra pas"));
+		for (int32 i = 0; i < fen::app::RenderBridge::HullSnap::MAX_SEG; ++i)
+		{
+			UStaticMeshComponent* M = NewObject<UStaticMeshComponent>(MapActor);
+			M->SetupAttachment(MapActor->GetRootComponent());
+			M->SetMobility(EComponentMobility::Movable);
+			M->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+			M->SetCastShadow(false);
+			if (Cyl) M->SetStaticMesh(Cyl);
+			if (BaseMat)
+				M->SetMaterial(0, UMaterialInstanceDynamic::Create(BaseMat, M));
+			M->SetVisibility(false);
+			M->RegisterComponent();
+			MapActor->HullSegments.Add(M);
+		}
+		HullCylinder = Cyl;
+		HullCone = Cone;
+	}
+
 	// Caméra carte : posée à l'origine (le monde est rebasé sur l'œil à chaque
 	// frame) ; seule sa ROTATION change.
 	MapCamera = W->SpawnActor<ACameraActor>(FVector::ZeroVector, FRotator::ZeroRotator);
@@ -762,6 +795,16 @@ FVector USPSolarSystemSubsystem::FocusWorldKm(double EpochTdb) const
 			const FVector TerrePos = Terre ? BodyWorldKm(*Terre, EpochTdb) : FVector::ZeroVector;
 			return TerrePos + EclToUeKmd(St.rel_m[0], St.rel_m[1], St.rel_m[2]);
 		}
+		return FVector::ZeroVector;
+	}
+	// LE VAISSEAU EN VOL : focalisable comme tout objet actif [GDD 17.4]. Sa
+	// position est celle que le modèle publie — l'ESTIMÉE, jamais la vraie
+	// [GDD 7.5] : la caméra ne sait pas plus que le joueur où est son vaisseau.
+	if (Focus == fen::app::FOCUS_VAISSEAU)
+	{
+		const auto& V = fen::app::g_render_bridge.vehicle;
+		if (V.valid.load())
+			return EclToUeKmd(V.pos_m[0], V.pos_m[1], V.pos_m[2]);
 		return FVector::ZeroVector;
 	}
 	if (Focus < 0 || Focus >= static_cast<int>(Body::COUNT)) return FVector::ZeroVector;
@@ -1074,17 +1117,103 @@ void USPSolarSystemSubsystem::UpdateScene(double EpochTdb, const FVector& CamWor
 	}
 
 	// --- vaisseau en vol interplanétaire : position ESTIMÉE [GDD 7.5] --------
+	// ═══ ET SA COQUE, DÈS QU'ELLE VAUT PLUS QU'UN POINT ═══ [GDD 12.2, 17.2, 17.4]
+	// « De la vue système au plan vaisseau (mètres) par simple zoom, car le
+	// vaisseau EST DÉJÀ dans la scène. » Deux crans, exactement comme Novellus :
+	// de loin un MARQUEUR de taille écran constante, de près la COQUE conçue par
+	// le joueur, à l'échelle réelle. La bascule tombe sur la taille apparente,
+	// seule grandeur qui décide de ce qu'un pixel peut montrer.
 	const bool bVehicle = Bridge.vehicle.valid.load() && !bBord;   // symbole : pas à bord
-	if (MapActor->VehicleMarker)
 	{
-		MapActor->VehicleMarker->SetVisibility(bVehicle);
-		if (bVehicle)
+		const FVector VWorldKm = EclToUeKmd(Bridge.vehicle.pos_m[0], Bridge.vehicle.pos_m[1],
+		                                    Bridge.vehicle.pos_m[2]);
+		const FVector P = R(VWorldKm);
+		const auto& H = Bridge.hull_vol;
+		const double DistKm = FMath::Max(1.0e-9, (VWorldKm - CamWorldKm).Size());
+		// taille angulaire = longueur / distance, avec le MÊME seuil que Novellus.
+		const bool bCoque = bVehicle && H.valid.load() && H.n > 0 &&
+		                    ((H.length_m * 0.001) / DistKm > 3.0e-3);
+
+		if (MapActor->VehicleMarker)
 		{
-			const FVector P = R(EclToUeKmd(Bridge.vehicle.pos_m[0], Bridge.vehicle.pos_m[1],
-			                               Bridge.vehicle.pos_m[2]));
-			MapActor->VehicleMarker->SetWorldLocation(P);
-			MapActor->VehicleMarker->SetWorldScale3D(FVector(MarkerScale(P)));
+			MapActor->VehicleMarker->SetVisibility(bVehicle && !bCoque);
+			if (bVehicle && !bCoque)
+			{
+				MapActor->VehicleMarker->SetWorldLocation(P);
+				MapActor->VehicleMarker->SetWorldScale3D(FVector(MarkerScale(P)));
+			}
 		}
+
+		// L'AXE DU VAISSEAU EST SA VITESSE, publiée par le modèle [doctrine du
+		// pont] : le rendu ne dérive pas une direction en différenciant deux
+		// frames — à « mois/s » une frame avance de douze heures.
+		FQuat Att = FQuat::Identity;
+		{
+			const FVector Vel = RenderRot.RotateVector(
+				EclToUeKmd(Bridge.vehicle.vel_ms[0], Bridge.vehicle.vel_ms[1],
+				           Bridge.vehicle.vel_ms[2]).GetSafeNormal());
+			if (!Vel.IsNearlyZero())
+				Att = FRotationMatrix::MakeFromZ(Vel).ToQuat();   // +Z local = l'avant
+		}
+
+		const int32 NSeg = FMath::Min(H.n, MapActor->HullSegments.Num());
+		for (int32 i = 0; i < MapActor->HullSegments.Num(); ++i)
+		{
+			UStaticMeshComponent* M = MapActor->HullSegments[i];
+			if (!M) continue;
+			if (!bCoque || i >= NSeg) { M->SetVisibility(false); continue; }
+
+			const auto& S = H.seg[i];
+			// LE MAILLAGE SUIT LE RÔLE : cône pour ce qui se referme (ajutage,
+			// capsule), cylindre pour ce qui porte (réservoir, jupe, charge utile).
+			// On ne le repose que si la COUPE a changé — sinon c'est un appel par
+			// segment et par frame pour rien.
+			const bool bCone = (S.role == 0 /*Nozzle*/) || (S.role == 4 /*Capsule*/);
+			if (HullGenVu != H.gen.load())
+				M->SetStaticMesh(bCone ? HullCone : HullCylinder);
+
+			// 1 m = 100 u, et les primitives de base font 100 u : l'échelle d'un
+			// composant EST sa cote en mètres. Le cône du GDD 12.2 est tronqué ;
+			// la primitive ne l'est pas — approximation de dessin, déclarée.
+			const double LenM = FMath::Max(0.01, S.z1_m - S.z0_m);
+			const double DiaM = 2.0 * FMath::Max(S.r0_m, S.r1_m);
+			M->SetWorldScale3D(FVector(DiaM, DiaM, LenM));
+			// ═══ LE CÔNE D'UE PORTE SA BASE EN −Z, SA POINTE EN +Z ═══ — donc
+			// exactement la convention de la coupe, qui met le grand rayon à la
+			// station BASSE (la sortie d'un ajutage, le bouclier d'une capsule).
+			// Aucune rotation propre n'est nécessaire.
+			// MESURÉ, PAS SUPPOSÉ (2026-08-01) : à la taille réelle, une cloche de
+			// 1,5 m au bout d'un vaisseau de 19 m est trop petite pour qu'une capture
+			// tranche — j'ai lu trois fois l'inverse de la vérité sur trois images.
+			// Ce qui a tranché, c'est de dessiner l'ajutage à 6 m le temps d'une
+			// capture : les deux orientations deviennent alors impossibles à
+			// confondre. Une échelle négative aurait « marché » aussi, mais elle
+			// retourne l'orientation des faces et la pièce rend son intérieur.
+			M->SetWorldRotation(Att);
+			// Le vaisseau est CENTRÉ sur sa position estimée : la coupe est en
+			// stations depuis la base, on la recentre sur le milieu de la pile.
+			const double ZmidM = 0.5 * (S.z0_m + S.z1_m) - 0.5 * H.length_m;
+			M->SetWorldLocation(P + Att.RotateVector(FVector(0.0, 0.0, ZmidM * 100.0)));
+			M->SetVisibility(true);
+
+			if (UMaterialInstanceDynamic* Mid =
+			        Cast<UMaterialInstanceDynamic>(M->GetMaterial(0)))
+			{
+				// Les rôles se lisent d'un coup d'œil, comme sur un plan de bureau
+				// d'études : ajutage sombre, réservoir clair, jupe grise, capsule
+				// cuivrée (le bouclier ablatif).
+				static const FLinearColor Cols[5] = {
+					FLinearColor(0.16f, 0.16f, 0.18f),   // ajutage
+					FLinearColor(0.82f, 0.84f, 0.88f),   // réservoir
+					FLinearColor(0.45f, 0.47f, 0.50f),   // interétage
+					FLinearColor(0.60f, 0.62f, 0.66f),   // charge utile
+					FLinearColor(0.72f, 0.45f, 0.24f),   // capsule
+				};
+				Mid->SetVectorParameterValue(
+					TEXT("Color"), Cols[FMath::Clamp(S.role, 0, 4)]);
+			}
+		}
+		if (bCoque) HullGenVu = H.gen.load();
 	}
 
 	// --- NOVELLUS dans le monde [GDD v1.2 11.1, 17.3, 17.4] : LOD PAR TAILLE
@@ -1452,7 +1581,7 @@ void USPSolarSystemSubsystem::EmitOrbits(const FVector& CamWorldKm, double CamDi
 		}
 
 		// nœuds de manœuvre : croix (orange = à faire, grise = faite)
-		for (int32 k = 0; k < V.n_nodes && k < 2; ++k)
+		for (int32 k = 0; k < V.n_nodes && k < fen::app::RenderBridge::VehicleSnap::MAX_NODES; ++k)
 		{
 			const FVector N = R(EclToUeKmd(V.nodes_m[k][0], V.nodes_m[k][1], V.nodes_m[k][2]));
 			const double S = FMath::Max(1.0, N.Size() * MARKER_ANG * 2.0);

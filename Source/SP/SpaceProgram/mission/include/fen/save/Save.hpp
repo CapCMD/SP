@@ -31,7 +31,33 @@ inline constexpr std::uint32_t SAVE_MAGIC = 0x53455241u; // "ARES"
 // exactement l'état qu'elle décrivait.
 // V5 : `Mission::beta_croisiere`, figé au feu vert. Lu sous `version() >= 5` ;
 // une archive V4 retombe sur 0, la valeur de toute mission non relativiste.
-inline constexpr std::uint32_t SCHEMA_VERSION = 5;
+// V6 (2026-07-31) : `Mission::tour_id` — le tour d'assistance gravitationnelle
+// choisi, figé au feu vert au même titre que la durée de transit qu'il décide.
+// Une archive V5 retombe sur la chaîne vide, c'est-à-dire le transfert DIRECT :
+// exactement ce que volaient toutes les missions avant ce champ.
+// V7 (2026-07-31) : `Mission::tour_arcs` — les morceaux de trajectoire d'un tour,
+// figés au feu vert. Un tour se recalcule différemment à chaque date de balayage :
+// sans eux, un vol rechargé volerait une AUTRE trajectoire que la sienne. Une
+// archive V6 retombe sur une liste vide, c'est-à-dire l'arc direct, qui se
+// reconstruit à l'identique par Lambert.
+// V8 (2026-08-01) : `Mission::vaisseau_etages` + capsule + charge utile — le
+// VÉHICULE réellement parti, figé au feu vert [GDD 12.2, 17.2]. Sans lui, la
+// coupe d'un vol rechargé serait celle de la conception COURANTE, que le joueur
+// a pu retoucher depuis : un vaisseau déjà parti changerait de forme. Une archive
+// V7 retombe sur une liste vide, c'est-à-dire un vol sans coupe — le marqueur,
+// comme avant ce champ.
+// V9 (2026-08-01) : `GameState::passation_ouverte` + son motif + la GÉNÉRATION
+// [GDD 3.4, 3.5]. Sans eux, sauvegarder pendant la modale de passation
+// RESSUSCITERAIT le défunt au rechargement — la fin de vie est un fait du monde,
+// pas un état d'écran. Une archive V8 retombe sur « aucune passation en cours,
+// première génération », c'est-à-dire ce qu'elle décrivait.
+// V10 (2026-08-02) : `Mission::cout_engage_musd` + les deux compteurs de crise
+// [GDD 3.3]. Le score de promotion se juge à l'arrivée sur TROIS critères ; sans
+// eux, deux des trois seraient recalculés depuis l'état COURANT de l'agence — ce
+// qui reviendrait à noter une mission sur la conception d'aujourd'hui. Une
+// archive V9 retombe sur un coût nul et zéro panne : le critère budgétaire est
+// alors neutre pour les vols d'avant ce champ, ce qui est exactement leur cas.
+inline constexpr std::uint32_t SCHEMA_VERSION = 10;
 
 // --- Écriture ----------------------------------------------------------------
 class Writer {

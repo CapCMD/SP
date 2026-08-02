@@ -66,6 +66,25 @@ namespace SPCapture
 	// CONTRÔLE et le gel de l'agence [GDD 9.3] ne se photographient jamais.
 	// À combiner avec `-sppost=3` et `-spcadence=4`.
 	bool RequestedVecu();
+	// `-spvaisseau` : CADRE LE VAISSEAU CONÇU, À L'ÉCHELLE RÉELLE, DANS LE MONDE
+	// [GDD 12.2, 17.2, 17.4]. Implique `-spvol=croisiere` (il faut un vol en
+	// cours) et verrouille le focus caméra sur le vaisseau — le même
+	// `FOCUS_VAISSEAU` qu'un clic du joueur — à quelques dizaines de mètres. Sans
+	// lui, la coque du véhicule conçu n'est photographiable par aucune capture :
+	// elle est à des centaines de millions de kilomètres, et rien d'autre ne sait
+	// y amener l'œil. `-spdist=<km>` reste maître de la distance.
+	// `-sppassation` : L'ARCHITECTE ARRIVE EN FIN DE VIE [GDD 3.4, 3.5]. La
+	// passation demande une carrière entière — cinquante-trois ans de temps de
+	// jeu —, et une agence qui laisserait couler ce temps sans rien entreprendre
+	// ferait faillite bien avant (mesuré : six ans). L'instant est donc
+	// inatteignable par une capture. Le drapeau pose l'ÂGE, qui est un fait du
+	// personnage, et laisse le MODÈLE en tirer la fin de fonction au tick suivant.
+	bool RequestedPassation();
+	bool RequestedVaisseau();
+	// `-spvaisseau=<mètres>` : la distance de vue, EN MÈTRES ENTIERS. `-spdist=`
+	// ne convient pas ici — son parse flottant dépend de la LOCALE, et « 0.4 »
+	// rend 0,0 sur une machine française (mesuré). Défaut : 50 m.
+	int VaisseauDistanceM();
 	// `-spantimatiere` : QUALIFIE LA FILIÈRE DE FIN D'ARBRE et fait couler son
 	// stock [GDD 5.12.12, 19.3]. Le bloc ANTIMATIÈRE du poste AGENCE — débit de
 	// l'usine, plafond réel AVEC SA CAUSE, écart au seuil relativiste — ne
@@ -74,6 +93,35 @@ namespace SPCapture
 	// [Annexe E] n'est photographiable par aucune capture. À combiner avec
 	// `-sppost=0`.
 	bool RequestedAntimatiere();
+	// `-spnep` : POSE UNE FILIÈRE ALIMENTÉE DANS L'ATELIER [GDD 5.12.1, 6.2, 6.5].
+	// Le poste CONCEPTION s'ouvre sur une pile chimique, où la centrale et les
+	// radiateurs n'existent pas — et c'est correct, un moteur chimique n'en porte
+	// aucun. La ligne qui prouve que « énergie ≠ propulsion » a un consommateur
+	// n'apparaît donc sur AUCUNE capture par défaut. Le drapeau pose l'ÉTAT DU
+	// MODÈLE (un étage NEP-1MW sur réacteur), comme `-spvol` et `-spantimatiere` :
+	// la masse de centrale affichée est celle que la filière RÉCLAME, calculée par
+	// le même chemin que le jeu, jamais un nombre écrit à la main.
+	// À combiner avec `-sppost=4`.
+	bool RequestedNep();
+	// `-spnep=qualifie` : en plus, LA BRANCHE 6 EST ACQUISE [GDD 5.4, 12.4].
+	// Sans elle, l'étude s'arrête au verrou « NON QUALIFIÉ » et le bilan de
+	// viabilité n'est jamais calculé — donc la ligne des SOUS-SYSTÈMES AVANCÉS
+	// (vieillissement du cœur, collision des radiateurs) n'est photographiable
+	// par aucune capture.
+	bool RequestedNepQualifie();
+	// `-sprentree[=<id>]` : monte une capsule et pose un retour LUNAIRE [GDD 9.2].
+	bool RequestedRentree();
+	FString RentreeCapsule();
+	// `-sptour[=<id>]` : PILOTE CAT-13, l'orbiteur du système solaire externe, et
+	// choisit un TOUR d'assistance gravitationnelle [GDD 5.11]. La ligne
+	// TRAJECTOIRE du poste CONTRÔLE n'existe que pour une mission qu'un tour du
+	// catalogue peut servir — jamais la mission de départ, qui va en orbite basse.
+	// Le tour est ensuite pris par le chemin du jeu (`Session::choisir_tour`), donc
+	// le Δv, la masse et la durée affichés sont ceux que l'optimiseur trouve.
+	// `-sptour` nu montre le transfert DIRECT : l'autre moitié du troc.
+	// À combiner avec `-sppost=3`.
+	bool RequestedTour();
+	FString TourChoisi();
 	const TCHAR* RequestedVolPhase();
 	// `-spcode` : OUVRE L'ATELIER LOGICIEL du mode PRO [GDD 15.1, 15.5]. La partie
 	// de capture démarre en NORMAL, où cette face du poste n'existe pas — et le

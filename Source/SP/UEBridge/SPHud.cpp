@@ -1059,6 +1059,64 @@ TSharedRef<SWidget> SSPModal::BuildContenu()
 			             return FReply::Handled();
 		             }), 34.0f) ];
 	}
+	else if (Session->modal == fen::app::Modal::Passation)
+	{
+		// ═══ LA PASSATION [GDD 3.4, 3.5] ═══ Ce n'est PAS une fin de partie, et
+		// l'écran doit le dire avant tout le reste : le poste change de titulaire,
+		// l'agence continue. D'où un titre sobre et une seule action.
+		fen::game::GameState* G = Session->jeu.ares.initialisee()
+			? Session->jeu.ares.etat.get() : nullptr;
+		V->AddSlot().AutoHeight().HAlign(HAlign_Center).Padding(0, 26, 0, 4)
+		[
+			SNew(STextBlock).Text(LOCTEXT("Passation", "PASSATION"))
+			.Font(Mono(28.0f, 240)).ColorAndOpacity(FSlateColor(SRGB(230, 217, 179)))
+		];
+		// ⚠ SOUS-TITRE COURT, MESURÉ SUR CAPTURE : la première rédaction ajoutait
+		// « - l'agence poursuit ses programmes » et la ligne SORTAIT du panneau
+		// (560 u), la fin coupée net. Le HUD tronque au bord et c'est toujours la
+		// FIN qui saute — ce qui compte se met devant, le reste va dans le corps,
+		// qui lui est enveloppé.
+		V->AddSlot().AutoHeight().HAlign(HAlign_Center).Padding(0, 0, 0, 18)
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(
+				G ? FString(G->passation_motif.c_str()) : FString(TEXT("fin de fonction"))))
+			.Font(Mono(10.0f, 120)).ColorAndOpacity(FSlateColor(ColTexteFaible))
+		];
+		V->AddSlot().AutoHeight().Padding(26, 0, 26, 10)
+		[
+			SNew(STextBlock)
+			.Text(LOCTEXT("PassSuite",
+			              "Ce n'est pas une fin de partie : l'agence poursuit ses programmes "
+			              "sous un nouvel Architecte. [GDD 3.4]"))
+			.Font(Mono(10.0f, 30)).ColorAndOpacity(FSlateColor(ColTexte))
+			.AutoWrapText(true).WrapTextAt(500.0f)
+		];
+		// CE QUE LE SUCCESSEUR TROUVE — lu du modèle, jamais recomposé ici.
+		V->AddSlot().AutoHeight().Padding(26, 0, 26, 6)
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(FString(Session->resume_passation().c_str())))
+			.Font(Mono(10.0f, 30)).ColorAndOpacity(FSlateColor(ColTexte))
+			.AutoWrapText(true).WrapTextAt(500.0f)
+		];
+		V->AddSlot().AutoHeight().Padding(26, 0, 26, 16)
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(FString::Printf(
+				TEXT("Ce qui ne se legue pas : la credibilite personnelle, le score, "
+				     "la dose recue. [GDD 3.5]  Generation %d."),
+				G ? G->generation + 1 : 2)))
+			.Font(Mono(9.0f, 30)).ColorAndOpacity(FSlateColor(ColTexteFaible))
+			.AutoWrapText(true).WrapTextAt(500.0f)
+		];
+		V->AddSlot().AutoHeight().Padding(26, 0, 26, 26)
+		[ BoutonMenu(LOCTEXT("PrendreLePoste", "PRENDRE LE POSTE"),
+		             FOnClicked::CreateLambda([this]() {
+			             Session->passer_la_main();
+			             return FReply::Handled();
+		             }), 34.0f) ];
+	}
 	else   // Réglages
 	{
 		V->AddSlot().AutoHeight().HAlign(HAlign_Center).Padding(0, 26, 0, 18)
@@ -1274,6 +1332,60 @@ void SSPTemps::Tick(const FGeometry& AllottedGeometry, const double InCurrentTim
 	if (H > 1.0) Echelle = static_cast<float>(H / 720.0);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// LA COUPE DU VÉHICULE [GDD 12.2] — le dessin que l'atelier n'avait pas
+// ═══════════════════════════════════════════════════════════════════════════
+void SSPCoupe::Construct(const FArguments&) { SetCanTick(false); }
+
+int32 SSPCoupe::OnPaint(const FPaintArgs&, const FGeometry& G, const FSlateRect&,
+                        FSlateWindowElementList& Out, int32 Layer, const FWidgetStyle&,
+                        bool) const
+{
+	const auto& H = fen::app::g_render_bridge.hull_design;
+	if (!H.valid.load() || H.n <= 0 || H.length_m <= 0.0) return Layer;
+
+	const FVector2D Taille = G.GetLocalSize();
+	const double MargeX = 8.0, MargeY = 6.0;
+	// UNE SEULE ÉCHELLE POUR LES DEUX AXES : une coupe qui étirerait la longueur
+	// sans étirer le diamètre mentirait sur l'élancement, qui est justement ce
+	// qu'un bureau d'études regarde en premier.
+	const double EchX = (Taille.X - 2.0 * MargeX) / FMath::Max(0.01, H.length_m);
+	const double EchY = (Taille.Y - 2.0 * MargeY) / FMath::Max(0.01, H.diameter_m);
+	const double E = FMath::Min(EchX, EchY);
+	const double X0 = MargeX;
+	const double Yc = Taille.Y * 0.5;
+
+	// L'AXE, comme sur tout plan en coupe.
+	Ligne(Out, Layer, G, FVector2D(X0, Yc), FVector2D(X0 + H.length_m * E, Yc),
+	      SRGB(90, 98, 108, 0.9f), 1.0f);
+
+	static const FLinearColor ColRole[5] = {
+		SRGB(120, 128, 140),   // ajutage
+		SRGB(200, 210, 224),   // réservoir
+		SRGB(140, 150, 162),   // interétage
+		SRGB(150, 158, 170),   // charge utile
+		SRGB(214, 140, 84),    // capsule
+	};
+
+	const int32 N = FMath::Min(H.n, fen::app::RenderBridge::HullSnap::MAX_SEG);
+	for (int32 i = 0; i < N; ++i)
+	{
+		const auto& S = H.seg[i];
+		const double xa = X0 + S.z0_m * E, xb = X0 + S.z1_m * E;
+		const double ra = S.r0_m * E, rb = S.r1_m * E;
+		const FLinearColor C = ColRole[FMath::Clamp(S.role, 0, 4)];
+		// Le profil : deux génératrices symétriques, plus les deux sections. Un
+		// interétage se dessine en TRAIT FIN — il enveloppe le moteur du dessus,
+		// il ne s'ajoute pas à la pile (c'est la seule pièce qui se superpose).
+		const float Ep = (S.role == 2) ? 0.7f : 1.4f;
+		Ligne(Out, Layer + 1, G, FVector2D(xa, Yc - ra), FVector2D(xb, Yc - rb), C, Ep);
+		Ligne(Out, Layer + 1, G, FVector2D(xa, Yc + ra), FVector2D(xb, Yc + rb), C, Ep);
+		Ligne(Out, Layer + 1, G, FVector2D(xa, Yc - ra), FVector2D(xa, Yc + ra), C, Ep);
+		Ligne(Out, Layer + 1, G, FVector2D(xb, Yc - rb), FVector2D(xb, Yc + rb), C, Ep);
+	}
+	return Layer + 2;
+}
+
 void SSPPoste::Construct(const FArguments& InArgs)
 {
 	Session = InArgs._Session;
@@ -1365,6 +1477,50 @@ TSharedRef<SWidget> SSPPoste::BuildAgence()
 	Col->AddSlot().AutoHeight().Padding(0, 0, 0, 4)
 	[ LigneKV(TEXT("RANG"), FString(fen::career::rank_name(G.career.rank)),
 	          SRGB(255, 220, 120)) ];
+	// ═══ L'ARCHITECTE VIEILLIT, ET IL FAUT QUE ÇA SE VOIE ═══ [GDD 3.4]
+	// « Le personnage vieillit ; mort naturelle vers 85 ans » — une fin de
+	// fonction qui tomberait sans prévenir serait une surprise, pas une échéance.
+	// L'âge est en temps PROPRE : sur une architecture relativiste, il diverge du
+	// calendrier, et c'est précisément ce que [GDD 3.4] veut rendre opposable.
+	{
+		const double age = G.character.age_bio_years();
+		const double reste = fen::career::LIFE_EXPECTANCY_Y - age;
+		Col->AddSlot().AutoHeight().Padding(0, 0, 0, 4)
+		[ LigneKV(TEXT("ARCHITECTE"),
+		          FString::Printf(TEXT("%.0f ans  .  generation %d  .  %s"), age,
+		                          G.generation,
+		                          reste > 0.0
+		                              ? *FString::Printf(TEXT("%.0f ans de fonction devant lui"), reste)
+		                              : TEXT("fin de fonction")),
+		          reste > 10.0 ? ColTexte
+		          : reste > 3.0 ? SRGB(255, 189, 87) : SRGB(242, 90, 80)) ];
+	}
+	// ═══ LE SCORE DE PROMOTION, ET SES TROIS CRITÈRES ═══ [GDD 3.3]
+	// Un total nu n'apprend rien : le joueur doit lire LEQUEL des trois critères
+	// l'a fait progresser — c'est la seule façon de savoir quoi corriger. Le
+	// détail vient du modèle (`career::score_mission`), le HUD ne calcule rien.
+	{
+		const int ir = static_cast<int>(G.career.rank);
+		const bool terminal = fen::career::terminal_rank(G.career.rank);
+		const double seuil = terminal ? 0.0 : fen::career::PROMOTION_THRESHOLDS[ir];
+		Col->AddSlot().AutoHeight().Padding(0, 0, 0, 4)
+		[ LigneKV(TEXT("SCORE DE PROMOTION"),
+		          terminal
+		              ? FString::Printf(TEXT("%.0f  .  rang terminal"), G.career.score)
+		              : FString::Printf(TEXT("%.0f / %.0f  vers %s"), G.career.score, seuil,
+		                                ANSI_TO_TCHAR(fen::career::rank_name(
+		                                    static_cast<fen::career::Rank>(ir + 1)))),
+		          SRGB(140, 179, 255)) ];
+		const fen::career::MissionScore& d = Session->dernier_score_mission;
+		if (d.reussite != 0.0 || d.budget != 0.0 || d.crise != 0.0)
+		{
+			Col->AddSlot().AutoHeight().Padding(22, 0, 0, 4)
+			[ Txt(FString::Printf(
+				  TEXT("dernier vol %+.0f pts : reussite %+.2f . budget %+.2f . crise %+.2f [3.3]"),
+				  d.total(), d.reussite, d.budget, d.crise),
+			      9.0f, ColTexteFaible, 0) ];
+		}
+	}
 	Col->AddSlot().AutoHeight().Padding(0, 0, 0, 4)
 	[ LigneKV(TEXT("RECHERCHES EN COURS"),
 	          FString::Printf(TEXT("%d / %d"), slots_pris, slots_max)) ];
@@ -1785,6 +1941,18 @@ TSharedRef<SWidget> SSPPoste::BuildConception()
 		Col->AddSlot().AutoHeight().Padding(0, 0, 0, 3)
 		[ LigneKV(TEXT("CHARGE UTILE"), FString::Printf(TEXT("%.0f kg  (%.1f %%)"),
 		          S.payload_kg, 100.0 * S.payload_fraction)) ];
+		// ═══ CE QUE LA FILIÈRE TRAÎNE ═══ [GDD 5.12.1, 6.5]
+		// N'apparaît que si une filière alimentée est au véhicule : sur une pile
+		// chimique, la ligne serait un zéro permanent — donc du bruit.
+		if (S.powerplant_mass_kg > 0.0)
+		{
+			Col->AddSlot().AutoHeight().Padding(0, 0, 0, 3)
+			[ LigneKV(TEXT("CENTRALE + RADIATEURS"),
+			          FString::Printf(TEXT("%.0f kg  (%.0f %% du decollage)"), S.powerplant_mass_kg,
+			                          S.liftoff_mass_kg > 0.0
+			                              ? 100.0 * S.powerplant_mass_kg / S.liftoff_mass_kg : 0.0),
+			          SRGB(255, 189, 87)) ];
+		}
 	}
 	else
 	{
@@ -1823,9 +1991,62 @@ TSharedRef<SWidget> SSPPoste::BuildConception()
 		];
 	}
 
+	// ═══ LA RENTRÉE EST UN VERROU, PAS UN DÉCOR ═══ [GDD 9.2, 7.6]
+	// `flight/Reentry.hpp` ne décidait de RIEN pendant que la capsule portait cinq
+	// champs qui n'existent que pour lui, et que l'arbre vendait trois nœuds de
+	// rentrée. Le joueur voit maintenant d'où sa capsule sait revenir, à quel g, et
+	// avec quelle marge — le corridor de retour lunaire fait 0,2°, il faut que ça
+	// se voie.
+	if (S.rentree.evalue)
+	{
+		Col->AddSlot().AutoHeight().Padding(22, 0, 0, 4)
+		[ Txt(FString::Printf(
+			  TEXT("RENTREE %.0f m/s  .  %.1f g  .  flux a %d %% du tenable  .  corridor %.2f deg"),
+			  S.rentree.v_interface_ms, S.rentree.pic_g,
+			  (int)FMath::RoundToInt(100.0 / FMath::Max(1e-9, S.rentree.marge_flux)),
+			  S.rentree.largeur_corridor_rad * 180.0 / 3.14159265358979),
+		      9.0f, S.rentree.ok ? ColTexteFaible : SRGB(242, 90, 80), 0) ];
+	}
+
+	// ═══ LA COUPE [GDD 12.2] ═══ « éditeur EN COUPE ». L'atelier n'avait que le
+	// tableau de masses ; la géométrie du véhicule y manquait, et c'est elle que
+	// [17.2] réutilise pour le RENDU. Les cotes ne sont pas des réglages : elles
+	// tombent des ergols (donc de Tsiolkovsky), de la densité du couple et de la
+	// section de la capsule.
+	{
+		const auto& HB = fen::app::g_render_bridge.hull_design;
+		if (HB.valid.load() && HB.n > 0)
+		{
+			Col->AddSlot().AutoHeight().Padding(0, 4, 0, 0)
+			[ LigneKV(TEXT("COUPE"),
+			          FString::Printf(TEXT("%.1f m x %.2f m  (elancement %.1f)"),
+			                          HB.length_m, HB.diameter_m,
+			                          HB.length_m / FMath::Max(0.01, HB.diameter_m)),
+			          SRGB(140, 179, 255)) ];
+			Col->AddSlot().AutoHeight().Padding(0, 2, 0, 4)
+			[ SNew(SBox).HeightOverride(78.0f)[ SNew(SSPCoupe) ] ];
+		}
+	}
+
 	// --- LA PILE D'ÉTAGES : du bas (index 0) vers le haut --------------------
 	Col->AddSlot().AutoHeight().Padding(0, 2, 0, 2)
 	[ Txt(TEXT("ETAGES (bas -> haut) — moteur, Delta-v confie, ergols"), 10.0f, ColTexteFaible, 90) ];
+
+	// ═══ LES SOURCES QUE L'ARCHITECTE PEUT POSER SOUS UNE FILIÈRE ALIMENTÉE ═══
+	// [GDD 5.12.1] `Chemical` = « pas encore choisie » : l'atelier le SIGNALE au
+	// lieu d'en poser une à la place du joueur [anti-feature 1.5].
+	static const fen::vehicle::PropTier SourcesDispo[] = {
+		fen::vehicle::PropTier::Chemical, fen::vehicle::PropTier::Solar,
+		fen::vehicle::PropTier::Rtg,      fen::vehicle::PropTier::Fission,
+	};
+	auto NomSource = [](fen::vehicle::PropTier t) -> FString {
+		switch (t) {
+			case fen::vehicle::PropTier::Solar:   return TEXT("SOLAIRE");
+			case fen::vehicle::PropTier::Rtg:     return TEXT("RTG");
+			case fen::vehicle::PropTier::Fission: return TEXT("REACTEUR");
+			default:                              return TEXT("(aucune)");
+		}
+	};
 
 	TSharedRef<SScrollBox> Scroll = SNew(SScrollBox);
 	for (int k = 0; k < (int)VD.stages.size(); ++k)
@@ -1834,7 +2055,8 @@ TSharedRef<SWidget> SSPPoste::BuildConception()
 		const FString mname(engs[ei].name);
 		const FString ergols = (k < (int)S.stages.size())
 			? FString::Printf(TEXT("%.0f kg"), S.stages[k].propellant_kg) : FString(TEXT("-"));
-		Scroll->AddSlot().Padding(4, 2)
+		TSharedRef<SVerticalBox> Etage = SNew(SVerticalBox);
+		Etage->AddSlot().AutoHeight()
 		[
 			SNew(SHorizontalBox)
 			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
@@ -1873,6 +2095,63 @@ TSharedRef<SWidget> SSPPoste::BuildConception()
 				if (VD.stages.size() > 1) VD.stages.erase(VD.stages.begin() + k);
 				Rebuild(); return FReply::Handled(); }), 22.0f) ]
 		];
+
+		// ═══ LA SECONDE LIGNE N'EXISTE QUE POUR UNE FILIÈRE ALIMENTÉE ═══
+		// [GDD 5.12.1, 6.2, 6.5] « Énergie ≠ propulsion » : un propulseur
+		// électrique ou NEP réclame une puissance qui SE DÉDUIT de sa poussée et
+		// de son Isp, et cette puissance traîne une centrale et des radiateurs
+		// qui pèsent bien plus que la tuyère. Le chimique et le NTP ne portent
+		// rien — leur afficher une ligne vide serait du bruit (piège n°65).
+		if (k < (int)S.stages.size() && S.stages[k].power.needs_power)
+		{
+			const fen::vehicle::PowerPlant& PP = S.stages[k].power;
+			TSharedRef<SHorizontalBox> Ligne = SNew(SHorizontalBox);
+			Ligne->AddSlot().AutoWidth().VAlign(VAlign_Center).Padding(22, 0, 4, 0)
+			[ Txt(FString::Printf(TEXT("%.0f kW"), PP.p_electric_w / 1000.0),
+			      9.0f, SRGB(140, 179, 255), 0) ];
+			// La fusion et l'antimatière SONT leur propre source : leur proposer
+			// un réacteur en plus serait une faute de modèle, pas une option.
+			if (!PP.self_powered)
+			{
+				Ligne->AddSlot().AutoWidth().VAlign(VAlign_Center)
+				[ BoutonMini(TEXT("<"), FOnClicked::CreateLambda([this, &VD, k]() {
+					int i = 0; const int n = (int)UE_ARRAY_COUNT(SourcesDispo);
+					for (int j = 0; j < n; ++j) if (SourcesDispo[j] == VD.stages[k].source) i = j;
+					VD.stages[k].source = SourcesDispo[(i + n - 1) % n];
+					Rebuild(); return FReply::Handled(); })) ];
+				Ligne->AddSlot().AutoWidth().VAlign(VAlign_Center).Padding(3, 0)
+				[ SNew(SBox).WidthOverride(74.0f)
+				  [ Txt(NomSource(VD.stages[k].source), 9.0f,
+				        PP.source_missing ? SRGB(242, 90, 80) : ColTexte, 0) ] ];
+				Ligne->AddSlot().AutoWidth().VAlign(VAlign_Center)
+				[ BoutonMini(TEXT(">"), FOnClicked::CreateLambda([this, &VD, k]() {
+					int i = 0; const int n = (int)UE_ARRAY_COUNT(SourcesDispo);
+					for (int j = 0; j < n; ++j) if (SourcesDispo[j] == VD.stages[k].source) i = j;
+					VD.stages[k].source = SourcesDispo[(i + 1) % n];
+					Rebuild(); return FReply::Handled(); })) ];
+			}
+			// L'ENDURANCE DU RADIATEUR EST UNE CARACTÉRISTIQUE ACHETÉE [GDD 12.4, 6.5].
+			// Sa surface excédentaire n'est plus un forfait : elle est dimensionnée
+			// sur le flux micrométéoritique de Grün pour une durée d'exposition
+			// donnée. Voler au-delà se paie en fiabilité, et le poste CONTROLE le
+			// nomme — encore faut-il que le joueur sache pour combien de jours il a
+			// construit. Sans ce chiffre affiché, la sanction serait imméritée.
+			const fen::env::RadiatorSpec RS{};
+			Ligne->AddSlot().FillWidth(1.0f).VAlign(VAlign_Center).Padding(8, 0, 0, 0)
+			[ Txt(PP.source_missing
+			          ? FString(TEXT("source a choisir [GDD 5.12.1]"))
+			          // MESURÉ SUR CAPTURE : la rédaction longue (« paroi 1.5 mm,
+			          // endurance 900 j ») était TRONQUÉE au bord du panneau, et
+			          // c'est le mot « endurance » qui disparaissait — le seul qui
+			          // porte l'information. Forme courte, même contenu.
+			          : FString::Printf(TEXT("centrale %.0f kg  .  radiateur %.0f m2"
+			                                 " (paroi %.1f mm, %.0f j)"),
+			                            PP.total_mass_kg(), PP.radiator_area_m2,
+			                            RS.wall_mm, RS.endurance_days),
+			      9.0f, PP.source_missing ? SRGB(242, 90, 80) : ColTexteFaible, 0) ];
+			Etage->AddSlot().AutoHeight().Padding(0, 1, 0, 3)[ Ligne ];
+		}
+		Scroll->AddSlot().Padding(4, 2)[ Etage ];
 	}
 	Col->AddSlot().FillHeight(1.0f)[ Scroll ];
 
@@ -2696,46 +2975,58 @@ TSharedRef<SWidget> SSPPoste::BuildControle()
 	if (!bEnVol)
 	{
 	Col->AddSlot().AutoHeight().Padding(0, 6, 0, 2)
-	[ Txt(TEXT("PROGRAMME — moteur, etages, qualification"), 10.0f, ColTexteFaible, 90) ];
+	[ Txt(TEXT("VEHICULE — concu au poste CONCEPTION [GDD 4.1]"), 10.0f, ColTexteFaible, 90) ];
 
-	// moteur
-	Col->AddSlot().AutoHeight().Padding(6, 1)
-	[
-		SNew(SHorizontalBox)
-		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)[ Txt(TEXT("MOTEUR"), 10.0f, ColTexte) ]
-		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(6, 0, 2, 0)
-		[ BoutonMini(TEXT("<"), FOnClicked::CreateLambda([this, &P]() {
-			const int ne = (int)fen::mission::engines().size();
-			P.program.engine_index = (P.program.engine_index + ne - 1) % ne;
-			Rebuild(); return FReply::Handled(); })) ]
-		+ SHorizontalBox::Slot().FillWidth(1.0f).VAlign(VAlign_Center)
-		[ Txt(FString(progEngines[ei].eng.id.c_str()), 10.0f, SRGB(140, 179, 255), 0) ]
-		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
-		[ BoutonMini(TEXT(">"), FOnClicked::CreateLambda([this, &P]() {
-			const int ne = (int)fen::mission::engines().size();
-			P.program.engine_index = (P.program.engine_index + 1) % ne;
-			Rebuild(); return FReply::Handled(); })) ]
-	];
-	// nombre d'étages
-	Col->AddSlot().AutoHeight().Padding(6, 1)
-	[
-		SNew(SHorizontalBox)
-		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)[ Txt(TEXT("ETAGES"), 10.0f, ColTexte) ]
-		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(6, 0, 2, 0)
-		[ BoutonMini(TEXT("-"), FOnClicked::CreateLambda([this, &P]() {
-			P.n_stages = FMath::Max(1, P.n_stages - 1); Rebuild(); return FReply::Handled(); })) ]
-		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
-		[ SNew(SBox).WidthOverride(40.0f)[ Txt(FString::Printf(TEXT("%d"), P.n_stages), 10.0f, SRGB(140, 179, 255), 0) ] ]
-		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
-		[ BoutonMini(TEXT("+"), FOnClicked::CreateLambda([this, &P]() {
-			P.n_stages = FMath::Min(4, P.n_stages + 1); Rebuild(); return FReply::Handled(); })) ]
-		// revue
-		+ SHorizontalBox::Slot().FillWidth(1.0f).HAlign(HAlign_Right).VAlign(VAlign_Center)
-		[ BoutonAction(FText::FromString(FString::Printf(TEXT("%s REVUE INDEP."),
-		               P.program.review ? TEXT("[x]") : TEXT("[ ]"))),
-		               FOnClicked::CreateLambda([this, &P]() {
-			               P.program.review = !P.program.review; Rebuild(); return FReply::Handled(); })) ]
-	];
+	// ═══ LE VÉHICULE VIENT DU POSTE CONCEPTION — ON NE LE RECHOISIT PAS ICI ═══
+	// [GDD 4.1, 12.2] Ce poste portait SES PROPRES sélecteurs de moteur et de
+	// nombre d'étages, sur un catalogue séparé : le joueur choisissait un moteur
+	// DEUX FOIS, dans deux postes, et seul celui-ci comptait. Depuis que la pile
+	// conçue vole réellement, ces boutons ne décideraient plus rien — les laisser
+	// serait pire qu'inutile, ce serait mentir sur qui décide. Le poste MONTRE
+	// donc le véhicule, avec ce qu'il coûte et ce que l'arbre en dit.
+	{
+		static const TCHAR* Conf[] = { TEXT("A"), TEXT("B"), TEXT("C"), TEXT("D") };
+		double CoutPile = 0.0;
+		for (std::size_t k = 0; k < P.pile.size(); ++k)
+		{
+			const fen::vehicle::EnginePart& EP = P.pile[k].engine_part();
+			const fen::mission::EngineOption Opt = fen::mission::option_from_part(EP);
+			const bool bQualifie = !P.moteurs_qualifies || P.moteurs_qualifies(Opt);
+			CoutPile += fen::vehicle::effective_cost_musd(EP);
+			Col->AddSlot().AutoHeight().Padding(6, 1, 6, 0)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+				[ Txt(FString::Printf(TEXT("E%d"), (int)k + 1), 10.0f, SRGB(255, 189, 87), 0) ]
+				+ SHorizontalBox::Slot().FillWidth(1.0f).VAlign(VAlign_Center).Padding(8, 0, 0, 0)
+				[ Txt(ANSI_TO_TCHAR(EP.name), 10.0f,
+				      bQualifie ? SRGB(140, 179, 255) : SRGB(242, 90, 80), 0) ]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+				[ Txt(FString::Printf(TEXT("%.1f M$  (%s : %.1f-%.1f)"),
+				      fen::vehicle::effective_cost_musd(EP), Conf[(int)EP.cost_confidence],
+				      EP.cost_lo_musd, EP.cost_hi_musd), 9.0f, ColTexteFaible, 0) ]
+			];
+			if (!bQualifie)
+			{
+				Col->AddSlot().AutoHeight().Padding(24, 0, 6, 1)
+				[ Txt(FString::Printf(TEXT("NON QUALIFIE : RECHERCHER %s [GDD 5.4]"),
+				      ANSI_TO_TCHAR(EP.tech_id)), 9.0f, SRGB(242, 90, 80), 0) ];
+			}
+		}
+		Col->AddSlot().AutoHeight().Padding(6, 2, 6, 2)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().FillWidth(1.0f).VAlign(VAlign_Center)
+			[ Txt(FString::Printf(TEXT("%d etage(s), %.1f M$ de moteurs — concevoir au poste CONCEPTION"),
+			      (int)P.pile.size(), CoutPile), 9.0f, ColTexteFaible, 0) ]
+			// revue
+			+ SHorizontalBox::Slot().AutoWidth().HAlign(HAlign_Right).VAlign(VAlign_Center)
+			[ BoutonAction(FText::FromString(FString::Printf(TEXT("%s REVUE INDEP."),
+			               P.program.review ? TEXT("[x]") : TEXT("[ ]"))),
+			               FOnClicked::CreateLambda([this, &P]() {
+				               P.program.review = !P.program.review; Rebuild(); return FReply::Handled(); })) ]
+		];
+	}
 	// heures d'essai
 	Col->AddSlot().AutoHeight().Padding(6, 1)
 	[
@@ -2772,6 +3063,118 @@ TSharedRef<SWidget> SSPPoste::BuildControle()
 		+ SHorizontalBox::Slot().FillWidth(1.0f).HAlign(HAlign_Right).VAlign(VAlign_Center)
 		[ Txt(TEXT("provisionnee en ergols"), 9.0f, ColTexteFaible, 30) ]
 	];
+	// ═══ LA TRAJECTOIRE : DIRECT OU ASSISTANCE GRAVITATIONNELLE ═══ [GDD 5.11]
+	// « Navigation et opérations interplanétaires : ... ASSISTANCES », colonne
+	// Senior → Directeur. C'est une décision d'architecte au même titre que la
+	// marge : elle achète du Δv avec des ANNÉES. N'apparaît que si un tour mène
+	// réellement là où va la mission — un bouton qui ne décide rien apprendrait
+	// une fausse leçon (piège n°40).
+	//
+	// LE CALCUL A LIEU AU CLIC, ET NULLE PART AILLEURS : résoudre les époques
+	// d'un tour prend 0,5 à 1,8 s. C'est un calcul de bureau d'études, pas un
+	// rafraîchissement d'écran — `evaluer_plan` ne fait que LIRE son résultat.
+	{
+		const std::vector<const fen::mission::TourType*> Tours = Session->tours_offerts(*mc);
+		if (!Tours.empty())
+		{
+			TSharedRef<SHorizontalBox> Ligne = SNew(SHorizontalBox);
+			Ligne->AddSlot().AutoWidth().VAlign(VAlign_Center)
+			[ Txt(TEXT("TRAJECTOIRE"), 10.0f, ColTexte) ];
+			const bool bDirect = mc->tour_id.empty();
+			Ligne->AddSlot().AutoWidth().VAlign(VAlign_Center).Padding(6, 0, 2, 0)
+			[ BoutonAction(FText::FromString(bDirect ? TEXT("[x] DIRECT") : TEXT("[ ] DIRECT")),
+			               FOnClicked::CreateLambda([this]() {
+				               Session->choisir_tour(std::string()); Rebuild(); return FReply::Handled(); })) ];
+			for (const fen::mission::TourType* T : Tours)
+			{
+				const std::string Id = T->id;
+				const bool bPris = (mc->tour_id == Id);
+				Ligne->AddSlot().AutoWidth().VAlign(VAlign_Center).Padding(2, 0)
+				[ BoutonAction(FText::FromString(FString::Printf(TEXT("%s %s"),
+				               bPris ? TEXT("[x]") : TEXT("[ ]"), UTF8_TO_TCHAR(Id.c_str()))),
+				               FOnClicked::CreateLambda([this, Id]() {
+					               Session->choisir_tour(Id); Rebuild(); return FReply::Handled(); })) ];
+			}
+			Col->AddSlot().AutoHeight().Padding(6, 1)[ Ligne ];
+			// LE TROC, CHIFFRÉ DES DEUX CÔTÉS — sans quoi le bouton demanderait au
+			// joueur de choisir à l'aveugle. Le chiffre d'abord, le renvoi au GDD
+			// à la fin : le cadre du poste TRONQUE vers 72 caractères.
+			FString Ligne2;
+			if (Session->tour_bilan_valide(*mc))
+			{
+				const auto& B = Session->tour_bilan;
+				Ligne2 = FString::Printf(
+					TEXT("%s : %.0f m/s en %.1f ans (%d survol(s), DSM %.0f m/s) [5.11]"),
+					UTF8_TO_TCHAR(mc->tour_id.c_str()), B.dv_total_ms, B.tof_ans,
+					(int)B.rp_survol_m.size(), B.dv_bord_ms);
+			}
+			else if (!Session->tour_bilan.cause.empty())
+			{
+				Ligne2 = FString::Printf(TEXT("refuse : %s"),
+				                         UTF8_TO_TCHAR(Session->tour_bilan.cause.c_str()));
+			}
+			else
+			{
+				Ligne2 = FString::Printf(TEXT("direct : %.0f m/s en %.0f j — un tour echange du Dv contre des annees"),
+				                         P.dv_traj_override,
+				                         Session->duree_transit_jours(*mc));
+			}
+			Col->AddSlot().AutoHeight().Padding(6, 0)
+			[ Txt(Ligne2, 9.0f,
+			      Session->tour_bilan_valide(*mc) ? SRGB(140, 179, 255)
+			                                      : (Session->tour_bilan.cause.empty()
+			                                             ? ColTexteFaible : SRGB(255, 190, 90)), 0) ];
+			// ═══ CE QUE LE SURVOL EXIGE ═══ [GDD 8.4] — le corridor en paramètre
+			// d'impact, la dernière correction et ce qu'elle laisse. C'est la
+			// SECONDE condition de navigation d'un tour, et elle est nommée : un
+			// chiffre sans cause ne se corrige pas.
+			// ═══ ET CE QUE L'ARCHITECTE EXIGE DU SURVOL ═══ [GDD 3.1, 8.5]
+			// L'optimiseur colle toujours le périastre à sa borne basse : cette
+			// borne EST la décision. Viser plus haut élargit le corridor et se paie
+			// en Δv. Chaque clic REFAIT le tour (une à six secondes) — c'est un
+			// calcul de bureau d'études, pas un curseur d'affichage.
+			Col->AddSlot().AutoHeight().Padding(6, 1)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+				[ Txt(TEXT("ALTITUDE DE SURVOL"), 10.0f, ColTexte) ]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(6, 0, 2, 0)
+				[ BoutonMini(TEXT("-"), FOnClicked::CreateLambda([this]() {
+					Session->alt_survol_min_km = FMath::Max(0.0, Session->alt_survol_min_km - 250.0);
+					if (!Session->mission_courante()->tour_id.empty())
+						Session->choisir_tour(Session->mission_courante()->tour_id);
+					Rebuild(); return FReply::Handled(); })) ]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+				[ SNew(SBox).WidthOverride(80.0f)
+				  [ Txt(Session->alt_survol_min_km > 0.0
+				            ? FString::Printf(TEXT("%.0f km"), Session->alt_survol_min_km)
+				            : FString(TEXT("vol reel")),
+				        10.0f, SRGB(140, 179, 255), 0) ] ]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+				[ BoutonMini(TEXT("+"), FOnClicked::CreateLambda([this]() {
+					Session->alt_survol_min_km += 250.0;
+					if (!Session->mission_courante()->tour_id.empty())
+						Session->choisir_tour(Session->mission_courante()->tour_id);
+					Rebuild(); return FReply::Handled(); })) ]
+				+ SHorizontalBox::Slot().FillWidth(1.0f).HAlign(HAlign_Right).VAlign(VAlign_Center)
+				[ Txt(TEXT("plus haut = plus sur, plus cher"), 9.0f, ColTexteFaible, 34) ]
+			];
+			if (Session->nav_survol_.ok)
+			{
+				const auto& Sv = Session->nav_survol_;
+				Col->AddSlot().AutoHeight().Padding(6, 0)
+				[ Txt(FString::Printf(
+					TEXT("survol : corridor %.0f km, residu %.0f km apres TCM finale de %.0f m/s"
+					     " -> P %.3f [8.4]"),
+					Sv.demi_corridor_m / 1000.0, Sv.sigma_b_m / 1000.0,
+					Sv.dv_derniere_corr, Sv.p_survol),
+				      9.0f,
+				      Sv.p_survol > 0.95 ? SRGB(120, 220, 140)
+				                         : (Sv.p_survol > 0.7 ? SRGB(255, 190, 90)
+				                                              : SRGB(255, 110, 110)), 0) ];
+			}
+		}
+	}
 	// ═══ BLINDAGE — L'ARBITRAGE MASSE / PROTECTION / MISSION ═══ [GDD 6.6]
 	// Seulement pour un vol HABITÉ : il n'y a pas d'équipage à protéger ailleurs,
 	// et un curseur qui ne sert à rien apprend une fausse leçon. `env/Radiation`
@@ -2990,6 +3393,19 @@ TSharedRef<SWidget> SSPPoste::BuildControle()
 	Col->AddSlot().AutoHeight().Padding(6, 1)
 	[ LigneKV(TEXT("P(SUCCES)"), FString::Printf(TEXT("%.1f %% / %.0f %% exige"), 100.0 * A.p_success, 100.0 * mc->contract.terms.min_success_prob),
 	          A.fits_risk ? ColVert : SRGB(242, 90, 80)) ];
+	// ═══ CE QUE LES SOUS-SYSTÈMES AVANCÉS PRÉLÈVENT ═══ [GDD 12.4]
+	// « Souvent DIMENSIONNANTE » : sur un aller-retour, le vieillissement du cœur
+	// pèse plus que le moteur lui-même. La ligne n'apparaît que si l'architecture
+	// en porte — sur un chimique elle vaudrait 100 %, donc du bruit — et elle
+	// NOMME la cause, parce qu'un chiffre sans cause n'est pas actionnable.
+	if (A.p_filieres < 0.9999)
+	{
+		Col->AddSlot().AutoHeight().Padding(6, 1)
+		[ LigneKV(TEXT("SOUS-SYSTEMES AVANCES"),
+		          FString::Printf(TEXT("-%.1f %%  .  %s"), 100.0 * (1.0 - A.p_filieres),
+		                          UTF8_TO_TCHAR(A.cause_filieres.c_str())),
+		          A.p_filieres > 0.9 ? SRGB(255, 189, 87) : SRGB(242, 90, 80)) ];
+	}
 	} else {
 	Col->AddSlot().AutoHeight().Padding(6, 1)
 	[ Txt(TEXT("cout, calendrier et fiabilite NON EVALUES : l'etude s'arrete a la masse"),

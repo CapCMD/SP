@@ -110,9 +110,25 @@ struct Mga1DsmProblem {
   double rp_insert{}, a_insert{};
 };
 
+// UN MORCEAU DE TRAJECTOIRE RÉELLEMENT PARCOURU — état de départ, date, durée.
+// Deux par jambe : la dérive vers la DSM, puis l'arc qui rejoint le corps suivant.
+// C'est ce qu'il faut, et rien de plus, pour REDESSINER le vol dans le monde
+// [GDD 8.3, 17.3] : on propage par Kepler exactement comme l'évaluation, donc ce
+// qui est tracé EST la trajectoire évaluée — pas une reconstruction voisine.
+struct Mga1DsmArc {
+  Vec3   r0{}, v0{};              // état héliocentrique au début du morceau
+  double t0{0.0};                 // date absolue (s TDB)
+  double dt{0.0};                 // durée (s)
+};
+
 struct Mga1DsmResult {
   std::vector<double> t;          // époques aux corps
   std::vector<double> dsm;        // Delta-v de chaque DSM (m/s)
+  // ⚠ REMPLI SEULEMENT SUR DEMANDE. L'optimiseur appelle cette fonction un à deux
+  // MILLIONS de fois ; y allouer deux vecteurs par jambe coûterait plus cher que
+  // toute la physique. Le drapeau est donc faux par défaut, et seule la dernière
+  // évaluation — celle du point retenu — publie les arcs.
+  std::vector<Mga1DsmArc> arcs;
   std::vector<double> t_dsm;
   std::vector<double> rp;         // périastres de survol (m)
   std::vector<double> vinf_fb;    // |v_inf| à chaque survol (conservé)
@@ -131,7 +147,8 @@ inline int d1_nvars(const Mga1DsmProblem& p)  { return 6 + 4 * d1_flybys(p); }
 
 // x = [t0, vinf, u, v, eta_0, T_0,  (beta_k, rp_k, eta_k, T_k) pour k = 1..F]
 inline Mga1DsmResult mga1dsm_evaluate(const Mga1DsmProblem& p, const ephem::IEphemeris& eph,
-                                      const std::vector<double>& x) {
+                                      const std::vector<double>& x,
+                                      bool publier_arcs = false) {
   Mga1DsmResult r;
   const int F = d1_flybys(p), L = d1_legs(p);
 
@@ -166,12 +183,15 @@ inline Mga1DsmResult mga1dsm_evaluate(const Mga1DsmProblem& p, const ephem::IEph
     // C'est pourquoi l'arc de Lambert qui suit n'a besoin que de 0 révolution.
     auto k = kepler_propagate(r_sc, v_sc, eta * T, cst::MU_SUN);
     if (!k.converged) return r;
+    if (publier_arcs) r.arcs.push_back({r_sc, v_sc, t, eta * T});
 
     // --- 2) arc de Lambert de la DSM jusqu'au corps suivant ---
     const double t_next = t + T;
     const auto Pn = eph.state(p.seq[i + 1], ephem::Body::Sun, Epoch{t_next});
     auto Lm = lambert(k.r, Pn.r, (1.0 - eta) * T, cst::MU_SUN, true, 0);
     if (!Lm.ok) return r;
+    if (publier_arcs)
+      r.arcs.push_back({k.r, Lm.solutions[0].v1, t + eta * T, (1.0 - eta) * T});
 
     const double dv = norm(Lm.solutions[0].v1 - k.v);
     r.dsm.push_back(dv);

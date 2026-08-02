@@ -82,6 +82,7 @@ inline int crew_size_for_family(const std::string& family) {
   if (family == "habite")      return 7;   // équipage permanent d'un incrément ISS
   if (family == "service")     return 7;   // STS-125, dernière mission de service Hubble
   if (family == "mars_habite") return 6;   // NASA Design Reference Architecture 5.0
+  if (family == "lunaire_habite") return 3; // Apollo : trois a bord, deux au sol
   // Aucune mission relativiste n'a jamais volé : pas de source. On prend l'analogue
   // sourcé le plus proche (croisière habitée longue durée) et on le DÉCLARE, plutôt
   // que d'inventer un chiffre qui aurait l'air d'en être un [GDD 12.5].

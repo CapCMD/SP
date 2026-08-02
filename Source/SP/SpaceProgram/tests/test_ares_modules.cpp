@@ -366,6 +366,54 @@ static void test_antimatiere() {
         "19.1 : beta = 1 est refuse, jamais approxime");
 
   // ═══════════════════════════════════════════════════════════════════════
+  // CHRONIQUE ET AIGU NE TUENT PAS DE LA MEME FACON [GDD 6.6, Annexe B]
+  // ═══════════════════════════════════════════════════════════════════════
+  // Le modele savait tuer par dose AIGUE (deterministe, DL50) et ne savait RIEN
+  // faire de la dose CHRONIQUE : elle ne verrouillait que les vols suivants,
+  // c'est-a-dire rien sur un vol terminal [GDD 9.2] — le seul ou de telles doses
+  // arrivent. Un effet chronique est STOCHASTIQUE : il donne une probabilite, pas
+  // un seuil.
+  {
+    // Le DDREF est la difference physique : a faible debit, le meme Sv fait deux
+    // fois moins de degats. C'est lui qui rend un aller-retour interstellaire
+    // pensable, et il est SOURCE (ICRP), pas ajuste.
+    CHECK_NEAR(env::DDREF_CHRONIC, 2.0, 1e-12, "6.6 : DDREF = 2 (ICRP, faible debit)");
+    CHECK_NEAR(env::reid_from_chronic_sv(1.0),
+               env::REID_PER_SV_ADULT_WORKER / env::DDREF_CHRONIC, 1e-15,
+               "6.6 : le REID chronique est le coefficient ICRP divise par le DDREF");
+    // ET LA LIMITE D'ANNEXE B CESSE D'ETRE UN NOMBRE NU : 1 Sv vaut ~2,1 % de
+    // REID, a comparer aux 3 % qui sont la norme NASA. Elle tombe dans la bonne
+    // bande pour une RAISON.
+    CHECK(env::reid_at_career_limit() > 0.015 && env::reid_at_career_limit() < 0.03,
+          "Annexe B : la limite de carriere vaut ~2 % de REID (norme NASA : 3 %)");
+    std::printf("     dose : limite de carriere 1 Sv -> REID %.2f %% (norme NASA 3 %%)\n",
+                100.0 * env::reid_at_career_limit());
+    // Monotone, borne, et nul a dose nulle — un risque ne depasse jamais 1.
+    CHECK(env::reid_from_chronic_sv(0.0) == 0.0, "6.6 : dose nulle, risque nul");
+    CHECK(env::reid_from_chronic_sv(10.0) > env::reid_from_chronic_sv(5.0),
+          "6.6 : le risque croit avec la dose");
+    CHECK(env::reid_from_chronic_sv(1.0e6) <= 1.0,
+          "6.6 : ... et reste une PROBABILITE, jamais au-dela de 1");
+    // L'ALLER-RETOUR INTERSTELLAIRE, CHIFFRE : ~10 Sv chroniques derriere
+    // 20 g/cm2 sur 23 ans. Mortel a coup sur en AIGU ; en chronique, c'est un
+    // risque de l'ordre de 1 sur 5 — un pari, ce que le GDD appelle un arbitrage.
+    const double sv_ar = 10.0;
+    std::printf("     dose : %.0f Sv chroniques (aller-retour de 23 ans) -> REID %.1f %%\n",
+                sv_ar, 100.0 * env::reid_from_chronic_sv(sv_ar));
+    CHECK(env::reid_from_chronic_sv(sv_ar) > 0.1 && env::reid_from_chronic_sv(sv_ar) < 0.4,
+          "6.6 : 10 Sv chroniques sont un risque de l ordre de 20 %, pas une mort certaine");
+    CHECK(sv_ar > env::ACUTE_LETHAL_GY,
+          "6.6 : ... alors que la MEME dose recue d un coup depasse la DL50");
+    // LA PART AIGUE N'EST PAS COMPTEE DEUX FOIS : elle a deja son propre bareme.
+    env::DoseAccumulator d;
+    d.add_chronic(2.0);
+    d.add_acute_gy(1.0);
+    CHECK(d.reid_mission() < env::reid_from_chronic_sv(d.mission_sv),
+          "12.5 : la part aigue est retiree du risque chronique — jamais deux fois");
+    CHECK(d.reid_mission() > 0.0, "6.6 : ... mais la part chronique compte bien");
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
   // LE VOL HABITE RELATIVISTE EST UN POINT FIXE QUI DIVERGE [GDD 19.1]
   // ═══════════════════════════════════════════════════════════════════════
   // « Le vol habite lointain depend AUTANT du support-vie, de la medecine et des
@@ -595,6 +643,72 @@ static void test_thermique() {
   CHECK_NEAR(env::radiated_power(0.85, A, 500.0), 1.0e6, 1e-3, "aire <-> puissance");
   // eta=30 % -> 2.333x la puissance electrique en chaleur. C'est une identite.
   CHECK_NEAR(env::reactor_waste_heat(3.0e5, 0.30), 7.0e5, 1e-6, "chaleur reacteur");
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // LE SUPPORT-VIE TOMBE TOUS LES 74 JOURS, ET C EST MESURE [Annexe E]
+  // ═══════════════════════════════════════════════════════════════════════
+  // La doc portait « ~1 avarie par 400 jours, BAS pour un vehicule habite reel,
+  // NON TOUCHE FAUTE DE SOURCE ». La source existe : les quatre sous-systemes
+  // ECLSS de l ISS (OGS, CDRA, UPA, WPA) ont des MTBF EN VOL de 5 000 a 14 000 h ;
+  // en serie, l ECLSS de l ISS a au plus 1 780 h de MTBF, soit 74,2 jours
+  // (NASA/NTRS, corpus de dimensionnement des rechanges martiennes).
+  {
+    using namespace fen::mission;
+    CHECK_NEAR(ISS_ECLSS_MTBF_HOURS, 1780.0, 1e-9,
+               "12.3.1 : le MTBF de l ECLSS de l ISS est une donnee publiee");
+    CHECK_NEAR(1.0 / ECLSS_FAULT_PER_DAY, ISS_ECLSS_MTBF_HOURS / 24.0, 1e-9,
+               "Annexe E : le taux journalier EST l inverse du MTBF mesure");
+    std::printf("     avaries : ECLSS de l ISS %.0f h de MTBF -> %.1f jours, "
+                "taux %.3e /j (le modele disait 8.0e-4, soit %.0f fois trop peu)\n",
+                ISS_ECLSS_MTBF_HOURS, 1.0 / ECLSS_FAULT_PER_DAY, ECLSS_FAULT_PER_DAY,
+                ECLSS_FAULT_PER_DAY / 8.0e-4);
+    CHECK(1.0 / ECLSS_FAULT_PER_DAY > 70.0 && 1.0 / ECLSS_FAULT_PER_DAY < 80.0,
+          "Annexe E : soit une panne de support-vie tous les ~74 jours");
+
+    // LA NORMALISATION : le taux de base vaut pour R = 0,98, le materiel mur que
+    // l ISS mesure. Un vaisseau mieux concu casse MOINS, et c est deja dans le
+    // modele — on verifie que la porte fonctionne dans les deux sens.
+    const EventSpec* eclss = nullptr;
+    for (const auto& s : event_library())
+      if (s.kind == EventKind::LifeSupportFault) eclss = &s;
+    CHECK(eclss != nullptr, "12.4 : le support-vie est bien a la bibliotheque");
+    EventContext c98; c98.crewed = true; c98.system_reliability = 0.98;
+    CHECK_NEAR(effective_rate(*eclss, c98), ECLSS_FAULT_PER_DAY, 1e-12,
+               "12.3.3 : a R = 0,98 le taux est exactement celui de l ISS");
+    EventContext c999 = c98; c999.system_reliability = 0.999;
+    CHECK(effective_rate(*eclss, c999) < 0.1 * ECLSS_FAULT_PER_DAY,
+          "12.3.3 : un vaisseau a 99,9 % casse dix fois moins");
+    EventContext c90 = c98; c90.system_reliability = 0.90;
+    CHECK(effective_rate(*eclss, c90) > 4.0 * ECLSS_FAULT_PER_DAY,
+          "12.3.3 : ... et un vaisseau a 90 % casse bien davantage");
+
+    // CE QUE ÇA DONNE SUR UN ALLER-RETOUR MARTIEN, et le recoupement qui compte :
+    // le meme corpus dit qu une mission martienne emporte 3,9 a 6,0 t de rechanges
+    // d ECLSS. Une douzaine de pannes sur 900 jours, c est ce que ca decrit.
+    const double pannes_900j = ECLSS_FAULT_PER_DAY * 900.0;
+    std::printf("     avaries : sur un aller-retour martien de 900 j -> %.1f pannes "
+                "de support-vie attendues (d ou les 3,9-6,0 t de rechanges)\n", pannes_900j);
+    CHECK(pannes_900j > 8.0 && pannes_900j < 20.0,
+          "Annexe E : une dizaine de pannes sur 900 jours — la maintenance est le sujet");
+    // ET LE TOTAL DES AVARIES EST DESORMAIS DOMINE PAR L ECLSS, comme sur l ISS.
+    // ⚠ L ERUPTION SOLAIRE EST EXCLUE, et pas par commodite : `effets_avaries`
+    // l exclut explicitement (« l eruption solaire n est pas une avarie »), elle
+    // se paie en DOSE. La sommer ici comparerait deux choses differentes — c est
+    // ce que faisait une premiere redaction, qui annoncait 33 jours au lieu de 66.
+    double total_avaries = 0.0;
+    EventContext ch; ch.crewed = true;
+    for (const auto& s : event_library()) {
+      if (s.kind == EventKind::SolarParticleEvent) continue;
+      total_avaries += effective_rate(s, ch);
+    }
+    std::printf("     avaries : toutes causes hors eruption -> une avarie tous les "
+                "%.0f jours (400 avant la correction), dont %.0f %% de support-vie\n",
+                1.0 / total_avaries, 100.0 * ECLSS_FAULT_PER_DAY / total_avaries);
+    CHECK(ECLSS_FAULT_PER_DAY > 0.5 * total_avaries,
+          "12.4 : le support-vie domine le total, comme il domine la maintenance de l ISS");
+    CHECK(1.0 / total_avaries < 100.0,
+          "Annexe E : une avarie tous les deux mois, plus tous les treize mois");
+  }
   // temperature d'equilibre terrestre (albedo 0.3) : ~255 K, valeur connue.
   const double Teq = env::equilibrium_temp(cst::AU, 0.3);
   CHECK(Teq > 250.0 && Teq < 260.0, "Teq Terre ~255 K");
@@ -752,7 +866,20 @@ static void test_couche_ares() {
   auto& G = *L.etat;
   CHECK(G.tree.find("antimatiere") != nullptr, "arbre seede");
   CHECK(G.station.tier() == 1, "station seedee");
-  CHECK(G.reliability_db.find("MTX-1") != nullptr, "base fiabilite seedee");
+  // La base n'est plus ecrite a la main : elle est SEMEE DEPUIS LE CATALOGUE
+  // [GDD 12.1, 12.3] — une fiche par piece reelle, aucune pour une piece qui
+  // n'existe pas (l'ancienne fiche « MTX-1 » decrivait un moteur generique).
+  CHECK(G.reliability_db.find("RL10C-1") != nullptr, "base fiabilite seedee");
+  CHECK(G.reliability_db.find("MTX-1") == nullptr,
+        "12.1 : plus de fiche pour un moteur generique sans lignee");
+  {
+    std::size_t manquantes = 0;
+    for (const auto& p : vehicle::engine_catalog())
+      if (G.reliability_db.find(p.id) == nullptr) ++manquantes;
+    CHECK(manquantes == 0, "12.3 : chaque piece du catalogue a sa fiche de fiabilite");
+    CHECK(G.reliability_db.all().size() == vehicle::engine_catalog().size(),
+          "12.3 : ... et la base ne contient rien d autre");
+  }
   // une recherche de 90 j finit en 4 mois, et le journal l'apprend a l'agence.
   CHECK(G.research.start(G.tree, "rdv_automatise", career::Rank::Directeur),
         "recherche demarree");
@@ -760,10 +887,22 @@ static void test_couche_ares() {
   L.assurer(a, a.mois * app::ARES_MONTH_S);
   CHECK(G.tree.find("rdv_automatise")->operational(), "TRL 7 apres 4 mois");
   CHECK(!a.journal.empty(), "l'agence est notifiee dans SON journal");
-  // le score derive des reussites -> promotion Stagiaire -> Junior a 100 pts.
+  // ═══ LE SCORE NE VIENT PLUS DES COMPTEURS ═══ [GDD 3.3]
+  // Il en venait : « +40 par réussite, −10 par échec ». Mais un COMPTEUR ne sait
+  // ni ce qu'une mission a coûté, ni ce qu'elle a traversé — les deux autres
+  // critères de « pondération égale des trois critères » étaient donc
+  // structurellement hors de portée. Le score se juge maintenant au DÉBRIEF,
+  // mission par mission (`Session::avancer_mission`), là où les trois faits
+  // coexistent. On vérifie ici les deux moitiés de ce déplacement.
   a.reussites = 3; a.mois = 5.0;
   L.assurer(a, a.mois * app::ARES_MONTH_S);
-  CHECK(G.career.rank == career::Rank::Junior, "3 reussites (120 pts) -> Junior");
+  CHECK(G.career.rank == career::Rank::Stagiaire,
+        "3.3 : un compteur de reussites ne fait plus avancer la carriere");
+  G.career.add_score(career::PROMOTION_THRESHOLDS[0]);
+  a.mois = 6.0;
+  L.assurer(a, a.mois * app::ARES_MONTH_S);
+  CHECK(G.career.rank == career::Rank::Junior,
+        "3.3 : ... c est le SCORE qui promeut, des que le seuil est franchi");
   // persistance : save -> load dans une couche neuve = meme hash.
   const std::string tmp = "test_ares.sav.tmp";
   CHECK(L.sauvegarder(tmp), "sauvegarde ecrite");

@@ -45,6 +45,11 @@ public:
 	// Layout figé : [0..5] relais GEO, [6..11] orbiteurs Mars, [12..17] sondes
 	// lointaines, [18] vol GEO en cours.
 	UPROPERTY() TArray<TObjectPtr<UStaticMeshComponent>> FleetMarkers;
+	// LA COQUE DU VAISSEAU CONÇU [GDD 12.2, 17.2, 17.4] : un composant par segment
+	// de la coupe publiée par le modèle (`RenderBridge::hull_vol`). Rien n'est
+	// modélisé à la main — « un véhicule assemblé par le joueur doit être RENDU »
+	// —, et rien n'est calculé ici : les cotes arrivent en mètres.
+	UPROPERTY() TArray<TObjectPtr<UStaticMeshComponent>> HullSegments;
 };
 
 UCLASS()
@@ -121,6 +126,14 @@ private:
 	UPROPERTY() TObjectPtr<ASPSolarSystemMapActor> MapActor;
 	UPROPERTY() TObjectPtr<ACameraActor> MapCamera;
 	UPROPERTY() TObjectPtr<AActor> PreviousViewTarget;
+
+	// Les deux primitives dont la coque du vaisseau est faite : un cylindre pour
+	// les réservoirs et les jupes, un cône pour les ajutages et la capsule
+	// [GDD 12.2, 17.2]. Gardées pour pouvoir changer de maillage segment par
+	// segment quand la coupe change.
+	UPROPERTY() TObjectPtr<UStaticMesh> HullCylinder;
+	UPROPERTY() TObjectPtr<UStaticMesh> HullCone;
+	int32 HullGenVu = -1;   // génération de coupe déjà montée
 
 	// Suivi lissé du point visé (le focus « vole » vers sa cible, façon NASA Eyes).
 	FVector SmoothFocusKm = FVector::ZeroVector;

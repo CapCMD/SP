@@ -44,6 +44,12 @@ enum class Cadrage { Bord = 0, Systeme = 1 };
 // reconnaissent et le traitent à part.
 inline constexpr int FOCUS_STATION = 1000;
 
+// Focus caméra SPÉCIAL : LE VAISSEAU EN VOL [GDD 17.4]. « Verrouillage sur tout
+// objet actif » — et depuis que le véhicule conçu a une COQUE [12.2, 17.2], s'en
+// approcher est ce qui fait passer du plan système au PLAN VAISSEAU (mètres).
+// Même traitement que Novellus : un id hors de l'enum Body, reconnu par le rendu.
+inline constexpr int FOCUS_VAISSEAU = 1001;
+
 struct RenderBridge {
   // Scène active, pilotée par l'UI (Interface::dessiner) et appliquée par les
   // subsystems UE (chacun s'active pour la sienne).
@@ -268,14 +274,51 @@ struct RenderBridge {
     std::atomic<bool> valid{false};
     std::atomic<int>  gen{0};
     double pos_m[3]{};            // position ESTIMÉE (héliocentrique écliptique)
+    // LA VITESSE, et pourquoi elle est publiée : elle donne l'AXE du vaisseau au
+    // rendu [GDD 17.2]. Même doctrine que pour Novellus — le rendu ne dérive pas
+    // une direction en différenciant deux frames, ce qui serait faux dès la
+    // cadence « mois/s ». Approximation déclarée [GDD 6.8] : le vaisseau est
+    // dessiné sur son vecteur vitesse, c'est-à-dire dans son attitude de POUSSÉE ;
+    // un engin réel en croisière pointe son antenne, ce que rien ne modélise.
+    double vel_ms[3]{};           // vitesse héliocentrique à la même date
     double corridor_3s_m{0.0};    // rayon 3σ du corridor d'incertitude
     static constexpr int MAX_PTS = 512;
     int n{0};
     double traj_m[MAX_PTS][3]{};  // trajectoire NOMINALE
-    int n_nodes{0};               // nœuds de manœuvre affichés (TCM1, TCM2)
-    double nodes_m[2][3]{};
-    bool node_done[2]{};
+    // NŒUDS DE MANŒUVRE. Deux pour un transfert direct (injection, arrivée) ;
+    // jusqu'à MAX_NODES pour un TOUR d'assistance, où chaque manœuvre profonde et
+    // chaque survol en est un [GDD 5.11, 8.3].
+    static constexpr int MAX_NODES = 8;
+    int n_nodes{0};
+    double nodes_m[MAX_NODES][3]{};
+    bool node_done[MAX_NODES]{};
   } vehicle;
+
+  // --- LA COUPE DU VAISSEAU [GDD 12.2, 17.2, 17.4] ---------------------------
+  // « Un véhicule assemblé par le joueur doit être RENDU, pas modélisé » : le
+  // rendu ne connaît ni pièces, ni ergols, ni Tsiolkovsky — il reçoit la COUPE,
+  // c'est-à-dire une pile de troncs de cône coaxiaux, en MÈTRES, telle que
+  // `vehicle::build_hull` la calcule. C'est le même objet qui sert au dessin en
+  // coupe du poste CONCEPTION [12.2] et à la géométrie 3D du monde [17.2] : une
+  // seule source, deux consommateurs, aucune chance qu'ils divergent.
+  //
+  // DEUX COUPES, ET ELLES NE DISENT PAS LA MÊME CHOSE :
+  //   . `hull_vol` = le vaisseau EN VOL, figé au feu vert (`Mission::vaisseau_*`) ;
+  //   . `hull_design` = la conception EN COURS d'édition, qui bouge à chaque clic.
+  // Les confondre ferait changer de forme un vaisseau déjà parti.
+  struct HullSnap {
+    static constexpr int MAX_SEG = 24;
+    std::atomic<bool> valid{false};
+    std::atomic<int>  gen{0};      // ++ quand la coupe CHANGE
+    int    n{0};
+    double length_m{0.0};
+    double diameter_m{0.0};
+    struct Seg {
+      int    role{0};              // vehicle::HullRole
+      int    stage{-1};
+      double z0_m{}, z1_m{}, r0_m{}, r1_m{};
+    } seg[MAX_SEG];
+  } hull_vol, hull_design;
 
   // --- LE VOL GEO EN COURS : VUE RAPPROCHÉE TERRE [GDD 8.3] ------------------
   // L'orbite GEO est INVISIBLE à l'échelle carte (42 164 km = 14 u). La vue

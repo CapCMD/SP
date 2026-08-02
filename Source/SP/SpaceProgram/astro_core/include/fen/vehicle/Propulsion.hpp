@@ -10,6 +10,7 @@
 // grille des filières avancées et leurs contraintes couplées (thermique,
 // blindage) — les fourchettes sont celles du GDD 6.4, jamais dépassées.
 #pragma once
+#include <algorithm>
 #include <cmath>
 #include <string>
 #include "fen/core/Constants.hpp"
@@ -142,6 +143,64 @@ inline double source_mass_kg(PropTier t, double p_watts, bool optimistic = false
   const double sp = optimistic ? s->specific_power_max_w_per_kg
                                : s->specific_power_min_w_per_kg;
   return sp > 0.0 ? p_watts / sp : 0.0;
+}
+
+// ═══ LA PUISSANCE SPÉCIFIQUE S'AMÉLIORE AVEC L'ÉCHELLE ═══ [GDD 5.12.8, 12.5]
+// `source_mass_kg` ci-dessus est la PRIMITIVE : masse = P / (puissance
+// spécifique), à puissance spécifique FIXÉE. Elle est donc linéaire en P, ce qui
+// est faux dès qu'on change d'ordre de grandeur — et le commentaire de la table
+// le dit déjà : « Kilopower ~10 kW pour ~1500 kg (6,7 W/kg) ; les concepts de
+// forte puissance visent 20-100 W/kg ». Appliquer les 5 W/kg d'un réacteur de
+// 10 kWe à un réacteur de 1 MWe est une ERREUR DE CATÉGORIE : elle rendrait la
+// NEP absurdement lourde, donc refusée pour une mauvaise raison — et une alarme
+// fausse est pire qu'une alarme absente (piège n°77).
+//
+// La fourchette de la table n'est donc pas un intervalle d'incertitude : c'est
+// une ÉCHELLE. On interpole en logarithme de la puissance entre les deux points
+// que le commentaire nomme, et on borne aux extrémités déclarées.
+inline constexpr double SPECIFIC_POWER_REF_LO_W = 1.0e4;   // 10 kWe — classe Kilopower
+inline constexpr double SPECIFIC_POWER_REF_HI_W = 1.0e7;   // 10 MWe — concepts de forte puissance
+
+inline double specific_power_w_per_kg(PropTier t, double p_watts) {
+  const EnergySourceClass* s = energy_source(t);
+  if (!s || p_watts <= 0.0) return 0.0;
+  const double span = std::log10(SPECIFIC_POWER_REF_HI_W / SPECIFIC_POWER_REF_LO_W);
+  const double u = std::clamp(std::log10(p_watts / SPECIFIC_POWER_REF_LO_W) / span,
+                              0.0, 1.0);
+  return s->specific_power_min_w_per_kg
+       + u * (s->specific_power_max_w_per_kg - s->specific_power_min_w_per_kg);
+}
+
+// Masse de la CENTRALE (source + conversion + blindage) pour fournir `p_watts`,
+// à l'échelle où on la demande. C'est cette forme-là qui entre au budget de
+// masse [GDD 6.1] — la primitive ci-dessus reste pour les raisonnements à
+// puissance spécifique imposée.
+inline double power_plant_mass_kg(PropTier t, double p_watts) {
+  const double sp = specific_power_w_per_kg(t, p_watts);
+  return sp > 0.0 ? p_watts / sp : 0.0;
+}
+
+// ═══ RENDEMENT DE JET PAR FILIÈRE ═══ [GDD 6.2, 6.8] — DÉCLARÉ, et VÉRIFIABLE.
+// F = 2·η·P/ve ne se retourne qu'avec un η. Ces trois valeurs ne sont pas des
+// réglages : appliquées aux poussées et Isp du catalogue de pièces, elles
+// RETROUVENT la puissance d'entrée publiée de propulseurs réels (NSTAR 2,3 kW,
+// NEXT-C 7,4 kW, SPT-100 1,35 kW) — c'est l'oracle qui les tient.
+inline double jet_efficiency(PropFamily f) {
+  switch (f) {
+    case PropFamily::ElectricHall:    return 0.50;   // Hall : 45-55 % mesurés
+    case PropFamily::ElectricGridded: return 0.70;   // grilles : 65-75 % mesurés
+    default:                          return 0.60;   // NEP / fusion / antimatière
+  }
+}
+
+// ═══ CE QU'UN PROPULSEUR ALIMENTÉ RÉCLAME COMME PUISSANCE ═══ [GDD 6.2]
+// F = 2·η·P/ve est une IDENTITÉ : elle se retourne. Une pièce du catalogue
+// DÉCLARE sa poussée et son Isp ; la puissance électrique qu'il faut lui fournir
+// en DÉCOULE. Elle ne se saisit jamais — sinon on pourrait poser une poussée
+// gratuite, ce que [GDD 6.2] interdit expressément.
+inline double power_required_w(double thrust_n, double ve_mps, double eta) {
+  if (thrust_n <= 0.0 || ve_mps <= 0.0 || eta <= 0.0) return 0.0;
+  return thrust_n * ve_mps / (2.0 * eta);   // W
 }
 
 // Puissance d'un RTG après `years` [GDD 5.12.6] : la décroissance radioactive

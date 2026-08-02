@@ -94,6 +94,17 @@ void USPGameSubsystem::ArmerCapture()
 		fen::app::g_render_bridge.focus_body = Focus;
 		fen::app::g_render_bridge.cam.dist_km = fen::app::distance_cadrage(Focus);
 	}
+	// `-spvaisseau` : L'ŒIL VA AU VAISSEAU [GDD 17.4]. Le focus passe par le MÊME
+	// id que le clic du joueur (`FOCUS_VAISSEAU`), et la distance par défaut est
+	// celle d'où une coque de vingt mètres remplit le cadre à 45° — le « plan
+	// vaisseau (mètres) » que le GDD nomme. Posé APRÈS `-spfocus` pour rester
+	// maître, AVANT `-spdist` qui reste le dernier mot.
+	if (SPCapture::RequestedVaisseau())
+	{
+		fen::app::g_render_bridge.focus_body = fen::app::FOCUS_VAISSEAU;
+		fen::app::g_render_bridge.cam.dist_km =
+			SPCapture::VaisseauDistanceM() / 1000.0;
+	}
 	// -spdist=<km> : distance de vue imposée (cadrer un objet proche d'un corps).
 	const double Dist = SPCapture::RequestedDist();
 	if (Dist > 0.0) fen::app::g_render_bridge.cam.dist_km = Dist;
@@ -180,8 +191,15 @@ void USPGameSubsystem::ArmerCapture()
 			const auto WT = fen::mission::window_target_for_family(M.contract.family);
 			if (WT.impose)
 			{
+				// LE MÊME RÉGLAGE QUE LE GATE ET QUE LA DURÉE DE TRANSIT. Sans
+				// `mission_window_params()`, cet appel utilisait le slop par défaut
+				// (60 j) et n'avançait donc PAS le monde quand le gate de mission,
+				// lui, considérait la fenêtre fermée — la capture partait alors sur
+				// un transfert que le modèle refusait (défaut du 2026-08-01).
 				const auto W = fen::astro::launch_window(
-					S.jeu.eph, WT.dep, WT.arr, fen::Epoch{S.jeu.epoch_courant()});
+					S.jeu.eph, WT.dep, WT.arr, fen::Epoch{S.jeu.epoch_courant()},
+					fen::mission::mission_window_params_for(
+						WT.dep, WT.arr, S.jeu.eph, fen::Epoch{S.jeu.epoch_courant()}));
 				if (W.ok && !W.open && W.next_open_days > 0.0) AvancerMonde(W.next_open_days);
 			}
 			// 2) FEU VERT ICI : la durée de transit est celle de la géométrie du
@@ -300,6 +318,9 @@ void USPGameSubsystem::ArmerCapture()
 					Mp->state = fen::mission::MissionState::Launched;
 					Mp->state_entered_days = Entree;
 					Mp->tof_days = Tof;
+					// Le vaisseau parti est un fait du vol [GDD 12.2, 17.2] : même
+					// porte que le feu vert, jamais une coupe écrite à la main.
+					S.geler_vaisseau(*Mp);
 				}
 				UE_LOG(LogTemp, Log,
 				       TEXT("[SPCapture] mission vecue : embarque=%d (%hs) — autonomie %.0f j, "
@@ -310,9 +331,60 @@ void USPGameSubsystem::ArmerCapture()
 			else
 			{
 				G3.missions.push_back(std::move(M));
+				// ═══ ET LE VAISSEAU DE CE VOL EXISTE, comme au feu vert ═══
+				// [GDD 12.2, 17.2] Le drapeau dépose une mission DÉJÀ PARTIE sans
+				// passer par `avancer_mission` : personne n'a donc figé son
+				// véhicule, et la coque n'aurait rien à dessiner. On repasse par
+				// les MÊMES portes que le jeu — piloter, évaluer, geler — au lieu
+				// d'écrire une coupe à la main : sinon la capture ne prouverait que
+				// l'existence du drapeau.
+				S.piloter_premiere_mission();
+				S.evaluer_plan();
+				if (fen::mission::Mission* Mp = S.mission_courante())
+					S.geler_vaisseau(*Mp);
+			}
+			// LES COTES, MESURÉES : une capture montre une silhouette, pas des
+			// mètres. Un chiffre au journal tranche ce qu'une image laisse deviner.
+			if (const fen::mission::Mission* Mp = S.mission_courante())
+			{
+				const fen::vehicle::VehicleHull Hu = fen::app::Session::coupe_du_vol(*Mp);
+				UE_LOG(LogTemp, Log,
+				       TEXT("[SPCapture] vaisseau fige : %d etages, coque %.2f m x %.2f m, "
+				            "%d segments"),
+				       static_cast<int>(Mp->vaisseau_etages.size()), Hu.length_m,
+				       Hu.max_diameter_m, static_cast<int>(Hu.segments.size()));
 			}
 		}
 	}
+	// ═══ `-sppassation` : L'ARCHITECTE ARRIVE EN FIN DE VIE ═══ [GDD 3.4, 3.5]
+	// La passation demande une CARRIÈRE ENTIÈRE — 53 ans de temps de jeu —, et
+	// une agence qui laisserait couler ce temps sans rien entreprendre ferait
+	// faillite bien avant (mesuré : six ans, c'est la pression d'inactivité de
+	// [GDD 13.2] qui fonctionne). L'instant est donc inatteignable en capture.
+	// On pose l'ÂGE, qui est un fait du personnage, et c'est le MODÈLE qui en
+	// tire la fin de fonction au tick suivant — le drapeau ne pose ni la modale,
+	// ni le drapeau de passation, sinon la capture ne prouverait que lui-même.
+	if (SPCapture::RequestedPassation())
+	{
+		S.jeu.ares.assurer(S.jeu.agence, S.jeu.epoch_courant());
+		if (S.jeu.ares.initialisee())
+		{
+			fen::game::GameState& Gp = *S.jeu.ares.etat;
+			// UNE CARRIÈRE DERRIÈRE SOI : une passation de Stagiaire ne montrerait
+			// pas ce que [décision 6] a de particulier — que le RANG, lui, reste au
+			// poste. Même précaution que `-spvecu`, qui pose le rang terminal.
+			Gp.career.rank = fen::career::Rank::Principal;
+			Gp.character.age_bio_s =
+				(fen::career::LIFE_EXPECTANCY_Y - 0.05) * fen::career::YEAR_S;
+			S.jeu.avancer_temps(40.0);
+			S.jeu.ares.assurer(S.jeu.agence, S.jeu.epoch_courant());
+			UE_LOG(LogTemp, Log,
+			       TEXT("[SPCapture] passation : age=%.1f ans  ouverte=%d  motif=%hs"),
+			       Gp.character.age_bio_years(), Gp.passation_ouverte ? 1 : 0,
+			       Gp.passation_motif.c_str());
+		}
+	}
+
 	// ═══ `-spantimatiere` : LA FILIÈRE DE FIN D'ARBRE EXISTE ═══
 	// [GDD 5.12.12, 19.3] Le bloc ANTIMATIÈRE du poste AGENCE ne s'affiche que si
 	// le nœud est opérationnel — et l'y amener demande une carrière entière puis
@@ -338,6 +410,163 @@ void USPGameSubsystem::ArmerCapture()
 			fen::rel::AntimatterProduction::for_tier(fen::app::antimatter_tier(Ga));
 		Ga.antimatiere.tick(
 			fen::rel::AntimatterProduction::CALIB_HORIZON_YEARS * 365.25, true);
+	}
+	// ═══ `-spnep` : UNE FILIÈRE ALIMENTÉE DANS L'ATELIER ═══ [GDD 5.12.1, 6.2, 6.5]
+	// On pose l'ÉTAT DU MODÈLE — un étage NEP-1MW alimenté par un réacteur — et
+	// RIEN d'autre : la puissance réclamée, la masse de centrale, la surface de
+	// radiateur et la masse au décollage sont ensuite calculées par le chemin du
+	// jeu, `evaluate_design`. Écrire ici une masse de centrale ne prouverait que
+	// l'existence de la ligne d'affichage, jamais que le modèle est branché.
+	if (SPCapture::RequestedNep())
+	{
+		fen::app::VehicleDesign& VD = S.vehicule_design;
+		const int inep = fen::app::VehicleDesign::index_moteur("NEP-1MW");
+		if (inep >= 0 && VD.stages.size() >= 2)
+		{
+			VD.stages[1].engine = inep;
+			VD.stages[1].source = fen::vehicle::PropTier::Fission;
+			// Le xénon n'est pas un ergol cryogénique : le réservoir suit la
+			// filière, sinon la masse sèche serait celle d'un autre véhicule.
+			const int ixe = fen::app::VehicleDesign::index_reservoir("TANK-XE");
+			if (ixe >= 0) VD.stages[1].tank = ixe;
+		}
+		// ...ET LE MÊME MOTEUR AU PROGRAMME DE MISSION [GDD 5.4] : c'est là que
+		// se voit le second effet de la fusion des catalogues — le prix retenu
+		// avec sa confiance, et le verdict de l'arbre quand le nœud manque.
+		for (std::size_t i = 0; i < fen::mission::engines().size(); ++i)
+			if (fen::mission::engines()[i].eng.id == "NEP-1MW")
+				S.mission_plan.program.engine_index = static_cast<int>(i);
+	}
+	// ═══ `-sprentree` : LE BOUCLIER EST OPPOSABLE ═══ [GDD 9.2, 7.6]
+	// On pose l'ÉTAT DU MODÈLE — une capsule montée et un retour LUNAIRE — et rien
+	// d'autre. La vitesse d'interface est DÉRIVÉE (v∞ = 0 sur une trajectoire quasi
+	// parabolique), le corridor est intégré par le chemin du jeu, et le verdict
+	// tombe tout seul. Sans capsule montée, la ligne RENTREE n'existe pas et c'est
+	// exact : une sonde ne revient pas.
+	if (SPCapture::RequestedRentree())
+	{
+		fen::app::VehicleDesign& VD = S.vehicule_design;
+		const auto& Caps = fen::vehicle::capsule_catalog();
+		const FString Voulue = SPCapture::RentreeCapsule();
+		for (std::size_t i = 0; i < Caps.size(); ++i)
+			if (Voulue.IsEmpty() ? (FString(Caps[i].id) == TEXT("SOYUZ-SA"))
+			                     : (FString(Caps[i].id) == Voulue))
+				VD.capsule = static_cast<int>(i);
+		VD.payload_kg = 0.0;
+		VD.v_interface_retour_ms = fen::mission::vitesse_interface(
+			0.0, fen::cst::MU_EARTH, fen::cst::R_EARTH,
+			fen::mission::ENTRY_INTERFACE_EARTH_M);
+	}
+	// ═══ `-spnep=qualifie` : LA BRANCHE 6 EST ACQUISE ═══ [GDD 5.4, 12.4]
+	// Sans ça, l'étude s'arrête au verrou « NON QUALIFIÉ » et le bilan de
+	// viabilité — donc la ligne des SOUS-SYSTÈMES AVANCÉS de [GDD 12.4] — n'est
+	// jamais calculé, donc jamais photographiable. Même office que
+	// `-spantimatiere` : on qualifie par le MÊME champ que la recherche (`trl`).
+	if (SPCapture::RequestedNepQualifie())
+	{
+		S.jeu.ares.assurer(S.jeu.agence, S.jeu.epoch_courant());
+		if (S.jeu.ares.initialisee())
+		{
+			fen::game::GameState& Ga = *S.jeu.ares.etat;
+			// La branche 6 POUR le moteur, et la branche 1 pour le lanceur : un
+			// étage NEP pèse 41 t avec sa centrale, et sans le super-lourd
+			// l'étude s'arrête au verrou du LANCEUR — juste, mais elle ne
+			// calcule alors toujours pas le bilan qu'on veut photographier.
+			for (const char* Id : {"thermique_radiateurs", "materiaux_ht", "radioprotection",
+			                       "qualification_essais", "electrique_avancee",
+			                       "fission_spatiale", "nep_megawatt",
+			                       "lanceur_leger", "lanceur_moyen", "lanceur_lourd",
+			                       "lanceur_super_lourd"})
+				if (fen::tech::TechNode* N = Ga.tree.find_mut(Id))
+					N->trl = fen::tech::TRL_OPERATIONAL;
+		}
+	}
+	// ═══ `-sptour[=<id>]` : L'ASSISTANCE EST UNE DÉCISION D'ARCHITECTE ═══ [GDD 5.11]
+	// La ligne TRAJECTOIRE n'existe que pour une mission qu'un tour peut servir :
+	// il faut donc PILOTER CAT-13 (orbiteur du système solaire externe), ce qui
+	// demande le rang Senior et quatre nœuds d'arbre. On pose cet état — et rien
+	// de plus : le tour lui-même est ensuite choisi par la porte du jeu
+	// (`Session::choisir_tour`), qui fait tourner le vrai optimiseur. Les chiffres
+	// affichés sont donc CALCULÉS, comme pour `-spnep` et `-sprentree`.
+	if (SPCapture::RequestedTour())
+	{
+		S.jeu.ares.assurer(S.jeu.agence, S.jeu.epoch_courant());
+		if (S.jeu.ares.initialisee())
+		{
+			fen::game::GameState& Ga = *S.jeu.ares.etat;
+			Ga.career.rank = fen::career::Rank::Directeur;
+			for (const char* Id : {"sondes", "rtg", "gravity_assist", "nav_profonde",
+			                       "capteurs_navigation", "communications",
+			                       "multi_survols", "hohmann_ops",
+			                       "lanceur_leger", "lanceur_moyen", "lanceur_lourd"})
+				if (fen::tech::TechNode* N = Ga.tree.find_mut(Id))
+					N->trl = fen::tech::TRL_OPERATIONAL;
+			const fen::mission::CatalogEntry* Src = nullptr;
+			for (const auto& E : Ga.catalog.entries())
+				if (E.contract.id == "CAT-13") Src = &E;
+			if (Src)
+			{
+				fen::mission::Mission M;
+				M.contract = Src->contract;
+				M.state = fen::mission::MissionState::Design;
+				M.state_entered_days = Ga.clock.now_days();
+				Ga.missions.clear();
+				Ga.missions.push_back(M);
+				S.piloter_premiere_mission();
+				// Une marge de correction de conception NORMALE : sans elle, le
+				// plan part avec zéro marge provisionnée et la capture montrerait
+				// un refus de navigation au lieu du troc qu'on veut photographier.
+				S.mission_plan.program.dv_margin = 150.0;
+				S.mission_plan.program.test_hours = 100.0;
+				S.evaluer_plan();
+				const FString Voulu = SPCapture::TourChoisi();
+				if (!Voulu.IsEmpty())
+					S.choisir_tour(std::string(TCHAR_TO_UTF8(*Voulu)));
+
+				// ═══ ET SUR LE PLAN SYSTÈME, ON FAIT VOLER LE TOUR ═══ [GDD 8.3]
+				// La trace multi-jambes ne se photographie qu'en VOL. Comme
+				// `-spvol`, on ne recule pas la mission : on ATTEND l'opportunité
+				// du tour (le monde avance, exactement ce que le gate impose au
+				// joueur), on fige la trajectoire trouvée, puis on laisse courir
+				// jusqu'au milieu de la première jambe.
+				if (S.cadrage == fen::app::Cadrage::Systeme
+				    && S.tour_bilan_valide(*S.mission_courante()))
+				{
+					auto Avancer = [&S](double Jours)
+					{
+						if (Jours <= 0.0) return;
+						S.jeu.avancer_temps(Jours);
+						S.jeu.ares.assurer(S.jeu.agence, S.jeu.epoch_courant());
+					};
+					const double AttenteJ =
+						(S.tour_bilan.epoque_depart_tdb - S.jeu.epoch_courant()) / fen::cst::DAY;
+					Avancer(AttenteJ);
+					if (fen::mission::Mission* Mp = S.mission_courante())
+					{
+						auto& G3 = *S.jeu.ares.etat;
+						Mp->state = fen::mission::MissionState::Launched;
+						Mp->state_entered_days = G3.clock.now_days();
+						Mp->tof_days = S.tour_bilan.tof_ans * 365.25;
+						Mp->tour_id = std::string(TCHAR_TO_UTF8(*Voulu));
+						Mp->tour_arcs.clear();
+						for (const auto& A : S.tour_bilan.arcs)
+						{
+							fen::mission::Mission::TourArc Ta;
+							Ta.r0[0] = A.r0.x; Ta.r0[1] = A.r0.y; Ta.r0[2] = A.r0.z;
+							Ta.v0[0] = A.v0.x; Ta.v0[1] = A.v0.y; Ta.v0[2] = A.v0.z;
+							Ta.t0_tdb = A.t0; Ta.dt_s = A.dt;
+							Mp->tour_arcs.push_back(Ta);
+						}
+						// Milieu de la première jambe : le vaisseau est loin de la
+						// Terre, l'arc entier est visible, et le survol est devant.
+						if (!Mp->tour_arcs.empty())
+							Avancer(0.5 * (Mp->tour_arcs[0].dt_s
+							               + (Mp->tour_arcs.size() > 1 ? Mp->tour_arcs[1].dt_s : 0.0))
+							        / fen::cst::DAY);
+					}
+				}
+			}
+		}
 	}
 	// `-spcadence=N` : fait COULER le temps d'emblée [GDD 14.2], pour vérifier de
 	// bout en bout (date, heure, positions des corps) que deux captures prises à

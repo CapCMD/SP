@@ -39,6 +39,22 @@ struct GameState {
   career::CareerState career;
   career::Character   character;
   career::Notebook    notebook;
+  // ═══ LA PASSATION [GDD 3.4, 3.5, décisions 6 et 7] ═══
+  // « Trois fins de partie seulement : mort NATURELLE (ouvre une passation),
+  // mort OPÉRATIONNELLE (Game Over sec), licenciement. » Le personnage
+  // vieillissait déjà — en temps PROPRE, écart relativiste compris — et pouvait
+  // mourir d'un cancer radio-induit ; mais rien ne lisait `natural_death_due()`
+  // ni n'appelait `career::Succession`, si bien qu'un Architecte de 120 ans
+  // continuait de travailler et qu'un Architecte MORT gardait son poste. La
+  // portée multi-générationnelle que [GDD 3.5] exige pour finir la branche 6
+  // n'existait donc pas.
+  //
+  // `passation_ouverte` = la fin de vie est CONSTATÉE et le successeur n'a pas
+  // encore pris le poste. C'est un état du MODÈLE, pas de l'écran : il se
+  // sauvegarde, sinon quitter pendant la modale ressusciterait le défunt.
+  bool        passation_ouverte{false};
+  std::string passation_motif;      // ce qui a mis fin à la fonction
+  int         generation{1};        // le combientième Architecte occupe le poste
   // LA DOSE DE L'ARCHITECTE [GDD 6.6, 3.4] — elle appartient à la PERSONNE, pas
   // à la mission : `career_sv` ne redescend jamais, et c'est ce qui donne son sens
   // à « un personnage consommé ne revole pas ». Remise à zéro en passation, avec
@@ -177,6 +193,11 @@ struct GameState {
     w.f64(character.birth_world_s);
     w.boolean(character.alive);
     w.boolean(character.operational_death);
+    // LA PASSATION EST UN FAIT DU MONDE (V9) [GDD 3.4] : sans ces trois champs,
+    // quitter pendant la modale ferait revivre le défunt au rechargement.
+    w.boolean(passation_ouverte);
+    w.str(passation_motif);
+    w.i32(static_cast<std::int32_t>(generation));
     w.f64(treasury.balance_musd);
     w.f64(treasury.target_musd);
     w.f64(treasury.reserve_musd);
@@ -224,6 +245,32 @@ struct GameState {
       // DÉCIDÉ de cette durée [décision 10]. Le recalculer au chargement rendrait
       // un vol parti sensible au stock d'antimatière d'aujourd'hui. V5.
       w2.f64(m.beta_croisiere);
+      // Le TOUR figé au feu vert (V6) : il a décidé le Δv ET la durée de transit
+      // ci-dessus, donc il est un fait du vol, pas une préférence d'écran.
+      w2.str(m.tour_id);
+      // Et sa TRAJECTOIRE (V7) : les morceaux réellement parcourus. Sans eux, un
+      // vol rechargé se redessinerait sur un tour recalculé, donc différent.
+      w2.vec(m.tour_arcs, [](save::Writer& w3, const mission::Mission::TourArc& a) {
+        for (int k = 0; k < 3; ++k) w3.f64(a.r0[k]);
+        for (int k = 0; k < 3; ++k) w3.f64(a.v0[k]);
+        w3.f64(a.t0_tdb);
+        w3.f64(a.dt_s);
+      });
+      // Et le VAISSEAU parti (V8) : la pile, ses ergols étage par étage, sa
+      // capsule et sa charge utile. Le recalculer au chargement rendrait la coupe
+      // d'un vol déjà parti sensible à la conception d'aujourd'hui.
+      w2.vec(m.vaisseau_etages, [](save::Writer& w3, const mission::Mission::EtageVol& e) {
+        w3.i32(static_cast<std::int32_t>(e.engine));
+        w3.i32(static_cast<std::int32_t>(e.tank));
+        w3.f64(e.propellant_kg);
+      });
+      w2.i32(static_cast<std::int32_t>(m.vaisseau_capsule));
+      w2.f64(m.vaisseau_payload_kg);
+      // V10 : ce que la mission a COÛTÉ et TRAVERSÉ — les deux tiers du score de
+      // promotion [GDD 3.3] se jugent là-dessus, à l'arrivée.
+      w2.f64(m.cout_engage_musd);
+      w2.i32(static_cast<std::int32_t>(m.crise_avaries));
+      w2.i32(static_cast<std::int32_t>(m.crise_reparees));
       w2.i32(static_cast<std::int32_t>(m.worst_severity));
       w2.boolean(m.any_anomaly);
       w2.boolean(m.flight_flown);
@@ -366,6 +413,17 @@ struct GameState {
     character.birth_world_s = r.f64();
     character.alive = r.boolean();
     character.operational_death = r.boolean();
+    // V9 : une archive plus ancienne décrit une partie de première génération
+    // sans passation en cours — exactement ce qu'elle était.
+    if (r.version() >= 9) {
+      passation_ouverte = r.boolean();
+      passation_motif = r.str();
+      generation = static_cast<int>(r.i32());
+    } else {
+      passation_ouverte = false;
+      passation_motif.clear();
+      generation = 1;
+    }
     treasury.balance_musd = r.f64();
     treasury.target_musd = r.f64();
     treasury.reserve_musd = r.f64();
@@ -407,6 +465,13 @@ struct GameState {
     // une mission sans contrat n'a ni objectif, ni budget, ni prérequis.
     struct MissionSave {
       std::string id; std::int32_t state; double entered, tof, beta;
+      std::string tour;
+      std::vector<mission::Mission::TourArc> tour_arcs;
+      std::vector<mission::Mission::EtageVol> vaisseau;
+      std::int32_t vaisseau_capsule{-1};
+      double vaisseau_payload{0.0};
+      double cout_engage{0.0};
+      std::int32_t crise_av{0}, crise_rep{0};
       std::int32_t worst; bool any, flown, success, has_anom;
       bool nav_eval; double nav_dv, nav_miss;
       bool vrai_ok; double vrai_t, vrai_r[3], vrai_v[3], connu_dv[3];
@@ -422,6 +487,36 @@ struct GameState {
       // porte toute mission non relativiste, donc une relecture sans perte pour
       // tout ce qui a jamais volé jusqu'ici.
       s.beta = r2.version() >= 5 ? r2.f64() : 0.0;
+      // V6 : le tour figé. Une archive V5 retombe sur la chaîne vide, c'est-à-dire
+      // le transfert direct — ce que volaient toutes les missions d'avant.
+      s.tour = r2.version() >= 6 ? r2.str() : std::string();
+      if (r2.version() >= 7)
+        s.tour_arcs = r2.vec<mission::Mission::TourArc>([](save::Reader& r3) {
+          mission::Mission::TourArc a;
+          for (int k = 0; k < 3; ++k) a.r0[k] = r3.f64();
+          for (int k = 0; k < 3; ++k) a.v0[k] = r3.f64();
+          a.t0_tdb = r3.f64();
+          a.dt_s = r3.f64();
+          return a;
+        });
+      // V8 : le vaisseau figé. Une archive V7 retombe sur une liste vide — un vol
+      // sans coupe, donc le marqueur, exactement ce qu'elle affichait.
+      if (r2.version() >= 8) {
+        s.vaisseau = r2.vec<mission::Mission::EtageVol>([](save::Reader& r3) {
+          mission::Mission::EtageVol e;
+          e.engine = static_cast<int>(r3.i32());
+          e.tank = static_cast<int>(r3.i32());
+          e.propellant_kg = r3.f64();
+          return e;
+        });
+        s.vaisseau_capsule = r2.i32();
+        s.vaisseau_payload = r2.f64();
+      }
+      if (r2.version() >= 10) {
+        s.cout_engage = r2.f64();
+        s.crise_av = r2.i32();
+        s.crise_rep = r2.i32();
+      }
       s.worst = r2.i32(); s.any = r2.boolean(); s.flown = r2.boolean();
       s.success = r2.boolean(); s.has_anom = r2.boolean();
       s.nav_eval = r2.boolean(); s.nav_dv = r2.f64(); s.nav_miss = r2.f64();
@@ -449,6 +544,14 @@ struct GameState {
       m.state_entered_days = s.entered;
       m.tof_days = s.tof;
       m.beta_croisiere = s.beta;
+      m.tour_id = s.tour;
+      m.tour_arcs = s.tour_arcs;
+      m.vaisseau_etages = s.vaisseau;
+      m.vaisseau_capsule = static_cast<int>(s.vaisseau_capsule);
+      m.vaisseau_payload_kg = s.vaisseau_payload;
+      m.cout_engage_musd = s.cout_engage;
+      m.crise_avaries = static_cast<int>(s.crise_av);
+      m.crise_reparees = static_cast<int>(s.crise_rep);
       m.worst_severity = static_cast<mission::Severity>(s.worst);
       m.any_anomaly = s.any;
       m.flight_flown = s.flown;

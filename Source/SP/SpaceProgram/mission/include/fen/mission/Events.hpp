@@ -65,11 +65,41 @@ struct EventSpec {
   double phase_factor_critical{3.0};  // multiplicateur en manœuvre/EDL
 };
 
+// ═══════════════════════════════════════════════════════════════════════════
+// LE SUPPORT-VIE TOMBE TOUS LES 74 JOURS, ET C'EST MESURÉ [Annexe E, GDD 12.3.1]
+// ═══════════════════════════════════════════════════════════════════════════
+// La doc portait depuis deux passes : « ~1 avarie par 400 jours toutes causes
+// confondues, ce qui est BAS pour un véhicule habité réel. NON TOUCHÉ FAUTE DE
+// SOURCE. » La source existe, elle est publiée, et elle est de la NASA.
+//
+// L'ISS a quatre sous-systèmes de support-vie (OGS oxygène, CDRA épuration du
+// CO2, UPA urine, WPA eau) dont les MTBF **en vol** vont de 5 000 à 14 000 h ;
+// mis en série, l'ECLSS de l'ISS a **au plus 1 780 h de MTBF, soit 0,20 an** —
+// **74,2 jours**. C'est le chiffre que la littérature de dimensionnement des
+// rechanges martiennes utilise (Owens & de Weck, ICES/NTRS), et il est cohérent
+// avec lui-même : quatre sous-systèmes à ~7 100 h en série donnent bien 1 780 h.
+//
+// Le modèle disait **8,0e-4/jour**, soit un MTBF de 1 250 jours : **17 fois trop
+// optimiste**. Corrigé à 1/74,2 j. Ce n'est pas un durcissement de gameplay,
+// c'est la mesure — et le même corpus explique pourquoi une mission martienne
+// emporte **3,9 à 6,0 t de rechanges d'ECLSS**.
+//
+// LA NORMALISATION TOMBE JUSTE : `effective_rate` module ce taux par
+// (1 − R)/0,02, c'est-à-dire qu'il vaut pour **R = 0,98** — du matériel réel et
+// mûr, très exactement ce que l'ISS mesure. Un vaisseau mieux conçu casse moins.
+//
+// ⚠ LES QUATRE AUTRES TAUX N'ONT PAS BOUGÉ : je n'ai de source publiée que pour
+// l'ECLSS, et la corriger suffit à redresser le total (l'ECLSS domine désormais,
+// ce qui est le cas sur l'ISS). Les inventer serait retomber dans le piège n°86
+// par l'autre bout.
+inline constexpr double ISS_ECLSS_MTBF_HOURS = 1780.0;   // NASA/NTRS, MTBF en vol
+inline constexpr double ECLSS_FAULT_PER_DAY  = 24.0 / ISS_ECLSS_MTBF_HOURS;  // 1,348e-2
+
 inline const std::vector<EventSpec>& event_library() {
   static const std::vector<EventSpec> v = {
       {EventKind::Micrometeorite,     1.0e-4, false, 1.0},
       {EventKind::SolarParticleEvent, 0.0,    false, 1.0},  // taux via SpaceWeather
-      {EventKind::LifeSupportFault,   8.0e-4, true,  2.0},
+      {EventKind::LifeSupportFault,   ECLSS_FAULT_PER_DAY, true, 2.0},   // ISS mesure
       {EventKind::MedicalEmergency,   5.0e-4, true,  1.5},
       {EventKind::CommLoss,           6.0e-4, false, 2.0},
       {EventKind::PowerFault,         4.0e-4, false, 2.0},
